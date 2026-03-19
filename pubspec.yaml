@@ -1,0 +1,44 @@
+name: context
+description: "Context - browse and rename local Codex sessions."
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.10.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  file_picker: ^10.3.10
+  path: ^1.9.1
+  provider: ^6.1.5
+  shared_preferences: ^2.3.5
+  rinf: ^8.9.1
+  meta: ^1.17.0
+  tuple: ^2.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  msix: ^3.16.13
+
+msix_config:
+  display_name: Context
+  publisher_display_name: Context
+  identity_name: com.zeropass.context
+  msix_version: 0.1.0.0
+  output_name: Context
+  install_certificate: false
+  capabilities: internetClient
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Oxanium
+      fonts:
+        - asset: assets/fonts/Oxanium-wght.ttf

@@ -1,0 +1,62 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+windows/flutter/ephemeral/
+linux/flutter/ephemeral/
+
+# AppX outputs (created by scripts)
+*.appx
+*.appx.version.txt
+USBWSL-portable/
+
+# Local config (contains secrets)
+config.txt
+*:Zone.Identifier
+
+# Backend build artifacts
+backend/.venv/
+backend/__pycache__/
+backend/dist/
+backend/build/
+
+# Legacy folder (kept for reference)
+_legacy_pyappx/
+
+# Rust related
+/.cargo/
+/target/
+
+# Generated signals
+/lib/src/bincode
+/lib/src/serde
+/lib/src/bindings
+
+# SD flash images (store locally; do not commit)
+/flash image/*
+!/flash image/.gitkeep

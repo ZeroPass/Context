@@ -1,0 +1,49 @@
+name: Windows packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.38.6"
+          cache: true
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Tests
+        run: flutter test
+
+      # Builds Windows + generates AppxManifest/resources (msix:build) + packs/signs .appx
+      - name: Build APPX
+        shell: pwsh
+        run: ./scripts/build_appx.ps1
+
+      # Reuse the already-generated msix build files, pack/sign .msix
+      - name: Build MSIX
+        run: dart run msix:pack
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: saladui-windows-packages
+          if-no-files-found: error
+          path: |
+            build/windows/**/runner/Release/SaladUI.appx
+            build/windows/**/runner/Release/SaladUI.msix
+
