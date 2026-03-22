@@ -29,6 +29,7 @@ messages = "0.3.1"
 anyhow = "1.0.89"
 serde_json = "1.0.149"
 regex = "1.11.1"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 
 # Uncomment below to target the web.
 # tokio_with_wasm = { version = "0.8.5", features = ["rt", "macros", "time"] }

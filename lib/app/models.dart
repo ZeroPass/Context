@@ -1,5 +1,37 @@
 enum ConfigItemKind { group, session, groupEnd }
 
+class RecentContext {
+  const RecentContext({
+    required this.id,
+    required this.title,
+    required this.updatedAt,
+  });
+
+  factory RecentContext.fromJson(Map<String, dynamic> json) {
+    return RecentContext(
+      id: (json['id'] ?? '').toString(),
+      title: (json['title'] ?? '').toString(),
+      updatedAt: (json['updated_at'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final String id;
+  final String title;
+  final int updatedAt;
+
+  String get shortId {
+    final value = id.trim();
+    if (value.isEmpty) {
+      return '';
+    }
+    final lastDash = value.lastIndexOf('-');
+    final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
+    return tail.isEmpty ? value : tail;
+  }
+
+  String get displayTitle => title.trim().isEmpty ? shortId : title.trim();
+}
+
 class ConfigItem {
   const ConfigItem({
     required this.kind,
@@ -7,6 +39,7 @@ class ConfigItem {
     required this.name,
     required this.commandId,
     required this.colorHex,
+    required this.fast,
   });
 
   factory ConfigItem.fromJson(Map<String, dynamic> json) {
@@ -21,6 +54,7 @@ class ConfigItem {
       name: (json['name'] ?? '').toString(),
       commandId: (json['command_id'] ?? '').toString(),
       colorHex: (json['color_hex'] ?? '').toString(),
+      fast: json['fast'] == true,
     );
   }
 
@@ -35,6 +69,7 @@ class ConfigItem {
       name: name,
       commandId: '',
       colorHex: colorHex,
+      fast: false,
     );
   }
 
@@ -48,6 +83,7 @@ class ConfigItem {
       name: name,
       commandId: commandId,
       colorHex: '',
+      fast: false,
     );
   }
 
@@ -58,6 +94,7 @@ class ConfigItem {
       name: '',
       commandId: '',
       colorHex: '',
+      fast: false,
     );
   }
 
@@ -66,6 +103,7 @@ class ConfigItem {
   final String name;
   final String commandId;
   final String colorHex;
+  final bool fast;
 
   bool get isGroup => kind == ConfigItemKind.group;
 
@@ -77,12 +115,19 @@ class ConfigItem {
 
   String get shortId {
     final value = commandId.trim().isEmpty ? id.trim() : commandId.trim();
-    return value.length <= 8 ? value : value.substring(0, 8);
+    if (value.isEmpty) {
+      return '';
+    }
+    final lastDash = value.lastIndexOf('-');
+    final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
+    return tail.isEmpty ? value : tail;
   }
 
-  String get resumeCommand => 'codex resume $commandId';
+  String get resumeCommand =>
+      fast ? 'codex resume $commandId --full-auto' : 'codex resume $commandId';
 
-  String get forkCommand => 'codex fork $commandId';
+  String get forkCommand =>
+      fast ? 'codex fork $commandId --full-auto' : 'codex fork $commandId';
 
   ConfigItem copyWith({
     ConfigItemKind? kind,
@@ -90,6 +135,7 @@ class ConfigItem {
     String? name,
     String? commandId,
     String? colorHex,
+    bool? fast,
   }) {
     return ConfigItem(
       kind: kind ?? this.kind,
@@ -97,6 +143,7 @@ class ConfigItem {
       name: name ?? this.name,
       commandId: commandId ?? this.commandId,
       colorHex: colorHex ?? this.colorHex,
+      fast: fast ?? this.fast,
     );
   }
 
@@ -110,5 +157,6 @@ class ConfigItem {
     'name': name,
     'command_id': commandId,
     'color_hex': colorHex,
+    'fast': fast,
   };
 }

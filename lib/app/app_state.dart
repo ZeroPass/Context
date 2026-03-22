@@ -12,7 +12,7 @@ import 'models.dart';
 
 enum _PendingOpKind { load, save }
 
-enum ThemeAppearance { light, dim, dark }
+enum ThemeAppearance { light, sepia, dim, dark }
 
 class _PendingOp {
   const _PendingOp({required this.kind, required this.completer});
@@ -57,11 +57,13 @@ class AppState extends ChangeNotifier {
   bool busy = false;
   bool dirty = false;
   bool autosaveEnabled = true;
+  String filterQuery = '';
   String? status;
   String? lastError;
 
   List<ConfigItem> items = const <ConfigItem>[];
   List<String> warnings = const <String>[];
+  List<RecentContext> recentContexts = const <RecentContext>[];
 
   @override
   void dispose() {
@@ -101,6 +103,32 @@ class AppState extends ChangeNotifier {
 
   List<ConfigItem> get groups =>
       items.where((item) => item.isGroup).toList(growable: false);
+
+  bool get hasFilter => filterQuery.trim().isNotEmpty;
+
+  List<int> get filteredSessionIndices {
+    final query = filterQuery.trim().toLowerCase();
+    if (query.isEmpty) {
+      return const <int>[];
+    }
+
+    final out = <int>[];
+    for (var index = 0; index < items.length; index += 1) {
+      final item = items[index];
+      if (!item.isSession) {
+        continue;
+      }
+      final haystacks = <String>[
+        item.displayName.toLowerCase(),
+        item.commandId.toLowerCase(),
+        item.shortId.toLowerCase(),
+      ];
+      if (haystacks.any((value) => value.contains(query))) {
+        out.add(index);
+      }
+    }
+    return out;
+  }
 
   String _resolveInitialMarkdownPath(String? savedPath) {
     final saved = (savedPath ?? '').trim();
@@ -274,6 +302,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void setFilterQuery(String value) {
+    if (filterQuery == value) {
+      return;
+    }
+    filterQuery = value;
+    notifyListeners();
+  }
+
   Future<void> loadConfig({String? markdownPath}) async {
     if (markdownPath != null) {
       sessionsMarkdownPath = markdownPath.trim();
@@ -370,6 +406,17 @@ class AppState extends ChangeNotifier {
 
   void renameSession(int index, String title) => renameItem(index, title);
 
+  void toggleSessionFast(int index) {
+    if (index < 0 || index >= items.length || !items[index].isSession) {
+      return;
+    }
+
+    final updated = List<ConfigItem>.from(items);
+    final item = updated[index];
+    updated[index] = item.copyWith(fast: !item.fast);
+    _applyItems(updated);
+  }
+
   void updateGroup(
     int index, {
     required String name,
@@ -406,15 +453,28 @@ class AppState extends ChangeNotifier {
     required String sessionInput,
     required String title,
     String? groupId,
+    bool fast = false,
   }) {
     final commandId = _extractCommandId(sessionInput);
     final insertIndex = _insertIndexForGroup(groupId);
     final updated = List<ConfigItem>.from(items)
       ..insert(
         insertIndex,
-        ConfigItem.session(commandId: commandId, name: title.trim()),
+        ConfigItem.session(commandId: commandId, name: title.trim()).copyWith(
+          fast: fast,
+        ),
       );
     _applyItems(updated);
+  }
+
+  bool hasSessionId(String sessionId) {
+    final normalized = sessionId.trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    return items.any(
+      (item) => item.isSession && item.commandId.trim().toLowerCase() == normalized,
+    );
   }
 
   int _insertIndexForGroup(String? groupId) {
@@ -574,6 +634,15 @@ class AppState extends ChangeNotifier {
     _applyItems(updated);
   }
 
+  void deleteSession(int index) {
+    if (index < 0 || index >= items.length || !items[index].isSession) {
+      return;
+    }
+
+    final updated = List<ConfigItem>.from(items)..removeAt(index);
+    _applyItems(updated);
+  }
+
   void _moveGroupBlock(int groupIndex, int insertIndex) {
     final endIndex = groupEndIndexForGroup(groupIndex);
     if (endIndex == null) {
@@ -689,6 +758,7 @@ class AppState extends ChangeNotifier {
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     items = _decodeItems(state.itemsJson);
     warnings = _decodeWarnings(state.warningsJson);
+    recentContexts = _decodeRecentContexts(state.recentContextsJson);
     notifyListeners();
   }
 
@@ -731,6 +801,19 @@ class AppState extends ChangeNotifier {
       return const <String>[];
     }
     return decoded.map((item) => item.toString()).toList(growable: false);
+  }
+
+  List<RecentContext> _decodeRecentContexts(String jsonText) {
+    final decoded = jsonDecode(jsonText);
+    if (decoded is! List) {
+      return const <RecentContext>[];
+    }
+    return decoded
+        .whereType<Map>()
+        .map(
+          (item) => RecentContext.fromJson(Map<String, dynamic>.from(item)),
+        )
+        .toList(growable: false);
   }
 
   String _extractCommandId(String input) {

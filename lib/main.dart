@@ -60,6 +60,9 @@ class _ContextAppState extends State<ContextApp> {
           if (state.themeAppearance == ThemeAppearance.light) {
             brightness = Brightness.light;
             scheme = lightScheme;
+          } else if (state.themeAppearance == ThemeAppearance.sepia) {
+            brightness = Brightness.light;
+            scheme = _buildSepiaScheme(lightScheme);
           } else if (state.themeAppearance == ThemeAppearance.dim) {
             brightness = Brightness.dark;
             scheme = _buildDimScheme(lightScheme, darkScheme);
@@ -198,6 +201,66 @@ class _ContextAppState extends State<ContextApp> {
         darkScheme.inversePrimary,
         lightScheme.inversePrimary,
         0.22,
+      ),
+    );
+  }
+
+  ColorScheme _buildSepiaScheme(ColorScheme lightScheme) {
+    Color mix(Color base, Color target, double amount) {
+      return Color.lerp(base, target, amount)!;
+    }
+
+    const paper = Color(0xFFF3E7CF);
+    const paperBright = Color(0xFFFBF5E8);
+    const paperDeep = Color(0xFFE4D3B2);
+    const paperMid = Color(0xFFEBDDC2);
+    const ink = Color(0xFF2E241A);
+    const softInk = Color(0xFF5C4B39);
+    const outline = Color(0xFFA79274);
+    const outlineSoft = Color(0xFFD4C2A6);
+    const warmPrimary = Color(0xFFA56A2A);
+    const warmSecondary = Color(0xFF8E7450);
+    const warmTertiary = Color(0xFF7C6843);
+
+    return lightScheme.copyWith(
+      primary: mix(lightScheme.primary, warmPrimary, 0.18),
+      secondary: mix(lightScheme.secondary, warmSecondary, 0.22),
+      tertiary: mix(lightScheme.tertiary, warmTertiary, 0.20),
+      primaryContainer: mix(lightScheme.primaryContainer, paperDeep, 0.42),
+      secondaryContainer: mix(lightScheme.secondaryContainer, paperMid, 0.40),
+      tertiaryContainer: mix(lightScheme.tertiaryContainer, paperDeep, 0.36),
+      surface: paper,
+      surfaceDim: mix(lightScheme.surfaceDim, paperDeep, 0.72),
+      surfaceBright: paperBright,
+      surfaceContainerLowest: paperBright,
+      surfaceContainerLow: mix(lightScheme.surfaceContainerLow, paper, 0.70),
+      surfaceContainer: mix(lightScheme.surfaceContainer, paperMid, 0.74),
+      surfaceContainerHigh: mix(
+        lightScheme.surfaceContainerHigh,
+        paperDeep,
+        0.78,
+      ),
+      surfaceContainerHighest: mix(
+        lightScheme.surfaceContainerHighest,
+        paperDeep,
+        0.88,
+      ),
+      onSurface: ink,
+      onSurfaceVariant: softInk,
+      onPrimaryContainer: ink,
+      onSecondaryContainer: ink,
+      onTertiaryContainer: ink,
+      outline: outline,
+      outlineVariant: outlineSoft,
+      shadow: const Color(0x331A120A),
+      scrim: const Color(0x661A120A),
+      surfaceTint: mix(lightScheme.surfaceTint, warmPrimary, 0.20),
+      inverseSurface: const Color(0xFF2F251B),
+      onInverseSurface: const Color(0xFFF7F0E2),
+      inversePrimary: mix(
+        lightScheme.inversePrimary,
+        const Color(0xFFE5B16D),
+        0.30,
       ),
     );
   }

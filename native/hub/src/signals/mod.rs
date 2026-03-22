@@ -34,6 +34,7 @@ pub struct UiState {
     pub sessions_markdown_path: String,
     pub items_json: String,
     pub warnings_json: String,
+    pub recent_contexts_json: String,
 }
 
 #[derive(Serialize, RustSignal)]
