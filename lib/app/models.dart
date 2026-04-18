@@ -5,6 +5,7 @@ class RecentContext {
     required this.id,
     required this.title,
     required this.updatedAt,
+    this.forkedFromId,
   });
 
   factory RecentContext.fromJson(Map<String, dynamic> json) {
@@ -12,12 +13,16 @@ class RecentContext {
       id: (json['id'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
       updatedAt: (json['updated_at'] as num?)?.toInt() ?? 0,
+      forkedFromId: (json['forked_from_id'] ?? '').toString().trim().isEmpty
+          ? null
+          : (json['forked_from_id'] ?? '').toString().trim(),
     );
   }
 
   final String id;
   final String title;
   final int updatedAt;
+  final String? forkedFromId;
 
   String get shortId {
     final value = id.trim();
@@ -30,6 +35,50 @@ class RecentContext {
   }
 
   String get displayTitle => title.trim().isEmpty ? shortId : title.trim();
+
+  bool get isForked => forkedFromId?.trim().isNotEmpty == true;
+}
+
+class LastAnswer {
+  const LastAnswer({
+    required this.id,
+    required this.title,
+    required this.updatedAt,
+    required this.answerText,
+    required this.sessionPath,
+  });
+
+  factory LastAnswer.fromJson(Map<String, dynamic> json) {
+    return LastAnswer(
+      id: (json['id'] ?? '').toString(),
+      title: (json['title'] ?? '').toString(),
+      updatedAt: (json['updated_at'] as num?)?.toInt() ?? 0,
+      answerText: (json['answer_text'] ?? '').toString(),
+      sessionPath: (json['session_path'] ?? '').toString(),
+    );
+  }
+
+  final String id;
+  final String title;
+  final int updatedAt;
+  final String answerText;
+  final String sessionPath;
+
+  String get shortId {
+    final value = id.trim();
+    if (value.isEmpty) {
+      return '';
+    }
+    final lastDash = value.lastIndexOf('-');
+    final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
+    return tail.isEmpty ? value : tail;
+  }
+
+  String get displayTitle => title.trim().isEmpty ? shortId : title.trim();
+
+  String get resumeCommand => 'codex resume $id';
+
+  String get forkCommand => 'codex fork $id';
 }
 
 class ConfigItem {

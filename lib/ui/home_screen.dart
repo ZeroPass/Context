@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -8,8 +11,116 @@ import '../app/models.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
 
+class _InlineRun {
+  const _InlineRun.text(this.text)
+    : copyText = null,
+      openTarget = null;
+
+  const _InlineRun.copy({
+    required this.text,
+    required this.copyText,
+    this.openTarget,
+  });
+
+  final String text;
+  final String? copyText;
+  final String? openTarget;
+
+  bool get isCopyable => copyText != null;
+
+  bool get isOpenable => openTarget != null;
+}
+
+class _PassiveTooltip extends StatefulWidget {
+  const _PassiveTooltip({
+    required this.message,
+    required this.child,
+  });
+
+  final String message;
+  final Widget child;
+
+  @override
+  State<_PassiveTooltip> createState() => _PassiveTooltipState();
+}
+
+class _PassiveTooltipState extends State<_PassiveTooltip> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasMessage = widget.message.trim().isNotEmpty;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        children: [
+          widget.child,
+          if (_hovered && hasMessage)
+            Positioned(
+              top: -34,
+              left: -48,
+              right: -48,
+              child: IgnorePointer(
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 240),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: scheme.inverseSurface.withValues(alpha: 0.96),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: scheme.outlineVariant.withValues(alpha: 0.55),
+                            width: 0.7,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.14),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          widget.message,
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.onInverseSurface,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
+
+  Widget _tooltip(String message, Widget child) {
+    return _PassiveTooltip(
+      message: message,
+      child: child,
+    );
+  }
 
   Future<void> _showError(BuildContext context, Object error) async {
     if (!context.mounted) {
@@ -62,6 +173,26 @@ class HomeScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _createExampleMarkdown(
+    BuildContext context,
+    AppState state,
+  ) async {
+    try {
+      final path = await state.createExampleMarkdownFile();
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Example file created at $path')));
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
   Future<void> _save(BuildContext context, AppState state) async {
     try {
       await state.saveConfig();
@@ -90,7 +221,30 @@ class HomeScreen extends StatelessWidget {
     }
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text('$label command copied.')));
+    ).showSnackBar(SnackBar(content: Text('$label copied.')));
+  }
+
+  Future<void> _openReference(
+    BuildContext context,
+    String target,
+    String label,
+  ) async {
+    try {
+      await context.read<AppState>().openReference(target);
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+      return;
+    }
+
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('$label opened.')));
   }
 
   Future<void> _renameItem(
@@ -170,19 +324,19 @@ class HomeScreen extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextField(
-                  controller: commandController,
+                  controller: nameController,
                   autofocus: true,
                   decoration: const InputDecoration(
-                    labelText: 'Session id or codex command',
-                    hintText: 'codex resume <id>',
+                    labelText: 'Name',
+                    hintText: 'Optional display name',
                   ),
                 ),
                 const SizedBox(height: 12),
                 TextField(
-                  controller: nameController,
+                  controller: commandController,
                   decoration: const InputDecoration(
-                    labelText: 'Name',
-                    hintText: 'Optional display name',
+                    labelText: 'Session id or codex command',
+                    hintText: 'codex resume <id>',
                   ),
                 ),
               ],
@@ -225,11 +379,12 @@ class HomeScreen extends StatelessWidget {
     AppState state,
     RecentContext item,
   ) async {
+    final prefilledName = _prefilledRecentContextName(state, item);
     await _addSession(
       context,
       state,
       initialSessionInput: item.id,
-      initialName: item.displayTitle,
+      initialName: prefilledName,
     );
   }
 
@@ -293,6 +448,43 @@ class HomeScreen extends StatelessWidget {
     state.deleteSession(index);
   }
 
+  String _configuredSessionTitle(
+    AppState state,
+    String sessionId,
+    String fallback,
+  ) {
+    final normalized = sessionId.trim().toLowerCase();
+    for (final item in state.items) {
+      if (!item.isSession) {
+        continue;
+      }
+      if (item.commandId.trim().toLowerCase() != normalized) {
+        continue;
+      }
+      final configured = item.displayName.trim();
+      if (configured.isNotEmpty) {
+        return configured;
+      }
+      break;
+    }
+
+    final trimmedFallback = fallback.trim();
+    return trimmedFallback.isEmpty ? sessionId.trim() : trimmedFallback;
+  }
+
+  String _prefilledRecentContextName(AppState state, RecentContext item) {
+    final parentId = item.forkedFromId?.trim() ?? '';
+    if (parentId.isNotEmpty) {
+      final parentTitle = _configuredSessionTitle(state, parentId, '');
+      final normalizedParent = parentTitle.trim();
+      if (normalizedParent.isNotEmpty && normalizedParent != parentId) {
+        return '$normalizedParent fork';
+      }
+    }
+
+    return _configuredSessionTitle(state, item.id, item.displayTitle);
+  }
+
   Widget _buildFastToggle(
     BuildContext context,
     AppState state,
@@ -302,9 +494,9 @@ class HomeScreen extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final active = item.fast;
 
-    return Tooltip(
-      message: active ? 'Fast session on' : 'Fast session off',
-      child: Material(
+    return _tooltip(
+      active ? 'Fast session on' : 'Fast session off',
+      Material(
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(999),
@@ -438,18 +630,20 @@ class HomeScreen extends StatelessWidget {
   }
 
   Future<void> _showSettingsDialog(BuildContext context, AppState state) async {
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setState) => AlertDialog(
-            title: const Text('Settings'),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+    final prefixController = TextEditingController(text: state.answerPathPrefix);
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+            builder: (context, setState) => AlertDialog(
+              title: const Text('Settings'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   Text(
                     'Markdown file',
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
@@ -483,6 +677,11 @@ class HomeScreen extends StatelessWidget {
                       OutlinedButton.icon(
                         onPressed: () async {
                           await _pickMarkdownFile(context, state);
+                          prefixController.text = state.answerPathPrefix;
+                          prefixController.selection =
+                              TextSelection.collapsed(
+                                offset: prefixController.text.length,
+                              );
                           setState(() {});
                         },
                         icon: const Icon(Icons.description_outlined, size: 18),
@@ -494,6 +693,21 @@ class HomeScreen extends StatelessWidget {
                             : () => _reload(context, state),
                         icon: const Icon(Icons.refresh_rounded, size: 18),
                         label: const Text('Reload'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: state.busy
+                            ? null
+                            : () async {
+                                await _createExampleMarkdown(context, state);
+                                prefixController.text = state.answerPathPrefix;
+                                prefixController.selection =
+                                    TextSelection.collapsed(
+                                      offset: prefixController.text.length,
+                                    );
+                                setState(() {});
+                              },
+                        icon: const Icon(Icons.auto_awesome_outlined, size: 18),
+                        label: const Text('Create Example File'),
                       ),
                     ],
                   ),
@@ -517,6 +731,45 @@ class HomeScreen extends StatelessWidget {
                               },
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Expand Last Answer paths',
+                          style: Theme.of(context).textTheme.labelLarge
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                      Switch(
+                        value: state.augmentAnswerPathsEnabled,
+                        onChanged: (value) {
+                          state.setAugmentAnswerPathsEnabled(value);
+                          setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: prefixController,
+                    onChanged: (value) {
+                      state.setAnswerPathPrefix(value);
+                      setState(() {});
+                    },
+                    decoration: const InputDecoration(
+                      labelText: 'Workspace path prefix',
+                      hintText:
+                          r'\\wsl.localhost\Ubuntu-24.04\home\user\codex-out',
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Best effort expansion for relative repo paths shown in Last Answer.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 12),
                   Text(
@@ -570,10 +823,9 @@ class HomeScreen extends StatelessWidget {
                         .map((value) {
                           final selected = value == state.themeSeedColorValue;
                           final color = Color(value);
-                          return Tooltip(
-                            message:
-                                '#${value.toRadixString(16).substring(2).toUpperCase()}',
-                            child: InkWell(
+                          return _tooltip(
+                            '#${value.toRadixString(16).substring(2).toUpperCase()}',
+                            InkWell(
                               onTap: () {
                                 state.setThemeSeedColor(value);
                                 setState(() {});
@@ -615,19 +867,22 @@ class HomeScreen extends StatelessWidget {
                         })
                         .toList(growable: false),
                   ),
-                ],
+                  ],
+                ),
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Close'),
+                ),
+              ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('Close'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
+          );
+        },
+      );
+    } finally {
+      prefixController.dispose();
+    }
   }
 
   Widget _buildCounterChip(
@@ -684,6 +939,36 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
+  Widget _buildLoadedLine(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    final message =
+        (state.status ?? '').trim().isNotEmpty
+        ? state.status!.trim()
+        : state.sessionsMarkdownPath.trim().isEmpty
+        ? 'No markdown file selected.'
+        : 'Loaded ${state.items.length} item(s).';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          message,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: scheme.onSurfaceVariant,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.1,
+          ),
+        ),
+        if (state.busy) ...[
+          const SizedBox(height: 8),
+          const LinearProgressIndicator(minHeight: 2),
+        ],
+      ],
+    );
+  }
+
   Widget _buildPanelHeader(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
@@ -697,8 +982,6 @@ class HomeScreen extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSearchField(context, state),
-          const SizedBox(height: 10),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -741,33 +1024,10 @@ class HomeScreen extends StatelessWidget {
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatus(BuildContext context, AppState state) {
-    final scheme = Theme.of(context).colorScheme;
-    if ((state.status == null || state.status!.trim().isEmpty) && !state.busy) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (state.status != null && state.status!.trim().isNotEmpty)
-            Text(
-              state.status!,
-              style: TextStyle(color: scheme.onSurfaceVariant),
-            ),
-          if (state.busy) ...[
-            if (state.status != null && state.status!.trim().isNotEmpty)
-              const SizedBox(height: 8),
-            const LinearProgressIndicator(minHeight: 2),
-          ],
+          const SizedBox(height: 10),
+          _buildLoadedLine(context, state),
+          const SizedBox(height: 10),
+          _buildSearchField(context, state),
         ],
       ),
     );
@@ -799,6 +1059,11 @@ class HomeScreen extends StatelessWidget {
           const SizedBox(height: 10),
           ...state.recentContexts.map((item) {
             final alreadySaved = state.hasSessionId(item.id);
+            final displayTitle = _configuredSessionTitle(
+              state,
+              item.id,
+              item.displayTitle,
+            );
             return Container(
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
@@ -835,7 +1100,7 @@ class HomeScreen extends StatelessWidget {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      item.displayTitle,
+                      displayTitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -865,73 +1130,690 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildPanel(BuildContext context, AppState state) {
+  Widget _buildContextPanel(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
     final filteredSessionIndices = state.filteredSessionIndices;
 
-    return Expanded(
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-        decoration: BoxDecoration(
-          border: Border.all(color: scheme.outlineVariant, width: 0.7),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: CustomScrollView(
-                slivers: [
-                  SliverToBoxAdapter(child: _buildPanelHeader(context, state)),
-                  SliverToBoxAdapter(child: _buildStatus(context, state)),
-                  if (state.hasFilter && filteredSessionIndices.isEmpty)
-                    const SliverToBoxAdapter(
-                      child: Padding(
-                        padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        child: Text('No matching contexts.'),
-                      ),
-                    )
-                  else if (state.items.isEmpty)
-                    const SliverToBoxAdapter(
-                      child: Padding(
-                        padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        child: Text(
-                          'No items yet. Add a session entry or a group, then drag rows into place and save.',
-                        ),
-                      ),
-                    )
-                  else if (state.hasFilter)
-                    SliverList(
-                      delegate: SliverChildBuilderDelegate((
-                        context,
-                        filteredIndex,
-                      ) {
-                        final actualIndex = filteredSessionIndices[filteredIndex];
-                        return _buildSessionCard(
-                          context,
-                          state,
-                          state.items[actualIndex],
-                          actualIndex,
-                          forceUngrouped: true,
-                          showDragHandle: false,
-                        );
-                      }, childCount: filteredSessionIndices.length),
-                    )
-                  else
-                    SliverReorderableList(
-                      itemCount: state.items.length,
-                      onReorder: state.busy ? (_, _) {} : state.reorderItems,
-                      itemBuilder: (context, index) =>
-                          _buildItem(context, state, state.items[index], index),
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outlineVariant, width: 0.7),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: CustomScrollView(
+              slivers: [
+                SliverToBoxAdapter(child: _buildPanelHeader(context, state)),
+                if (state.hasFilter && filteredSessionIndices.isEmpty)
+                  const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      child: Text('No matching contexts.'),
                     ),
-                  if (!state.hasFilter)
-                    SliverToBoxAdapter(child: _buildRecentContexts(context, state)),
-                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
-                ],
+                  )
+                else if (state.items.isEmpty)
+                  const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      child: Text(
+                        'No items yet. Add a session entry or a group, then drag rows into place and save.',
+                      ),
+                    ),
+                  )
+                else if (state.hasFilter)
+                  SliverList(
+                    delegate: SliverChildBuilderDelegate((
+                      context,
+                      filteredIndex,
+                    ) {
+                      final actualIndex = filteredSessionIndices[filteredIndex];
+                      return _buildSessionCard(
+                        context,
+                        state,
+                        state.items[actualIndex],
+                        actualIndex,
+                        forceUngrouped: true,
+                        showDragHandle: false,
+                      );
+                    }, childCount: filteredSessionIndices.length),
+                  )
+                else
+                  SliverReorderableList(
+                    itemCount: state.items.length,
+                    onReorder: state.busy ? (_, _) {} : state.reorderItems,
+                    itemBuilder: (context, index) =>
+                        _buildItem(context, state, state.items[index], index),
+                  ),
+                if (!state.hasFilter)
+                  SliverToBoxAdapter(child: _buildRecentContexts(context, state)),
+                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildViewTabs(BuildContext context, AppState state) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+      child: TabBar(
+        isScrollable: true,
+        onTap: (index) {
+          if (index == 1) {
+            state.refreshLastAnswers(queueIfBusy: true);
+          }
+        },
+        tabs: const [
+          Tab(text: 'Contexts'),
+          Tab(text: 'Last Answer'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLastAnswersHeader(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: scheme.outlineVariant, width: 0.7),
+        ),
+      ),
+      child: Row(
+        children: [
+          _buildCounterChip(
+            context,
+            label: 'Answers',
+            value: '${state.lastAnswers.length}',
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Latest assistant output from recent Codex sessions',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+                fontWeight: FontWeight.w500,
               ),
             ),
-          ],
+          ),
+          const SizedBox(width: 8),
+          _tooltip(
+            'Refresh Last Answer',
+            IconButton(
+              onPressed: state.lastAnswersBusy
+                  ? null
+                  : () => state.refreshLastAnswers(queueIfBusy: true),
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<_InlineRun> _parseInlineRuns(String text) {
+    final pattern = RegExp(
+      r'\[([^\]]+)\]\(([^)\n]+)\)|`([^`\n]+)`|(https?://[^\s)<>\]]+)|(\\\\wsl(?:\.localhost|\$)\\[^\s`]+)|((?:/|\.\.?/)[^\s`)<>\]]+)|((?:[A-Za-z0-9_.-]+/){1,}[A-Za-z0-9_.:-]+)',
+    );
+    final runs = <_InlineRun>[];
+    var cursor = 0;
+
+    for (final match in pattern.allMatches(text)) {
+      if (match.start > cursor) {
+        runs.add(_InlineRun.text(text.substring(cursor, match.start)));
+      }
+
+      if (match.group(1) != null && match.group(2) != null) {
+        final value = match.group(2)!;
+        runs.add(
+          _InlineRun.copy(
+            text: value,
+            copyText: value,
+            openTarget: value,
+          ),
+        );
+      } else {
+        final copied =
+            match.group(3) ??
+            match.group(4) ??
+            match.group(5) ??
+            match.group(6) ??
+            match.group(7) ??
+            '';
+        runs.add(
+          _InlineRun.copy(
+            text: copied,
+            copyText: copied,
+            openTarget: copied,
+          ),
+        );
+      }
+
+      cursor = match.end;
+    }
+
+    if (cursor < text.length) {
+      runs.add(_InlineRun.text(text.substring(cursor)));
+    }
+
+    return runs;
+  }
+
+  bool _isAbsoluteReference(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
+      return false;
+    }
+    return trimmed.startsWith('http://') ||
+        trimmed.startsWith('https://') ||
+        trimmed.startsWith(r'\\') ||
+        trimmed.startsWith('/') ||
+        RegExp(r'^[A-Za-z]:[\\/]').hasMatch(trimmed);
+  }
+
+  bool _isWebReference(String value) {
+    final trimmed = value.trim();
+    return trimmed.startsWith('http://') || trimmed.startsWith('https://');
+  }
+
+  bool _looksLikeRelativeWorkspacePath(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty || _isAbsoluteReference(trimmed)) {
+      return false;
+    }
+
+    final normalized = trimmed.replaceAll('\\', '/');
+    return normalized.contains('/');
+  }
+
+  String _stripPathDecorators(String value) {
+    var out = value.trim();
+    final hashIndex = out.indexOf('#');
+    if (hashIndex != -1) {
+      out = out.substring(0, hashIndex);
+    }
+    final lineSuffix = RegExp(r'^(.*?)(:\d+(?::\d+)?)$').firstMatch(out);
+    if (lineSuffix != null) {
+      out = lineSuffix.group(1) ?? out;
+    }
+    return out.trim();
+  }
+
+  String _joinPathPrefix(String prefix, String relativePath) {
+    final separator = prefix.endsWith('/') || prefix.endsWith('\\')
+        ? ''
+        : prefix.contains('\\')
+        ? '\\'
+        : '/';
+    final normalizedRelative = relativePath.replaceFirst(
+      RegExp(r'^[.][/]'),
+      '',
+    );
+    final cleanedRelative = normalizedRelative.replaceFirst(
+      RegExp(r'^[\\/]+'),
+      '',
+    );
+    return '$prefix$separator$cleanedRelative';
+  }
+
+  bool _pathExists(String value) {
+    if (value.trim().isEmpty) {
+      return false;
+    }
+    try {
+      return FileSystemEntity.typeSync(value) != FileSystemEntityType.notFound;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _augmentReferenceText(AppState state, String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty ||
+        !state.augmentAnswerPathsEnabled ||
+        state.answerPathPrefix.trim().isEmpty ||
+        !_looksLikeRelativeWorkspacePath(trimmed)) {
+      return trimmed;
+    }
+
+    final prefix = state.answerPathPrefix.trim();
+    final candidate = _joinPathPrefix(prefix, trimmed);
+    final probe = _joinPathPrefix(prefix, _stripPathDecorators(trimmed));
+    if (!_pathExists(probe)) {
+      return trimmed;
+    }
+    return candidate;
+  }
+
+  String? _resolveOpenTarget(AppState state, String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+
+    final resolved = _augmentReferenceText(state, trimmed).trim();
+    if (resolved.isEmpty) {
+      return null;
+    }
+
+    if (_isWebReference(resolved)) {
+      return resolved;
+    }
+
+    final sanitized = _stripPathDecorators(resolved);
+    if (sanitized.isEmpty || !_isAbsoluteReference(sanitized)) {
+      return null;
+    }
+    return sanitized;
+  }
+
+  Widget _buildInlineOpenButton(
+    BuildContext context,
+    String target, {
+    required bool isWeb,
+  }) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 3, right: 1),
+      child: _tooltip(
+        isWeb ? 'Open link' : 'Open path',
+        InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () => _openReference(
+            context,
+            target,
+            isWeb ? 'Link' : 'Path',
+          ),
+          child: Container(
+            padding: const EdgeInsets.all(1.5),
+            decoration: BoxDecoration(
+              color: scheme.primaryContainer.withValues(alpha: 0.36),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Icon(
+              isWeb ? Icons.open_in_new_rounded : Icons.launch_rounded,
+              size: 12,
+              color: scheme.primary,
+            ),
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildInlineText(
+    BuildContext context,
+    String text, {
+    TextStyle? style,
+  }) {
+    final state = context.read<AppState>();
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final baseStyle =
+        style ??
+        theme.textTheme.bodyMedium?.copyWith(height: 1.4) ??
+        const TextStyle(height: 1.4);
+    final spans = <InlineSpan>[];
+
+    for (final run in _parseInlineRuns(text)) {
+      if (!run.isCopyable) {
+        spans.add(TextSpan(text: run.text, style: baseStyle));
+        continue;
+      }
+
+      final resolved = _augmentReferenceText(state, run.copyText!);
+      final openTarget = run.isOpenable
+          ? _resolveOpenTarget(state, run.openTarget!)
+          : null;
+      spans.add(
+        TextSpan(
+          text: resolved,
+          style: baseStyle.copyWith(
+            color: scheme.primary,
+            fontWeight: FontWeight.w600,
+            fontFamily: 'monospace',
+            backgroundColor: scheme.primaryContainer.withValues(alpha: 0.38),
+            decoration: TextDecoration.underline,
+            decorationColor: scheme.primary.withValues(alpha: 0.72),
+          ),
+          recognizer: TapGestureRecognizer()
+            ..onTap = () => _copyCommand(
+              context,
+              resolved,
+              'Reference',
+            ),
+        ),
+      );
+      if (openTarget != null) {
+        spans.add(
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: _buildInlineOpenButton(
+              context,
+              openTarget,
+              isWeb: _isWebReference(openTarget),
+            ),
+          ),
+        );
+      }
+    }
+
+    return Text.rich(TextSpan(children: spans, style: baseStyle));
+  }
+
+  List<Widget> _buildAnswerBlocks(BuildContext context, String text) {
+    final theme = Theme.of(context);
+    final blocks = text
+        .trim()
+        .split(RegExp(r'\n\s*\n'))
+        .where((block) => block.trim().isNotEmpty)
+        .toList(growable: false);
+
+    if (blocks.isEmpty) {
+      return [
+        _buildInlineText(
+          context,
+          'No assistant answer captured yet.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ];
+    }
+
+    final widgets = <Widget>[];
+    for (final block in blocks) {
+      final trimmed = block.trim();
+      if (trimmed.startsWith('```') && trimmed.endsWith('```')) {
+        final code = trimmed
+            .replaceFirst(RegExp(r'^```[^\n]*\n?'), '')
+            .replaceFirst(RegExp(r'\n?```$'), '');
+        widgets.add(
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest.withValues(
+                alpha: 0.42,
+              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: theme.colorScheme.outlineVariant,
+                width: 0.55,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: code.split('\n').map((line) {
+                final style = theme.textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                  height: 1.35,
+                );
+                if (line.isEmpty) {
+                  return const SizedBox(height: 8);
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: _buildInlineText(
+                    context,
+                    line,
+                    style: style,
+                  ),
+                );
+              }).toList(growable: false),
+            ),
+          ),
+        );
+        continue;
+      }
+
+      final lines = trimmed.split('\n');
+      final isBulletBlock = lines.every(
+        (line) => line.trim().startsWith('- ') || line.trim().startsWith('* '),
+      );
+      if (isBulletBlock) {
+        widgets.add(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: lines.map((line) {
+              final content = line.trim().replaceFirst(RegExp(r'^[-*]\s+'), '');
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Icon(
+                        Icons.circle,
+                        size: 6,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _buildInlineText(
+                        context,
+                        content,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(growable: false),
+          ),
+        );
+        continue;
+      }
+
+      final headingMatch = RegExp(r'^\*\*(.+?)\*\*$').firstMatch(trimmed);
+      if (headingMatch != null) {
+        widgets.add(
+          Text(
+            headingMatch.group(1) ?? trimmed,
+            style: theme.textTheme.labelLarge?.copyWith(
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.15,
+            ),
+          ),
+        );
+        continue;
+      }
+
+      widgets.add(
+        _buildInlineText(
+          context,
+          trimmed,
+          style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+        ),
+      );
+    }
+
+    return widgets;
+  }
+
+  Widget _buildLastAnswerCard(
+    BuildContext context,
+    AppState state,
+    LastAnswer item,
+    double width,
+  ) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final blocks = _buildAnswerBlocks(context, item.answerText);
+    final displayTitle = _configuredSessionTitle(
+      state,
+      item.id,
+      item.displayTitle,
+    );
+
+    return Container(
+      width: width,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLowest.withValues(alpha: 0.48),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: scheme.outlineVariant, width: 0.65),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                constraints: const BoxConstraints(minWidth: 68),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: scheme.primaryContainer.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  item.shortId,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  displayTitle,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.1,
+                  ),
+                ),
+              ),
+              _tooltip(
+                'Copy answer',
+                IconButton(
+                  onPressed: () => _copyCommand(
+                    context,
+                    item.answerText,
+                    'Answer',
+                  ),
+                  icon: const Icon(Icons.content_copy_rounded, size: 17),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ...blocks
+              .map(
+                (widget) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: widget,
+                ),
+              )
+              .toList(growable: false),
+          TextButton.icon(
+            onPressed: () =>
+                _copyCommand(context, item.sessionPath, 'Session file'),
+            icon: const Icon(Icons.description_outlined, size: 16),
+            label: const Text('Copy Session File'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLastAnswerPanel(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outlineVariant, width: 0.7),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildLastAnswersHeader(context, state),
+          if (state.lastAnswersBusy)
+            const LinearProgressIndicator(minHeight: 2),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                if (!state.lastAnswersLoaded && !state.lastAnswersBusy) {
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+                    child: Text(
+                      state.lastAnswersStatus?.trim().isNotEmpty == true
+                          ? state.lastAnswersStatus!
+                          : 'Loading last answers in background...',
+                    ),
+                  );
+                }
+
+                if (state.lastAnswersBusy && state.lastAnswers.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+                    child: Text(
+                      state.lastAnswersStatus?.trim().isNotEmpty == true
+                          ? state.lastAnswersStatus!
+                          : 'Loading last answers...',
+                    ),
+                  );
+                }
+
+                if (state.lastAnswers.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+                    child: Text(
+                      state.lastAnswersStatus?.trim().isNotEmpty == true
+                          ? state.lastAnswersStatus!
+                          : 'No recent assistant answers found.',
+                    ),
+                  );
+                }
+
+                final cardWidth = constraints.maxWidth - 28;
+
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: state.lastAnswers
+                        .map(
+                          (item) => Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: _buildLastAnswerCard(
+                              context,
+                              state,
+                              item,
+                              cardWidth,
+                            ),
+                          ),
+                        )
+                        .toList(growable: false),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1072,15 +1954,21 @@ class HomeScreen extends StatelessWidget {
                       child: _buildNameArea(context, state, item, index),
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Edit group',
-                    onPressed: () => _renameItem(context, state, item, index),
-                    icon: const Icon(Icons.palette_outlined, size: 17),
+                  _tooltip(
+                    'Edit group',
+                    IconButton(
+                      onPressed: () =>
+                          _renameItem(context, state, item, index),
+                      icon: const Icon(Icons.palette_outlined, size: 17),
+                    ),
                   ),
-                  IconButton(
-                    tooltip: 'Delete group',
-                    onPressed: () => _deleteGroup(context, state, item, index),
-                    icon: const Icon(Icons.delete_outline_rounded, size: 17),
+                  _tooltip(
+                    'Delete group',
+                    IconButton(
+                      onPressed: () =>
+                          _deleteGroup(context, state, item, index),
+                      icon: const Icon(Icons.delete_outline_rounded, size: 17),
+                    ),
                   ),
                   _buildDragHandle(context, index),
                   const SizedBox(width: 4),
@@ -1186,28 +2074,37 @@ class HomeScreen extends StatelessWidget {
                           child: _buildNameArea(context, state, item, index),
                         ),
                       ),
-                      IconButton(
-                        tooltip: 'Copy resume command',
-                        onPressed: () => _copyCommand(
-                          context,
-                          item.resumeCommand,
-                          'Resume',
+                      _tooltip(
+                        'Copy resume command',
+                        IconButton(
+                          onPressed: () => _copyCommand(
+                            context,
+                            item.resumeCommand,
+                            'Resume',
+                          ),
+                          icon: const Icon(Icons.content_copy_rounded, size: 17),
                         ),
-                        icon: const Icon(Icons.content_copy_rounded, size: 17),
                       ),
-                      IconButton(
-                        tooltip: 'Copy fork command',
-                        onPressed: () => _copyCommand(
-                          context,
-                          item.forkCommand,
-                          'Fork',
+                      _tooltip(
+                        'Copy fork command',
+                        IconButton(
+                          onPressed: () => _copyCommand(
+                            context,
+                            item.forkCommand,
+                            'Fork',
+                          ),
+                          icon: const Icon(Icons.call_split_rounded, size: 17),
                         ),
-                        icon: const Icon(Icons.call_split_rounded, size: 17),
                       ),
-                      IconButton(
-                        tooltip: 'Delete session',
-                        onPressed: () => _deleteSession(state, index),
-                        icon: const Icon(Icons.delete_outline_rounded, size: 17),
+                      _tooltip(
+                        'Delete session',
+                        IconButton(
+                          onPressed: () => _deleteSession(state, index),
+                          icon: const Icon(
+                            Icons.delete_outline_rounded,
+                            size: 17,
+                          ),
+                        ),
                       ),
                       if (showDragHandle) ...[
                         _buildDragHandle(context, index),
@@ -1295,32 +2192,49 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
 
-    return Scaffold(
-      appBar: AppBar(
-        centerTitle: false,
-        title: const Text('Context'),
-        actions: [
-          TextButton.icon(
-            onPressed: state.busy ? null : () => _addSession(context, state),
-            icon: const Icon(Icons.add_link_rounded, size: 18),
-            label: const Text('Add Entry'),
-          ),
-          TextButton.icon(
-            onPressed: state.busy ? null : () => _addGroup(context, state),
-            icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-            label: const Text('Add Group'),
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            onPressed: () => _showSettingsDialog(context, state),
-            icon: const Icon(Icons.settings_outlined),
-          ),
-          const SizedBox(width: 4),
-        ],
-      ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [_buildWarnings(context, state), _buildPanel(context, state)],
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          centerTitle: false,
+          title: const Text('Context'),
+          actions: [
+            TextButton.icon(
+              onPressed: state.busy ? null : () => _addSession(context, state),
+              icon: const Icon(Icons.add_link_rounded, size: 18),
+              label: const Text('Add Entry'),
+            ),
+            TextButton.icon(
+              onPressed: state.busy ? null : () => _addGroup(context, state),
+              icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+              label: const Text('Add Group'),
+            ),
+            _tooltip(
+              'Settings',
+              IconButton(
+                onPressed: () => _showSettingsDialog(context, state),
+                icon: const Icon(Icons.settings_outlined),
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
+        ),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildWarnings(context, state),
+            _buildViewTabs(context, state),
+            Expanded(
+              child: TabBarView(
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  _buildContextPanel(context, state),
+                  _buildLastAnswerPanel(context, state),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

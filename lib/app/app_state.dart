@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../src/bindings/bindings.dart';
 import 'models.dart';
 
-enum _PendingOpKind { load, save }
+enum _PendingOpKind { load, save, open }
 
 enum ThemeAppearance { light, sepia, dim, dark }
 
@@ -21,7 +21,7 @@ class _PendingOp {
   final Completer<void> completer;
 }
 
-class AppState extends ChangeNotifier {
+class AppState extends ChangeNotifier with WidgetsBindingObserver {
   static const themeSeedColors = <int>[
     0xFFFABD2F,
     0xFFFE8019,
@@ -47,6 +47,11 @@ class AppState extends ChangeNotifier {
   StreamSubscription<RustSignalPack<UiState>>? _uiStateSub;
   StreamSubscription<RustSignalPack<OpFinished>>? _opFinishedSub;
   Timer? _autosaveTimer;
+  Timer? _lastAnswersRefreshTimer;
+  bool _pendingLastAnswersRefresh = true;
+  AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
+
+  static const _lastAnswersRefreshInterval = Duration(seconds: 20);
 
   BigInt _nextRequestId = BigInt.one;
   final Map<Uint64, _PendingOp> _pendingOps = <Uint64, _PendingOp>{};
@@ -57,23 +62,32 @@ class AppState extends ChangeNotifier {
   bool busy = false;
   bool dirty = false;
   bool autosaveEnabled = true;
+  bool augmentAnswerPathsEnabled = true;
+  bool lastAnswersBusy = false;
+  bool lastAnswersLoaded = false;
+  String answerPathPrefix = '';
   String filterQuery = '';
   String? status;
   String? lastError;
+  String? lastAnswersStatus;
 
   List<ConfigItem> items = const <ConfigItem>[];
   List<String> warnings = const <String>[];
   List<RecentContext> recentContexts = const <RecentContext>[];
+  List<LastAnswer> lastAnswers = const <LastAnswer>[];
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _autosaveTimer?.cancel();
+    _lastAnswersRefreshTimer?.cancel();
     _uiStateSub?.cancel();
     _opFinishedSub?.cancel();
     super.dispose();
   }
 
   Future<void> init() async {
+    WidgetsBinding.instance.addObserver(this);
     _uiStateSub?.cancel();
     _opFinishedSub?.cancel();
 
@@ -88,13 +102,36 @@ class AppState extends ChangeNotifier {
     sessionsMarkdownPath = _resolveInitialMarkdownPath(
       _prefs?.getString('sessionsMarkdownPath'),
     );
+    augmentAnswerPathsEnabled =
+        _prefs?.getBool('augmentAnswerPathsEnabled') ?? true;
+    answerPathPrefix = (_prefs?.getString('answerPathPrefix') ?? '').trim();
+    if (answerPathPrefix.isEmpty) {
+      answerPathPrefix = _deriveAnswerPathPrefix(sessionsMarkdownPath);
+    }
 
     InitApp(
       themeSeedColorValue: themeSeedColorValue,
       sessionsMarkdownPath: sessionsMarkdownPath,
     ).sendSignalToRust();
 
+    _startLastAnswersRefreshTimer();
     notifyListeners();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleState = state;
+    if (state == AppLifecycleState.resumed) {
+      unawaited(refreshLastAnswers());
+    }
+  }
+
+  void _startLastAnswersRefreshTimer() {
+    _lastAnswersRefreshTimer?.cancel();
+    _lastAnswersRefreshTimer = Timer.periodic(
+      _lastAnswersRefreshInterval,
+      (_) => unawaited(refreshLastAnswers()),
+    );
   }
 
   int get sessionCount => items.where((item) => item.isSession).length;
@@ -128,6 +165,46 @@ class AppState extends ChangeNotifier {
       }
     }
     return out;
+  }
+
+  String _deriveAnswerPathPrefix(String markdownPath) {
+    final trimmed = markdownPath.trim();
+    if (trimmed.isEmpty) {
+      return '';
+    }
+
+    for (final suffix in const <String>[
+      r'\codex sessions.md',
+      '/codex sessions.md',
+    ]) {
+      if (trimmed.endsWith(suffix)) {
+        return trimmed.substring(0, trimmed.length - suffix.length);
+      }
+    }
+
+    final lastSlash = trimmed.lastIndexOf('/');
+    final lastBackslash = trimmed.lastIndexOf('\\');
+    final splitAt = lastSlash > lastBackslash ? lastSlash : lastBackslash;
+    if (splitAt <= 0) {
+      return trimmed;
+    }
+    return trimmed.substring(0, splitAt);
+  }
+
+  void _syncDerivedAnswerPathPrefix(String previousPath, String nextPath) {
+    final current = answerPathPrefix.trim();
+    final previousDerived = _deriveAnswerPathPrefix(previousPath);
+    if (current.isNotEmpty && current != previousDerived) {
+      return;
+    }
+
+    final nextDerived = _deriveAnswerPathPrefix(nextPath);
+    if (answerPathPrefix == nextDerived) {
+      return;
+    }
+
+    answerPathPrefix = nextDerived;
+    _prefs?.setString('answerPathPrefix', answerPathPrefix);
   }
 
   String _resolveInitialMarkdownPath(String? savedPath) {
@@ -302,6 +379,25 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void setAugmentAnswerPathsEnabled(bool value) {
+    if (augmentAnswerPathsEnabled == value) {
+      return;
+    }
+    augmentAnswerPathsEnabled = value;
+    _prefs?.setBool('augmentAnswerPathsEnabled', augmentAnswerPathsEnabled);
+    notifyListeners();
+  }
+
+  void setAnswerPathPrefix(String value) {
+    final normalized = value.trim();
+    if (answerPathPrefix == normalized) {
+      return;
+    }
+    answerPathPrefix = normalized;
+    _prefs?.setString('answerPathPrefix', answerPathPrefix);
+    notifyListeners();
+  }
+
   void setFilterQuery(String value) {
     if (filterQuery == value) {
       return;
@@ -312,16 +408,56 @@ class AppState extends ChangeNotifier {
 
   Future<void> loadConfig({String? markdownPath}) async {
     if (markdownPath != null) {
+      final previousPath = sessionsMarkdownPath;
       sessionsMarkdownPath = markdownPath.trim();
       await _prefs?.setString('sessionsMarkdownPath', sessionsMarkdownPath);
+      _syncDerivedAnswerPathPrefix(previousPath, sessionsMarkdownPath);
     }
+
+    lastAnswersBusy = false;
+    lastAnswersLoaded = false;
+    lastAnswersStatus = 'Loading last answers in background...';
+    lastAnswers = const <LastAnswer>[];
+    _pendingLastAnswersRefresh = true;
+    notifyListeners();
 
     await _runOp(_PendingOpKind.load, (requestId) {
       LoadConfig(
         requestId: requestId,
         sessionsMarkdownPath: sessionsMarkdownPath,
+        loadLastAnswers: false,
       ).sendSignalToRust();
     });
+  }
+
+  void ensureLastAnswersLoaded() {
+    if (lastAnswersLoaded) {
+      return;
+    }
+    refreshLastAnswers(queueIfBusy: true);
+  }
+
+  Future<void> refreshLastAnswers({bool queueIfBusy = false}) async {
+    if (_lifecycleState != AppLifecycleState.resumed ||
+        lastError != null ||
+        sessionsMarkdownPath.trim().isEmpty) {
+      return;
+    }
+
+    if (busy || lastAnswersBusy) {
+      if (queueIfBusy) {
+        _pendingLastAnswersRefresh = true;
+      }
+      return;
+    }
+
+    _pendingLastAnswersRefresh = false;
+
+    LoadConfig(
+      requestId: Uint64.fromBigInt(BigInt.zero),
+      sessionsMarkdownPath: sessionsMarkdownPath,
+      loadLastAnswers: true,
+    ).sendSignalToRust();
   }
 
   Future<void> saveConfig() async {
@@ -335,6 +471,38 @@ class AppState extends ChangeNotifier {
         ),
       ).sendSignalToRust();
     });
+  }
+
+  Future<void> openReference(String target) async {
+    final trimmed = target.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+
+    await _runOp(_PendingOpKind.open, (requestId) {
+      OpenReference(requestId: requestId, target: trimmed).sendSignalToRust();
+    });
+  }
+
+  Future<String> createExampleMarkdownFile({String? markdownPath}) async {
+    final targetPath = (markdownPath ?? sessionsMarkdownPath).trim();
+    if (targetPath.isEmpty) {
+      throw Exception('Pick a markdown path first.');
+    }
+
+    final file = File(targetPath);
+    if (file.existsSync()) {
+      throw Exception('Markdown file already exists: $targetPath');
+    }
+
+    final parent = file.parent;
+    if (!parent.existsSync()) {
+      await parent.create(recursive: true);
+    }
+
+    await file.writeAsString(_buildExampleMarkdown());
+    await loadConfig(markdownPath: targetPath);
+    return targetPath;
   }
 
   void moveItemToIndex(int itemIndex, int insertIndex) {
@@ -755,10 +923,28 @@ class AppState extends ChangeNotifier {
     busy = state.busy;
     status = state.status;
     lastError = state.lastError;
+    lastAnswersBusy = state.lastAnswersBusy;
+    lastAnswersLoaded = state.lastAnswersLoaded;
+    lastAnswersStatus = state.lastAnswersStatus;
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     items = _decodeItems(state.itemsJson);
     warnings = _decodeWarnings(state.warningsJson);
     recentContexts = _decodeRecentContexts(state.recentContextsJson);
+    lastAnswers = _decodeLastAnswers(state.lastAnswersJson);
+    final shouldStartPendingLastAnswersRefresh =
+        _pendingLastAnswersRefresh &&
+        !busy &&
+        lastError == null &&
+        !lastAnswersBusy &&
+        sessionsMarkdownPath.trim().isNotEmpty;
+    if (shouldStartPendingLastAnswersRefresh) {
+      _pendingLastAnswersRefresh = false;
+      LoadConfig(
+        requestId: Uint64.fromBigInt(BigInt.zero),
+        sessionsMarkdownPath: sessionsMarkdownPath,
+        loadLastAnswers: true,
+      ).sendSignalToRust();
+    }
     notifyListeners();
   }
 
@@ -816,6 +1002,17 @@ class AppState extends ChangeNotifier {
         .toList(growable: false);
   }
 
+  List<LastAnswer> _decodeLastAnswers(String jsonText) {
+    final decoded = jsonDecode(jsonText);
+    if (decoded is! List) {
+      return const <LastAnswer>[];
+    }
+    return decoded
+        .whereType<Map>()
+        .map((item) => LastAnswer.fromJson(Map<String, dynamic>.from(item)))
+        .toList(growable: false);
+  }
+
   String _extractCommandId(String input) {
     final trimmed = input.trim();
     final match = RegExp(
@@ -867,5 +1064,22 @@ class AppState extends ChangeNotifier {
       return normalized;
     }
     return groupPalette.first;
+  }
+
+  String _buildExampleMarkdown() {
+    return '''
+<!-- context-group: starter|Starter|#83A598 -->
+
+# Recent Work
+codex resume 11111111-1111-1111-1111-111111111111
+
+# Investigate Issue
+codex fork 22222222-2222-2222-2222-222222222222
+
+<!-- /context-group -->
+
+# Scratchpad
+codex resume 33333333-3333-3333-3333-333333333333 --full-auto
+''';
   }
 }
