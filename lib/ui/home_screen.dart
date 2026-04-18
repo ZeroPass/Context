@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -46,6 +47,31 @@ class _PassiveTooltip extends StatefulWidget {
 
 class _PassiveTooltipState extends State<_PassiveTooltip> {
   bool _hovered = false;
+  Timer? _showTimer;
+
+  void _handleEnter() {
+    _showTimer?.cancel();
+    _showTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _hovered = true);
+    });
+  }
+
+  void _handleExit() {
+    _showTimer?.cancel();
+    if (!_hovered) {
+      return;
+    }
+    setState(() => _hovered = false);
+  }
+
+  @override
+  void dispose() {
+    _showTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,8 +80,8 @@ class _PassiveTooltipState extends State<_PassiveTooltip> {
     final scheme = theme.colorScheme;
 
     return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
+      onEnter: (_) => _handleEnter(),
+      onExit: (_) => _handleExit(),
       child: Stack(
         clipBehavior: Clip.none,
         alignment: Alignment.center,
@@ -63,7 +89,7 @@ class _PassiveTooltipState extends State<_PassiveTooltip> {
           widget.child,
           if (_hovered && hasMessage)
             Positioned(
-              top: -34,
+              top: -46,
               left: -48,
               right: -48,
               child: IgnorePointer(
@@ -78,16 +104,16 @@ class _PassiveTooltipState extends State<_PassiveTooltip> {
                           vertical: 6,
                         ),
                         decoration: BoxDecoration(
-                          color: scheme.inverseSurface.withValues(alpha: 0.96),
+                          color: scheme.surfaceContainerHigh.withValues(alpha: 0.88),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: scheme.outlineVariant.withValues(alpha: 0.55),
+                            color: scheme.outlineVariant.withValues(alpha: 0.38),
                             width: 0.7,
                           ),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.14),
-                              blurRadius: 8,
+                              color: Colors.black.withValues(alpha: 0.08),
+                              blurRadius: 6,
                               offset: const Offset(0, 2),
                             ),
                           ],
@@ -96,8 +122,8 @@ class _PassiveTooltipState extends State<_PassiveTooltip> {
                           widget.message,
                           textAlign: TextAlign.center,
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onInverseSurface,
-                            fontWeight: FontWeight.w600,
+                            color: scheme.onSurface.withValues(alpha: 0.86),
+                            fontWeight: FontWeight.w400,
                           ),
                         ),
                       ),

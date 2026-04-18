@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rinf/rinf.dart';
@@ -14,32 +12,8 @@ Future<void> main() async {
   runApp(const ContextApp());
 }
 
-class ContextApp extends StatefulWidget {
+class ContextApp extends StatelessWidget {
   const ContextApp({super.key});
-
-  @override
-  State<ContextApp> createState() => _ContextAppState();
-}
-
-class _ContextAppState extends State<ContextApp> {
-  late final AppLifecycleListener _listener;
-
-  @override
-  void initState() {
-    super.initState();
-    _listener = AppLifecycleListener(
-      onExitRequested: () async {
-        finalizeRust();
-        return AppExitResponse.exit;
-      },
-    );
-  }
-
-  @override
-  void dispose() {
-    _listener.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
