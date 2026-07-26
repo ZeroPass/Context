@@ -1,84 +1,62 @@
 enum ConfigItemKind { group, session, groupEnd }
 
+enum SessionProvider { codex, kimi }
+
+extension SessionProviderInfo on SessionProvider {
+  String get key => name;
+
+  String get label => switch (this) {
+    SessionProvider.codex => 'Codex',
+    SessionProvider.kimi => 'Kimi',
+  };
+
+  static SessionProvider parse(Object? value) {
+    final normalized = (value ?? '').toString().trim().toLowerCase();
+    return normalized == SessionProvider.kimi.name
+        ? SessionProvider.kimi
+        : SessionProvider.codex;
+  }
+}
+
 class RecentContext {
   const RecentContext({
+    required this.provider,
     required this.id,
     required this.title,
     required this.updatedAt,
     this.forkedFromId,
+    this.workDir,
   });
 
   factory RecentContext.fromJson(Map<String, dynamic> json) {
     return RecentContext(
+      provider: SessionProviderInfo.parse(json['provider']),
       id: (json['id'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
       updatedAt: (json['updated_at'] as num?)?.toInt() ?? 0,
       forkedFromId: (json['forked_from_id'] ?? '').toString().trim().isEmpty
           ? null
           : (json['forked_from_id'] ?? '').toString().trim(),
+      workDir: (json['work_dir'] ?? '').toString().trim().isEmpty
+          ? null
+          : (json['work_dir'] ?? '').toString().trim(),
     );
   }
 
+  final SessionProvider provider;
   final String id;
   final String title;
   final int updatedAt;
   final String? forkedFromId;
+  final String? workDir;
 
-  String get shortId {
-    final value = id.trim();
-    if (value.isEmpty) {
-      return '';
-    }
-    final lastDash = value.lastIndexOf('-');
-    final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
-    return tail.isEmpty ? value : tail;
-  }
+  String get identityKey => '${provider.key}:${id.trim().toLowerCase()}';
+
+  String get shortId => _shortSessionId(id);
 
   String get displayTitle => title.trim().isEmpty ? shortId : title.trim();
 
   bool get isForked => forkedFromId?.trim().isNotEmpty == true;
-}
-
-class LastAnswer {
-  const LastAnswer({
-    required this.id,
-    required this.title,
-    required this.updatedAt,
-    required this.answerText,
-    required this.sessionPath,
-  });
-
-  factory LastAnswer.fromJson(Map<String, dynamic> json) {
-    return LastAnswer(
-      id: (json['id'] ?? '').toString(),
-      title: (json['title'] ?? '').toString(),
-      updatedAt: (json['updated_at'] as num?)?.toInt() ?? 0,
-      answerText: (json['answer_text'] ?? '').toString(),
-      sessionPath: (json['session_path'] ?? '').toString(),
-    );
-  }
-
-  final String id;
-  final String title;
-  final int updatedAt;
-  final String answerText;
-  final String sessionPath;
-
-  String get shortId {
-    final value = id.trim();
-    if (value.isEmpty) {
-      return '';
-    }
-    final lastDash = value.lastIndexOf('-');
-    final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
-    return tail.isEmpty ? value : tail;
-  }
-
-  String get displayTitle => title.trim().isEmpty ? shortId : title.trim();
-
-  String get resumeCommand => 'codex resume $id';
-
-  String get forkCommand => 'codex fork $id';
 }
 
 class ConfigItem {
@@ -88,6 +66,7 @@ class ConfigItem {
     required this.name,
     required this.commandId,
     required this.colorHex,
+    required this.provider,
     required this.fast,
   });
 
@@ -103,6 +82,7 @@ class ConfigItem {
       name: (json['name'] ?? '').toString(),
       commandId: (json['command_id'] ?? '').toString(),
       colorHex: (json['color_hex'] ?? '').toString(),
+      provider: SessionProviderInfo.parse(json['provider']),
       fast: json['fast'] == true,
     );
   }
@@ -118,6 +98,7 @@ class ConfigItem {
       name: name,
       commandId: '',
       colorHex: colorHex,
+      provider: SessionProvider.codex,
       fast: false,
     );
   }
@@ -125,6 +106,7 @@ class ConfigItem {
   factory ConfigItem.session({
     required String commandId,
     required String name,
+    required SessionProvider provider,
   }) {
     return ConfigItem(
       kind: ConfigItemKind.session,
@@ -132,6 +114,7 @@ class ConfigItem {
       name: name,
       commandId: commandId,
       colorHex: '',
+      provider: provider,
       fast: false,
     );
   }
@@ -143,6 +126,7 @@ class ConfigItem {
       name: '',
       commandId: '',
       colorHex: '',
+      provider: SessionProvider.codex,
       fast: false,
     );
   }
@@ -152,6 +136,7 @@ class ConfigItem {
   final String name;
   final String commandId;
   final String colorHex;
+  final SessionProvider provider;
   final bool fast;
 
   bool get isGroup => kind == ConfigItemKind.group;
@@ -160,23 +145,32 @@ class ConfigItem {
 
   bool get isGroupEnd => kind == ConfigItemKind.groupEnd;
 
+  bool get supportsFast => isSession && provider == SessionProvider.codex;
+
+  bool get supportsFork => isSession && provider == SessionProvider.codex;
+
+  String get identityKey => '${provider.key}:${commandId.trim().toLowerCase()}';
+
   String get displayName => name.trim().isEmpty ? shortId : name.trim();
 
-  String get shortId {
-    final value = commandId.trim().isEmpty ? id.trim() : commandId.trim();
-    if (value.isEmpty) {
-      return '';
+  String get shortId =>
+      _shortSessionId(commandId.trim().isEmpty ? id.trim() : commandId.trim());
+
+  String get resumeCommand {
+    if (provider == SessionProvider.kimi) {
+      return 'kimi --session $commandId';
     }
-    final lastDash = value.lastIndexOf('-');
-    final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
-    return tail.isEmpty ? value : tail;
+    final base = 'codex resume $commandId';
+    return fast ? '$base -c \'service_tier="fast"\'' : base;
   }
 
-  String get resumeCommand =>
-      fast ? 'codex resume $commandId --full-auto' : 'codex resume $commandId';
-
-  String get forkCommand =>
-      fast ? 'codex fork $commandId --full-auto' : 'codex fork $commandId';
+  String? get forkCommand {
+    if (!supportsFork) {
+      return null;
+    }
+    final base = 'codex fork $commandId';
+    return fast ? '$base -c \'service_tier="fast"\'' : base;
+  }
 
   ConfigItem copyWith({
     ConfigItemKind? kind,
@@ -184,6 +178,7 @@ class ConfigItem {
     String? name,
     String? commandId,
     String? colorHex,
+    SessionProvider? provider,
     bool? fast,
   }) {
     return ConfigItem(
@@ -192,6 +187,7 @@ class ConfigItem {
       name: name ?? this.name,
       commandId: commandId ?? this.commandId,
       colorHex: colorHex ?? this.colorHex,
+      provider: provider ?? this.provider,
       fast: fast ?? this.fast,
     );
   }
@@ -206,6 +202,17 @@ class ConfigItem {
     'name': name,
     'command_id': commandId,
     'color_hex': colorHex,
-    'fast': fast,
+    'provider': provider.key,
+    'fast': supportsFast && fast,
   };
+}
+
+String _shortSessionId(String rawValue) {
+  final value = rawValue.trim();
+  if (value.isEmpty) {
+    return '';
+  }
+  final lastDash = value.lastIndexOf('-');
+  final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
+  return tail.isEmpty ? value : tail;
 }

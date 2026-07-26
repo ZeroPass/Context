@@ -1,5 +1,5 @@
 name: context
-description: "Context - browse and rename local Codex sessions."
+description: "Context - organize and resume local Codex and Kimi sessions."
 publish_to: 'none'
 
 version: 0.1.0+2
@@ -33,6 +33,7 @@ msix_config:
   identity_name: com.zeropass.context
   msix_version: 0.1.0.1
   output_name: Context
+  logo_path: assets/appx/ContextIcon.png
   install_certificate: false
   capabilities: internetClient
 

@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
@@ -14,8 +13,12 @@ use serde::{Deserialize, Serialize};
 use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::signals::{
-    InitApp, LoadConfig, OpFinished, OpenReference, SaveConfig, SetThemeSeed, UiState,
+    InitApp, LoadConfig, OpFinished, RefreshRecent, SaveConfig, SetThemeSeed, UiState,
 };
+
+const PROVIDER_CODEX: &str = "codex";
+const PROVIDER_KIMI: &str = "kimi";
+const RECENT_LIMIT: usize = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ConfigItem {
@@ -24,26 +27,26 @@ struct ConfigItem {
     name: String,
     command_id: String,
     color_hex: String,
+    #[serde(default = "default_provider")]
+    provider: String,
     #[serde(default)]
     fast: bool,
 }
 
+fn default_provider() -> String {
+    PROVIDER_CODEX.to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RecentContext {
+    provider: String,
     id: String,
     title: String,
     updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     forked_from_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct LastAnswer {
-    id: String,
-    title: String,
-    updated_at: i64,
-    answer_text: String,
-    session_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work_dir: Option<String>,
 }
 
 impl ConfigItem {
@@ -61,13 +64,12 @@ struct LoadedConfig {
     items: Vec<ConfigItem>,
     warnings: Vec<String>,
     status: String,
-    recent_contexts: Vec<RecentContext>,
 }
 
 #[derive(Debug)]
-struct LoadedLastAnswers {
-    recent_contexts: Vec<RecentContext>,
-    last_answers: Vec<LastAnswer>,
+struct LoadedRecent {
+    codex: Vec<RecentContext>,
+    kimi: Vec<RecentContext>,
     status: String,
 }
 
@@ -80,11 +82,10 @@ struct ContextActor {
     last_error: Option<String>,
     items: Vec<ConfigItem>,
     warnings: Vec<String>,
-    recent_contexts: Vec<RecentContext>,
-    last_answers: Vec<LastAnswer>,
-    last_answers_busy: bool,
-    last_answers_loaded: bool,
-    last_answers_status: Option<String>,
+    recent_codex: Vec<RecentContext>,
+    recent_kimi: Vec<RecentContext>,
+    recent_busy: bool,
+    recent_status: Option<String>,
     _owned_tasks: JoinSet<()>,
 }
 
@@ -95,8 +96,10 @@ impl ContextActor {
         let mut owned = JoinSet::new();
         owned.spawn(Self::forward_dart_signal::<InitApp>(self_addr.clone()));
         owned.spawn(Self::forward_dart_signal::<LoadConfig>(self_addr.clone()));
+        owned.spawn(Self::forward_dart_signal::<RefreshRecent>(
+            self_addr.clone(),
+        ));
         owned.spawn(Self::forward_dart_signal::<SaveConfig>(self_addr.clone()));
-        owned.spawn(Self::forward_dart_signal::<OpenReference>(self_addr.clone()));
         owned.spawn(Self::forward_dart_signal::<SetThemeSeed>(self_addr));
 
         Self {
@@ -108,11 +111,10 @@ impl ContextActor {
             last_error: None,
             items: Vec::new(),
             warnings: Vec::new(),
-            recent_contexts: Vec::new(),
-            last_answers: Vec::new(),
-            last_answers_busy: false,
-            last_answers_loaded: false,
-            last_answers_status: Some("Last Answer not loaded.".to_owned()),
+            recent_codex: Vec::new(),
+            recent_kimi: Vec::new(),
+            recent_busy: false,
+            recent_status: Some("Recent sessions not loaded.".to_owned()),
             _owned_tasks: owned,
         }
     }
@@ -132,10 +134,10 @@ impl ContextActor {
         let items_json = serde_json::to_string(&self.items).unwrap_or_else(|_| "[]".to_owned());
         let warnings_json =
             serde_json::to_string(&self.warnings).unwrap_or_else(|_| "[]".to_owned());
-        let recent_contexts_json =
-            serde_json::to_string(&self.recent_contexts).unwrap_or_else(|_| "[]".to_owned());
-        let last_answers_json =
-            serde_json::to_string(&self.last_answers).unwrap_or_else(|_| "[]".to_owned());
+        let recent_codex_json =
+            serde_json::to_string(&self.recent_codex).unwrap_or_else(|_| "[]".to_owned());
+        let recent_kimi_json =
+            serde_json::to_string(&self.recent_kimi).unwrap_or_else(|_| "[]".to_owned());
 
         UiState {
             theme_seed_color_value: self.theme_seed_color_value,
@@ -145,11 +147,10 @@ impl ContextActor {
             sessions_markdown_path: self.sessions_markdown_path.clone(),
             items_json,
             warnings_json,
-            recent_contexts_json,
-            last_answers_json,
-            last_answers_busy: self.last_answers_busy,
-            last_answers_loaded: self.last_answers_loaded,
-            last_answers_status: self.last_answers_status.clone(),
+            recent_codex_json,
+            recent_kimi_json,
+            recent_busy: self.recent_busy,
+            recent_status: self.recent_status.clone(),
         }
         .send_signal_to_dart();
     }
@@ -172,7 +173,13 @@ impl ContextActor {
         }
 
         if let Some(path) = path_override {
-            self.sessions_markdown_path = path.trim().to_owned();
+            let next_path = path.trim().to_owned();
+            if next_path != self.sessions_markdown_path {
+                self.recent_codex.clear();
+                self.recent_kimi.clear();
+                self.recent_status = Some("Recent sessions not loaded.".to_owned());
+            }
+            self.sessions_markdown_path = next_path;
         }
 
         self.busy = true;
@@ -187,33 +194,18 @@ impl ContextActor {
             Ok(Ok(loaded)) => {
                 self.items = loaded.items;
                 self.warnings = loaded.warnings;
-                self.recent_contexts = loaded.recent_contexts;
-                self.last_answers.clear();
-                self.last_answers_busy = false;
-                self.last_answers_loaded = false;
-                self.last_answers_status = Some("Loading last answers in background...".to_owned());
                 self.status = Some(loaded.status);
                 self.last_error = None;
             }
             Ok(Err(error)) => {
                 self.items.clear();
                 self.warnings.clear();
-                self.recent_contexts.clear();
-                self.last_answers.clear();
-                self.last_answers_busy = false;
-                self.last_answers_loaded = false;
-                self.last_answers_status = Some("Last Answer not loaded.".to_owned());
                 self.last_error = Some(error.to_string());
                 self.status = Some(format!("Load failed: {error}"));
             }
             Err(error) => {
                 self.items.clear();
                 self.warnings.clear();
-                self.recent_contexts.clear();
-                self.last_answers.clear();
-                self.last_answers_busy = false;
-                self.last_answers_loaded = false;
-                self.last_answers_status = Some("Last Answer not loaded.".to_owned());
                 self.last_error = Some(error.to_string());
                 self.status = Some(format!("Load failed: {error}"));
             }
@@ -224,44 +216,43 @@ impl ContextActor {
         self.last_error.is_none()
     }
 
-    async fn load_last_answers(&mut self, path_override: Option<String>) -> bool {
-        if self.last_answers_busy || self.busy || !self.initialized {
-            return true;
+    async fn refresh_recent(&mut self, path_override: Option<String>) -> Result<()> {
+        if self.recent_busy || self.busy || !self.initialized {
+            return Ok(());
         }
 
         if let Some(path) = path_override {
             self.sessions_markdown_path = path.trim().to_owned();
         }
 
-        self.last_answers_busy = true;
-        self.last_answers_status = Some("Loading last answers...".to_owned());
+        self.recent_busy = true;
+        self.recent_status = Some("Refreshing recent sessions...".to_owned());
         self.emit_state();
 
         let path = self.sessions_markdown_path.clone();
-        let result = spawn_blocking(move || load_last_answers_file(&path)).await;
+        let result = spawn_blocking(move || load_recent_file(&path)).await;
 
-        match result {
+        let outcome = match result {
             Ok(Ok(loaded)) => {
-                self.recent_contexts = loaded.recent_contexts;
-                self.last_answers = loaded.last_answers;
-                self.last_answers_loaded = true;
-                self.last_answers_status = Some(loaded.status);
+                self.recent_codex = loaded.codex;
+                self.recent_kimi = loaded.kimi;
+                self.recent_status = Some(loaded.status);
+                Ok(())
             }
             Ok(Err(error)) => {
-                self.last_answers.clear();
-                self.last_answers_loaded = true;
-                self.last_answers_status = Some(format!("Last Answer failed: {error}"));
+                self.recent_status = Some(format!("Recent refresh failed: {error}"));
+                Err(error)
             }
             Err(error) => {
-                self.last_answers.clear();
-                self.last_answers_loaded = true;
-                self.last_answers_status = Some(format!("Last Answer failed: {error}"));
+                let error = anyhow!("Recent refresh task failed: {error}");
+                self.recent_status = Some(error.to_string());
+                Err(error)
             }
-        }
+        };
 
-        self.last_answers_busy = false;
+        self.recent_busy = false;
         self.emit_state();
-        true
+        outcome
     }
 
     async fn save_config(&mut self, path: String, items_json: String) -> Result<()> {
@@ -303,13 +294,6 @@ impl ContextActor {
             }
         }
     }
-
-    async fn open_reference(&self, target: String) -> Result<()> {
-        let target = target.trim().to_owned();
-        spawn_blocking(move || open_reference_target(&target))
-            .await
-            .map_err(|error| anyhow!("Open reference task failed: {error}"))?
-    }
 }
 
 pub async fn create_actors() {
@@ -333,12 +317,18 @@ impl Notifiable<InitApp> for ContextActor {
 #[async_trait]
 impl Notifiable<LoadConfig> for ContextActor {
     async fn notify(&mut self, msg: LoadConfig, _: &Context<Self>) {
-        let ok = if msg.load_last_answers {
-            self.load_last_answers(Some(msg.sessions_markdown_path)).await
-        } else {
-            self.load_config(Some(msg.sessions_markdown_path)).await
-        };
+        let ok = self.load_config(Some(msg.sessions_markdown_path)).await;
         self.finish_op(msg.request_id, ok, self.last_error.clone());
+    }
+}
+
+#[async_trait]
+impl Notifiable<RefreshRecent> for ContextActor {
+    async fn notify(&mut self, msg: RefreshRecent, _: &Context<Self>) {
+        match self.refresh_recent(Some(msg.sessions_markdown_path)).await {
+            Ok(()) => self.finish_op(msg.request_id, true, None),
+            Err(error) => self.finish_op(msg.request_id, false, Some(error.to_string())),
+        }
     }
 }
 
@@ -348,17 +338,6 @@ impl Notifiable<SaveConfig> for ContextActor {
         let result = self
             .save_config(msg.sessions_markdown_path, msg.items_json)
             .await;
-        match result {
-            Ok(()) => self.finish_op(msg.request_id, true, None),
-            Err(error) => self.finish_op(msg.request_id, false, Some(error.to_string())),
-        }
-    }
-}
-
-#[async_trait]
-impl Notifiable<OpenReference> for ContextActor {
-    async fn notify(&mut self, msg: OpenReference, _: &Context<Self>) {
-        let result = self.open_reference(msg.target).await;
         match result {
             Ok(()) => self.finish_op(msg.request_id, true, None),
             Err(error) => self.finish_op(msg.request_id, false, Some(error.to_string())),
@@ -380,8 +359,7 @@ fn load_config_file(path_str: &str) -> Result<LoadedConfig> {
         return Ok(LoadedConfig {
             items: Vec::new(),
             warnings: Vec::new(),
-            status: "Pick a codex sessions.md file.".to_owned(),
-            recent_contexts: Vec::new(),
+            status: "Pick a sessions markdown file.".to_owned(),
         });
     }
 
@@ -391,53 +369,53 @@ fn load_config_file(path_str: &str) -> Result<LoadedConfig> {
             items: Vec::new(),
             warnings: vec![format!("Markdown file not found: {}", path.display())],
             status: format!("Markdown file not found: {}", path.display()),
-            recent_contexts: Vec::new(),
         });
     }
 
     let text = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read markdown file: {}", path.display()))?;
-    let (items, parse_warnings) = parse_markdown_items(&text);
-    let mut warnings = parse_warnings;
-    let recent_contexts = match load_recent_contexts(path_str) {
-        Ok(items) => items,
-        Err(error) => {
-            warnings.push(format!("Couldn't read recent Codex sessions: {error}"));
-            Vec::new()
-        }
-    };
+    let (items, warnings) = parse_markdown_items(&text);
 
     Ok(LoadedConfig {
         status: format!("Loaded {} item(s) from {}", items.len(), path.display()),
         items,
         warnings,
-        recent_contexts,
     })
 }
 
-fn load_last_answers_file(path_str: &str) -> Result<LoadedLastAnswers> {
+fn load_recent_file(path_str: &str) -> Result<LoadedRecent> {
     let path_str = path_str.trim();
     if path_str.is_empty() {
-        return Ok(LoadedLastAnswers {
-            recent_contexts: Vec::new(),
-            last_answers: Vec::new(),
-            status: "Pick a codex sessions.md file first.".to_owned(),
+        return Ok(LoadedRecent {
+            codex: Vec::new(),
+            kimi: Vec::new(),
+            status: "Pick a sessions markdown file first.".to_owned(),
         });
     }
 
-    let recent_contexts = load_recent_contexts(path_str)
-        .with_context(|| "Couldn't read recent Codex sessions.".to_owned())?;
-    let last_answers = load_last_answers(path_str, &recent_contexts)
-        .with_context(|| "Couldn't read latest answers.".to_owned())?;
+    let (codex, codex_status) = match load_recent_codex_contexts(path_str) {
+        Ok(items) => {
+            let count = items.len();
+            (items, format!("Codex {count}"))
+        }
+        Err(error) => (Vec::new(), format!("Codex unavailable: {error}")),
+    };
+    let (kimi, kimi_status) = match load_recent_kimi_contexts(path_str) {
+        Ok(items) => {
+            let count = items.len();
+            (items, format!("Kimi {count}"))
+        }
+        Err(error) => (Vec::new(), format!("Kimi unavailable: {error}")),
+    };
 
-    Ok(LoadedLastAnswers {
-        status: format!("Loaded {} last answer(s)", last_answers.len()),
-        recent_contexts,
-        last_answers,
+    Ok(LoadedRecent {
+        codex,
+        kimi,
+        status: format!("{codex_status}  /  {kimi_status}"),
     })
 }
 
-fn load_recent_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
+fn load_recent_codex_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
     let Some(db_path) = infer_codex_db_path(markdown_path) else {
         return Ok(Vec::new());
     };
@@ -446,42 +424,59 @@ fn load_recent_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
         return Ok(Vec::new());
     }
 
-    match query_recent_contexts(&db_path) {
+    let codex_home = db_path.parent();
+    match query_recent_codex_contexts(&db_path, codex_home) {
         Ok(items) => Ok(items),
         Err(error) if is_locked_sqlite_error(&error) => {
             let snapshot = snapshot_sqlite_database(&db_path)?;
-            let result = query_recent_contexts(&snapshot)
+            let result = query_recent_codex_contexts(&snapshot, codex_home)
                 .with_context(|| format!("Failed to read snapshot of {}", db_path.display()));
             let _ = remove_snapshot_database(&snapshot);
             result
         }
-        Err(error) => {
-            Err(error).with_context(|| format!("Failed to read {}", db_path.display()))
-        }
+        Err(error) => Err(error).with_context(|| format!("Failed to read {}", db_path.display())),
     }
 }
 
-fn query_recent_contexts(db_path: &PathBuf) -> rusqlite::Result<Vec<RecentContext>> {
+fn query_recent_codex_contexts(
+    db_path: &PathBuf,
+    codex_home: Option<&Path>,
+) -> rusqlite::Result<Vec<RecentContext>> {
     let connection = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     let _ = connection.busy_timeout(Duration::from_millis(250));
-    let mut statement = connection.prepare(
+    let has_cwd = sqlite_table_has_column(&connection, "threads", "cwd")?;
+    let query = if has_cwd {
+        "SELECT id, title, updated_at, rollout_path, cwd
+         FROM threads
+         WHERE archived = 0
+         ORDER BY updated_at DESC
+         LIMIT 6"
+    } else {
         "SELECT id, title, updated_at, rollout_path
          FROM threads
          WHERE archived = 0
          ORDER BY updated_at DESC
-         LIMIT 6",
-    )?;
+         LIMIT 6"
+    };
+    let mut statement = connection.prepare(query)?;
 
     let rows = statement.query_map([], |row| {
         let rollout_path = row.get::<_, String>(3)?;
+        let resolved_rollout = resolve_codex_rollout_path(codex_home, &rollout_path);
         Ok(RecentContext {
+            provider: PROVIDER_CODEX.to_owned(),
             id: row.get::<_, String>(0)?,
             title: row.get::<_, String>(1)?,
-            updated_at: row.get::<_, i64>(2)?,
-            forked_from_id: read_forked_from_id(Path::new(&rollout_path)).ok().flatten(),
+            updated_at: normalize_epoch_millis(row.get::<_, i64>(2)?),
+            forked_from_id: read_forked_from_id(&resolved_rollout).ok().flatten(),
+            work_dir: if has_cwd {
+                row.get::<_, Option<String>>(4)?
+            } else {
+                None
+            },
         })
     })?;
 
@@ -493,12 +488,338 @@ fn query_recent_contexts(db_path: &PathBuf) -> rusqlite::Result<Vec<RecentContex
             continue;
         }
         items.push(item);
-        if items.len() == 3 {
+        if items.len() == RECENT_LIMIT {
             break;
         }
     }
 
     Ok(items)
+}
+
+fn resolve_codex_rollout_path(codex_home: Option<&Path>, raw_path: &str) -> PathBuf {
+    let direct = PathBuf::from(raw_path);
+    if direct.is_file() {
+        return direct;
+    }
+
+    let normalized = raw_path.replace('\\', "/");
+    if let (Some(codex_home), Some((_, relative))) = (codex_home, normalized.split_once("/.codex/"))
+    {
+        return codex_home.join(relative);
+    }
+    direct
+}
+
+#[derive(Clone, Debug)]
+struct KimiIndexEntry {
+    id: String,
+    session_dir: PathBuf,
+    work_dir: Option<String>,
+}
+
+fn load_recent_kimi_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
+    let Some(kimi_home) = infer_kimi_home(markdown_path) else {
+        return Ok(Vec::new());
+    };
+    if !kimi_home.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = std::collections::HashMap::<String, KimiIndexEntry>::new();
+    let mut deleted = std::collections::HashSet::<String>::new();
+    let index_path = kimi_home.join("session_index.jsonl");
+    if index_path.is_file() {
+        let file = fs::File::open(&index_path)
+            .with_context(|| format!("Failed to open {}", index_path.display()))?;
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else {
+                continue;
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            let Some(id) = value
+                .get("sessionId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if value.get("deleted").and_then(serde_json::Value::as_bool) == Some(true) {
+                entries.remove(id);
+                deleted.insert(id.to_owned());
+                continue;
+            }
+            let Some(raw_session_dir) = value
+                .get("sessionDir")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let session_dir = resolve_kimi_session_dir(&kimi_home, raw_session_dir);
+            deleted.remove(id);
+            let work_dir = value
+                .get("workDir")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            entries.insert(
+                id.to_owned(),
+                KimiIndexEntry {
+                    id: id.to_owned(),
+                    session_dir,
+                    work_dir,
+                },
+            );
+        }
+    }
+
+    for discovered in discover_kimi_session_dirs(&kimi_home) {
+        if !deleted.contains(&discovered.id) {
+            entries.entry(discovered.id.clone()).or_insert(discovered);
+        }
+    }
+
+    let mut recent = Vec::new();
+    for entry in entries.into_values() {
+        let state_path = entry.session_dir.join("state.json");
+        if !state_path.is_file() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&state_path) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if state.get("archived").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+
+        let title = ["customTitle", "title", "lastPrompt"]
+            .iter()
+            .find_map(|key| {
+                state
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| short_session_id(&entry.id));
+        let updated_at = state
+            .get("updatedAt")
+            .and_then(parse_kimi_timestamp)
+            .or_else(|| state.get("createdAt").and_then(parse_kimi_timestamp))
+            .unwrap_or_else(|| modified_at_ms(&state_path));
+        let work_dir = ["workDir", "cwd"]
+            .iter()
+            .find_map(|key| {
+                state
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(ToOwned::to_owned)
+            .or(entry.work_dir);
+        let forked_from_id = state
+            .get("forkedFrom")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        recent.push(RecentContext {
+            provider: PROVIDER_KIMI.to_owned(),
+            id: entry.id,
+            title,
+            updated_at,
+            forked_from_id,
+            work_dir,
+        });
+    }
+
+    recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    recent.truncate(RECENT_LIMIT);
+    Ok(recent)
+}
+
+fn infer_kimi_home(markdown_path: &str) -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("KIMI_CODE_HOME") {
+        let path = PathBuf::from(explicit);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    infer_user_home_root(markdown_path).map(|root| root.join(".kimi-code"))
+}
+
+fn resolve_kimi_session_dir(kimi_home: &Path, raw_session_dir: &str) -> PathBuf {
+    let direct = PathBuf::from(raw_session_dir);
+    if direct.is_dir() {
+        return direct;
+    }
+
+    let normalized = raw_session_dir.replace('\\', "/");
+    if let Some((_, relative)) = normalized.split_once("/sessions/") {
+        return kimi_home.join("sessions").join(relative);
+    }
+    direct
+}
+
+fn discover_kimi_session_dirs(kimi_home: &Path) -> Vec<KimiIndexEntry> {
+    let sessions_root = kimi_home.join("sessions");
+    let Ok(buckets) = fs::read_dir(&sessions_root) else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    for bucket in buckets.flatten() {
+        let bucket_path = bucket.path();
+        if !bucket_path.is_dir() {
+            continue;
+        }
+        let Ok(sessions) = fs::read_dir(bucket_path) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let session_dir = session.path();
+            if !session_dir.is_dir() {
+                continue;
+            }
+            let id = session.file_name().to_string_lossy().trim().to_owned();
+            if id.is_empty() {
+                continue;
+            }
+            entries.push(KimiIndexEntry {
+                id,
+                session_dir,
+                work_dir: None,
+            });
+        }
+    }
+    entries
+}
+
+fn parse_kimi_timestamp(value: &serde_json::Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(normalize_epoch_millis(number));
+    }
+    if let Some(number) = value.as_u64() {
+        return i64::try_from(number).ok().map(normalize_epoch_millis);
+    }
+    value.as_str().and_then(parse_iso8601_utc_ms)
+}
+
+fn normalize_epoch_millis(value: i64) -> i64 {
+    if value.unsigned_abs() < 100_000_000_000 {
+        value.saturating_mul(1_000)
+    } else {
+        value
+    }
+}
+
+fn sqlite_table_has_column(
+    connection: &Connection,
+    table: &str,
+    target_column: &str,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == target_column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_iso8601_utc_ms(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 19
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+
+    let year = parse_decimal(bytes, 0, 4)?;
+    let month = parse_decimal(bytes, 5, 7)?;
+    let day = parse_decimal(bytes, 8, 10)?;
+    let hour = parse_decimal(bytes, 11, 13)?;
+    let minute = parse_decimal(bytes, 14, 16)?;
+    let second = parse_decimal(bytes, 17, 19)?;
+    let millis = if bytes.get(19) == Some(&b'.') {
+        let mut out = 0_i64;
+        let mut digits = 0;
+        for byte in bytes.iter().skip(20) {
+            if !byte.is_ascii_digit() || digits == 3 {
+                break;
+            }
+            out = out * 10 + i64::from(byte - b'0');
+            digits += 1;
+        }
+        while digits < 3 {
+            out *= 10;
+            digits += 1;
+        }
+        out
+    } else {
+        0
+    };
+
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + millis)
+}
+
+fn parse_decimal(bytes: &[u8], start: usize, end: usize) -> Option<i64> {
+    let mut value = 0_i64;
+    for byte in bytes.get(start..end)? {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + i64::from(byte - b'0');
+    }
+    Some(value)
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn modified_at_ms(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
 }
 
 fn read_forked_from_id(rollout_path: &Path) -> Result<Option<String>> {
@@ -533,7 +854,10 @@ fn read_forked_from_id(rollout_path: &Path) -> Result<Option<String>> {
 fn is_locked_sqlite_error(error: &rusqlite::Error) -> bool {
     match error {
         rusqlite::Error::SqliteFailure(inner, _) => {
-            matches!(inner.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+            matches!(
+                inner.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            )
         }
         _ => false,
     }
@@ -571,7 +895,7 @@ fn snapshot_sqlite_database(db_path: &PathBuf) -> Result<PathBuf> {
     Ok(snapshot_db)
 }
 
-fn remove_snapshot_database(snapshot_db: &PathBuf) -> Result<()> {
+fn remove_snapshot_database(snapshot_db: &Path) -> Result<()> {
     let Some(dir) = snapshot_db.parent() else {
         return Ok(());
     };
@@ -579,318 +903,25 @@ fn remove_snapshot_database(snapshot_db: &PathBuf) -> Result<()> {
 }
 
 fn infer_codex_db_path(markdown_path: &str) -> Option<PathBuf> {
-    let home_root = infer_codex_home_root(markdown_path)?;
+    let home_root = infer_user_home_root(markdown_path)?;
     Some(home_root.join(".codex").join("state_5.sqlite"))
 }
 
-fn infer_codex_sessions_root(markdown_path: &str) -> Option<PathBuf> {
-    let home_root = infer_codex_home_root(markdown_path)?;
-    Some(home_root.join(".codex").join("sessions"))
-}
-
-fn infer_codex_home_root(markdown_path: &str) -> Option<PathBuf> {
+fn infer_user_home_root(markdown_path: &str) -> Option<PathBuf> {
     let trimmed = markdown_path.trim();
     let normalized = trimmed.replace('\\', "/");
 
-    if !normalized.is_empty() {
-        if let Some(prefix) = normalized.strip_suffix("/codex sessions.md") {
-            if let Some(home_root) = prefix.strip_suffix("/codex-out") {
-                if trimmed.contains('\\') {
-                    return Some(PathBuf::from(home_root.replace('/', "\\")));
-                }
-                return Some(PathBuf::from(home_root));
-            }
+    if !normalized.is_empty()
+        && let Some(prefix) = normalized.strip_suffix("/codex sessions.md")
+        && let Some(home_root) = prefix.strip_suffix("/codex-out")
+    {
+        if trimmed.contains('\\') {
+            return Some(PathBuf::from(home_root.replace('/', "\\")));
         }
+        return Some(PathBuf::from(home_root));
     }
 
     std::env::var_os("HOME").map(PathBuf::from)
-}
-
-fn load_last_answers(markdown_path: &str, recent_contexts: &[RecentContext]) -> Result<Vec<LastAnswer>> {
-    let Some(sessions_root) = infer_codex_sessions_root(markdown_path) else {
-        return Ok(Vec::new());
-    };
-
-    if !sessions_root.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut items = Vec::new();
-    for context in recent_contexts {
-        let Some(session_path) = find_rollout_file_for_session(&sessions_root, &context.id)? else {
-            continue;
-        };
-        let Some(answer_text) = extract_last_assistant_message(&session_path)? else {
-            continue;
-        };
-        items.push(LastAnswer {
-            id: context.id.clone(),
-            title: context.title.clone(),
-            updated_at: context.updated_at,
-            answer_text,
-            session_path: session_path.display().to_string(),
-        });
-    }
-
-    Ok(items)
-}
-
-fn find_rollout_file_for_session(sessions_root: &Path, session_id: &str) -> Result<Option<PathBuf>> {
-    let target = session_id.trim().to_ascii_lowercase();
-    if target.is_empty() {
-        return Ok(None);
-    }
-
-    let mut stack = vec![sessions_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !file_name.ends_with(".jsonl") {
-                continue;
-            }
-            if file_name.to_ascii_lowercase().contains(&target) {
-                return Ok(Some(path));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn extract_last_assistant_message(session_path: &Path) -> Result<Option<String>> {
-    let file = fs::File::open(session_path)
-        .with_context(|| format!("Failed to open {}", session_path.display()))?;
-    let reader = BufReader::new(file);
-    let mut last_message = None;
-
-    for line in reader.lines() {
-        let line =
-            line.with_context(|| format!("Failed to read {}", session_path.display()))?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            != Some("response_item")
-        {
-            continue;
-        }
-        let payload = match value.get("payload") {
-            Some(payload) => payload,
-            None => continue,
-        };
-        if payload
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            != Some("message")
-            || payload
-                .get("role")
-                .and_then(serde_json::Value::as_str)
-                != Some("assistant")
-        {
-            continue;
-        }
-
-        let text = collect_output_text(payload);
-        if !text.trim().is_empty() {
-            last_message = Some(text);
-        }
-    }
-
-    Ok(last_message)
-}
-
-fn collect_output_text(payload: &serde_json::Value) -> String {
-    let mut parts = Vec::new();
-    let Some(content) = payload.get("content").and_then(serde_json::Value::as_array) else {
-        return String::new();
-    };
-
-    for item in content {
-        if item
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            != Some("output_text")
-        {
-            continue;
-        }
-        let Some(text) = item.get("text").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            parts.push(trimmed.to_owned());
-        }
-    }
-
-    parts.join("\n\n")
-}
-
-fn open_reference_target(target: &str) -> Result<()> {
-    let target = target.trim();
-    if target.is_empty() {
-        return Err(anyhow!("Reference target is empty."));
-    }
-
-    if cfg!(target_os = "windows") {
-        open_reference_windows(target)
-    } else if cfg!(target_os = "macos") {
-        open_reference_macos(target)
-    } else {
-        open_reference_linux(target)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn open_reference_windows(target: &str) -> Result<()> {
-    let normalized = normalize_windows_open_target(target);
-    let status = Command::new(resolve_windows_cmd_path())
-        .args(["/C", "start", "", &normalized])
-        .status()
-        .with_context(|| format!("Failed to start {}", normalized))?;
-
-    if !status.success() {
-        return Err(anyhow!(
-            "Open command failed for {} with status {}",
-            normalized,
-            status
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn normalize_windows_open_target(target: &str) -> String {
-    if is_web_target(target) {
-        return target.trim().to_owned();
-    }
-
-    let stripped = strip_reference_suffixes(target);
-    if stripped.starts_with(r"\\") || has_windows_drive_prefix(&stripped) {
-        return stripped.replace('/', r"\");
-    }
-    stripped
-}
-
-#[cfg(target_os = "windows")]
-fn resolve_windows_cmd_path() -> PathBuf {
-    std::env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("System32")
-        .join("cmd.exe")
-}
-
-#[cfg(target_os = "windows")]
-fn has_windows_drive_prefix(target: &str) -> bool {
-    let bytes = target.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-}
-
-#[cfg(not(target_os = "windows"))]
-fn open_reference_windows(_: &str) -> Result<()> {
-    unreachable!()
-}
-
-#[cfg(target_os = "macos")]
-fn open_reference_macos(target: &str) -> Result<()> {
-    let normalized = normalize_open_target(target);
-    let status = Command::new("open")
-        .arg(&normalized)
-        .status()
-        .with_context(|| format!("Failed to open {}", normalized))?;
-
-    if !status.success() {
-        return Err(anyhow!(
-            "Open command failed for {} with status {}",
-            normalized,
-            status
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn open_reference_macos(_: &str) -> Result<()> {
-    unreachable!()
-}
-
-#[cfg(target_os = "linux")]
-fn open_reference_linux(target: &str) -> Result<()> {
-    let normalized = normalize_open_target(target);
-    let status = Command::new("xdg-open")
-        .arg(&normalized)
-        .status()
-        .with_context(|| format!("Failed to open {}", normalized))?;
-
-    if !status.success() {
-        return Err(anyhow!(
-            "Open command failed for {} with status {}",
-            normalized,
-            status
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn open_reference_linux(_: &str) -> Result<()> {
-    unreachable!()
-}
-
-fn normalize_open_target(target: &str) -> String {
-    if is_web_target(target) {
-        return target.trim().to_owned();
-    }
-    strip_reference_suffixes(target)
-}
-
-fn strip_reference_suffixes(target: &str) -> String {
-    let trimmed = target.trim();
-    if is_web_target(trimmed) {
-        return trimmed.to_owned();
-    }
-
-    let without_hash = match trimmed.find('#') {
-        Some(index) => &trimmed[..index],
-        None => trimmed,
-    };
-
-    Regex::new(r"^(.*?)(:\d+(?::\d+)?)$")
-        .expect("valid reference suffix regex")
-        .captures(without_hash)
-        .and_then(|captures| captures.get(1).map(|value| value.as_str().trim().to_owned()))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| without_hash.trim().to_owned())
-}
-
-fn is_web_target(target: &str) -> bool {
-    let trimmed = target.trim();
-    trimmed.starts_with("http://") || trimmed.starts_with("https://")
 }
 
 fn save_config_file(path_str: &str, items: &[ConfigItem]) -> Result<String> {
@@ -900,11 +931,11 @@ fn save_config_file(path_str: &str, items: &[ConfigItem]) -> Result<String> {
     }
 
     let path = PathBuf::from(path_str);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
     let text = render_markdown_items(items);
@@ -916,16 +947,107 @@ fn save_config_file(path_str: &str, items: &[ConfigItem]) -> Result<String> {
     ))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedSessionCommand {
+    provider: String,
+    command_id: String,
+    fast: bool,
+}
+
+fn parse_session_command(line: &str) -> Option<ParsedSessionCommand> {
+    let command = line.rsplit("&&").next()?.trim();
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    let executable = tokens
+        .first()?
+        .trim_matches(['\'', '"'])
+        .to_ascii_lowercase();
+
+    if executable == PROVIDER_CODEX {
+        if tokens.len() < 3 || !matches!(tokens[1].to_ascii_lowercase().as_str(), "resume" | "fork")
+        {
+            return None;
+        }
+        let command_id = normalize_session_id(tokens[2], PROVIDER_CODEX)?;
+        let lower = command.to_ascii_lowercase();
+        let fast = lower.contains("--full-auto")
+            || (lower.contains("service_tier") && lower.contains("fast"));
+        return Some(ParsedSessionCommand {
+            provider: PROVIDER_CODEX.to_owned(),
+            command_id,
+            fast,
+        });
+    }
+
+    if executable == PROVIDER_KIMI {
+        for (index, token) in tokens.iter().enumerate().skip(1) {
+            let normalized = token.to_ascii_lowercase();
+            if let Some((flag, value)) = normalized.split_once('=')
+                && matches!(flag, "--session" | "--resume" | "-s" | "-r")
+            {
+                let command_id = normalize_session_id(value, PROVIDER_KIMI)?;
+                return Some(ParsedSessionCommand {
+                    provider: PROVIDER_KIMI.to_owned(),
+                    command_id,
+                    fast: false,
+                });
+            }
+            if matches!(normalized.as_str(), "--session" | "--resume" | "-s" | "-r") {
+                let command_id = normalize_session_id(tokens.get(index + 1)?, PROVIDER_KIMI)?;
+                return Some(ParsedSessionCommand {
+                    provider: PROVIDER_KIMI.to_owned(),
+                    command_id,
+                    fast: false,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_session_id(value: &str, provider: &str) -> Option<String> {
+    let trimmed = value
+        .trim()
+        .trim_matches(['\'', '"'])
+        .trim_end_matches([',', ';']);
+    if trimmed.is_empty()
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return None;
+    }
+    Some(if provider == PROVIDER_CODEX {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_owned()
+    })
+}
+
+fn normalize_provider(value: &str) -> String {
+    if value.trim().eq_ignore_ascii_case(PROVIDER_KIMI) {
+        PROVIDER_KIMI.to_owned()
+    } else {
+        PROVIDER_CODEX.to_owned()
+    }
+}
+
 fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
     let group_re =
-        Regex::new(r"(?i)^<!--\s*context-group:\s*([^|>]+)\|([^|>]+)\|(#[0-9a-f]{6})\s*-->$")
-            .expect("valid group regex");
-    let group_end_re =
-        Regex::new(r"(?i)^<!--\s*/context-group\s*-->$").expect("valid group end regex");
-    let command_re = Regex::new(
-        r"(?i)^codex (?:resume|fork) ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\s+(--full-auto))?$",
-    )
-    .expect("valid codex command regex");
+        match Regex::new(r"(?i)^<!--\s*context-group:\s*([^|>]+)\|([^|>]+)\|(#[0-9a-f]{6})\s*-->$")
+        {
+            Ok(regex) => regex,
+            Err(error) => return (Vec::new(), vec![format!("Invalid group parser: {error}")]),
+        };
+    let group_end_re = match Regex::new(r"(?i)^<!--\s*/context-group\s*-->$") {
+        Ok(regex) => regex,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![format!("Invalid group-end parser: {error}")],
+            );
+        }
+    };
 
     let mut items = Vec::new();
     let mut warnings = Vec::new();
@@ -949,6 +1071,7 @@ fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
                     name: String::new(),
                     command_id: String::new(),
                     color_hex: String::new(),
+                    provider: String::new(),
                     fast: false,
                 });
             }
@@ -967,6 +1090,7 @@ fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
                 },
                 command_id: String::new(),
                 color_hex,
+                provider: String::new(),
                 fast: false,
             });
             open_group_id = Some(normalized_id);
@@ -982,6 +1106,7 @@ fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
                     name: String::new(),
                     command_id: String::new(),
                     color_hex: String::new(),
+                    provider: String::new(),
                     fast: false,
                 }),
                 None => warnings.push(format!("Ignored unopened group end marker: {trimmed}")),
@@ -990,9 +1115,8 @@ fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
             continue;
         }
 
-        if let Some(captures) = command_re.captures(trimmed) {
-            let command_id = captures[1].to_ascii_lowercase();
-            let fast = captures.get(2).is_some();
+        if let Some(command) = parse_session_command(trimmed) {
+            let command_id = command.command_id;
             let name = if pending_title.is_empty() {
                 short_session_id(&command_id)
             } else {
@@ -1005,7 +1129,8 @@ fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
                 name,
                 command_id,
                 color_hex: String::new(),
-                fast,
+                provider: command.provider,
+                fast: command.fast,
             });
             pending_title.clear();
             continue;
@@ -1026,6 +1151,7 @@ fn parse_markdown_items(text: &str) -> (Vec<ConfigItem>, Vec<String>) {
             name: String::new(),
             command_id: String::new(),
             color_hex: String::new(),
+            provider: String::new(),
             fast: false,
         });
     }
@@ -1053,7 +1179,12 @@ fn render_markdown_items(items: &[ConfigItem]) -> String {
         } else if item.is_group_end() {
             out.push_str("<!-- /context-group -->\n");
         } else {
-            let command_id = item.command_id.trim().to_ascii_lowercase();
+            let provider = normalize_provider(&item.provider);
+            let command_id = if provider == PROVIDER_CODEX {
+                item.command_id.trim().to_ascii_lowercase()
+            } else {
+                item.command_id.trim().to_owned()
+            };
             let title = if item.name.trim().is_empty() {
                 short_session_id(&command_id)
             } else {
@@ -1062,10 +1193,15 @@ fn render_markdown_items(items: &[ConfigItem]) -> String {
             out.push_str("# ");
             out.push_str(&title);
             out.push('\n');
-            out.push_str("codex resume ");
-            out.push_str(&command_id);
-            if item.fast {
-                out.push_str(" --full-auto");
+            if provider == PROVIDER_KIMI {
+                out.push_str("kimi --session ");
+                out.push_str(&command_id);
+            } else {
+                out.push_str("codex resume ");
+                out.push_str(&command_id);
+                if item.fast {
+                    out.push_str(" -c 'service_tier=\"fast\"'");
+                }
             }
             out.push('\n');
         }
@@ -1086,7 +1222,12 @@ fn deserialize_items(json_text: &str) -> Result<Vec<ConfigItem>> {
         item.kind = item.kind.trim().to_ascii_lowercase();
         item.id = item.id.trim().to_owned();
         item.name = item.name.trim().to_owned();
-        item.command_id = item.command_id.trim().to_ascii_lowercase();
+        item.provider = normalize_provider(&item.provider);
+        item.command_id = if item.provider == PROVIDER_CODEX {
+            item.command_id.trim().to_ascii_lowercase()
+        } else {
+            item.command_id.trim().to_owned()
+        };
         item.color_hex = normalize_color_hex(&item.color_hex);
 
         if item.is_group() {
@@ -1095,6 +1236,7 @@ fn deserialize_items(json_text: &str) -> Result<Vec<ConfigItem>> {
                 item.name = "Group".to_owned();
             }
             item.command_id.clear();
+            item.provider.clear();
             item.fast = false;
         } else if item.is_group_end() {
             item.kind = "group_end".to_owned();
@@ -1102,14 +1244,22 @@ fn deserialize_items(json_text: &str) -> Result<Vec<ConfigItem>> {
             item.name.clear();
             item.command_id.clear();
             item.color_hex.clear();
+            item.provider.clear();
             item.fast = false;
         } else {
             if item.command_id.is_empty() {
-                item.command_id = item.id.to_ascii_lowercase();
+                item.command_id = if item.provider == PROVIDER_CODEX {
+                    item.id.to_ascii_lowercase()
+                } else {
+                    item.id.clone()
+                };
             }
             item.id = item.command_id.clone();
             item.color_hex.clear();
             item.kind = "session".to_owned();
+            if item.provider == PROVIDER_KIMI {
+                item.fast = false;
+            }
         }
     }
 
@@ -1148,10 +1298,11 @@ fn normalize_group_id(id: &str) -> String {
 
 fn normalize_color_hex(color: &str) -> String {
     let trimmed = color.trim();
-    if let Some(rest) = trimmed.strip_prefix('#') {
-        if rest.len() == 6 && rest.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            return format!("#{}", rest.to_ascii_uppercase());
-        }
+    if let Some(rest) = trimmed.strip_prefix('#')
+        && rest.len() == 6
+        && rest.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return format!("#{}", rest.to_ascii_uppercase());
     }
     "#83A598".to_owned()
 }
@@ -1162,11 +1313,17 @@ fn short_session_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_output_text, parse_markdown_items, render_markdown_items};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{
+        ConfigItem, PROVIDER_CODEX, PROVIDER_KIMI, load_recent_kimi_contexts, parse_iso8601_utc_ms,
+        parse_markdown_items, parse_session_command, render_markdown_items,
+    };
 
     #[test]
-    fn parses_groups_and_sessions() {
-        let text = "<!-- context-group: work|Work|#FB4934 -->\n\n# First\ncodex resume 11111111-1111-1111-1111-111111111111\n\n# Second\ncodex fork 22222222-2222-2222-2222-222222222222\n\n<!-- /context-group -->\n";
+    fn parses_groups_and_both_providers() {
+        let text = "<!-- context-group: work|Work|#FB4934 -->\n\n# First\ncodex resume 11111111-1111-1111-1111-111111111111\n\n# Second\nkimi --session session_22222222-2222-2222-2222-222222222222\n\n<!-- /context-group -->\n";
         let (items, warnings) = parse_markdown_items(text);
 
         assert!(warnings.is_empty());
@@ -1174,19 +1331,43 @@ mod tests {
         assert_eq!(items[0].kind, "group");
         assert_eq!(items[0].color_hex, "#FB4934");
         assert_eq!(items[1].kind, "session");
-        assert_eq!(items[2].command_id, "22222222-2222-2222-2222-222222222222");
+        assert_eq!(items[1].provider, PROVIDER_CODEX);
+        assert_eq!(items[2].provider, PROVIDER_KIMI);
+        assert_eq!(
+            items[2].command_id,
+            "session_22222222-2222-2222-2222-222222222222"
+        );
         assert!(!items[1].fast);
+        assert!(!items[2].fast);
         assert_eq!(items[3].kind, "group_end");
     }
 
     #[test]
-    fn parses_fast_sessions() {
+    fn upgrades_legacy_codex_fast_command() {
         let text = "# Fast\ncodex resume 11111111-1111-1111-1111-111111111111 --full-auto\n";
         let (items, warnings) = parse_markdown_items(text);
 
         assert!(warnings.is_empty());
         assert_eq!(items.len(), 1);
         assert!(items[0].fast);
+        assert_eq!(
+            render_markdown_items(&items),
+            "# Fast\ncodex resume 11111111-1111-1111-1111-111111111111 -c 'service_tier=\"fast\"'\n"
+        );
+    }
+
+    #[test]
+    fn kimi_permission_flags_do_not_enable_fast() {
+        let parsed = match parse_session_command(
+            "cd /home/luka/codex-out && kimi --auto --resume session_1234",
+        ) {
+            Some(parsed) => parsed,
+            None => panic!("Kimi command should parse"),
+        };
+
+        assert_eq!(parsed.provider, PROVIDER_KIMI);
+        assert_eq!(parsed.command_id, "session_1234");
+        assert!(!parsed.fast);
     }
 
     #[test]
@@ -1198,44 +1379,99 @@ mod tests {
                 name: "Work".to_owned(),
                 command_id: String::new(),
                 color_hex: "#FB4934".to_owned(),
+                provider: String::new(),
                 fast: false,
             },
-            super::ConfigItem {
+            ConfigItem {
                 kind: "session".to_owned(),
                 id: "11111111-1111-1111-1111-111111111111".to_owned(),
                 name: "First".to_owned(),
                 command_id: "11111111-1111-1111-1111-111111111111".to_owned(),
                 color_hex: String::new(),
+                provider: PROVIDER_CODEX.to_owned(),
                 fast: true,
             },
-            super::ConfigItem {
+            ConfigItem {
+                kind: "session".to_owned(),
+                id: "session_22222222-2222-2222-2222-222222222222".to_owned(),
+                name: "Kimi".to_owned(),
+                command_id: "session_22222222-2222-2222-2222-222222222222".to_owned(),
+                color_hex: String::new(),
+                provider: PROVIDER_KIMI.to_owned(),
+                fast: false,
+            },
+            ConfigItem {
                 kind: "group_end".to_owned(),
                 id: "work".to_owned(),
                 name: String::new(),
                 command_id: String::new(),
                 color_hex: String::new(),
+                provider: String::new(),
                 fast: false,
             },
         ]);
 
         assert_eq!(
             text,
-            "<!-- context-group: work|Work|#FB4934 -->\n\n# First\ncodex resume 11111111-1111-1111-1111-111111111111 --full-auto\n\n<!-- /context-group -->\n"
+            "<!-- context-group: work|Work|#FB4934 -->\n\n# First\ncodex resume 11111111-1111-1111-1111-111111111111 -c 'service_tier=\"fast\"'\n\n# Kimi\nkimi --session session_22222222-2222-2222-2222-222222222222\n\n<!-- /context-group -->\n"
         );
     }
 
     #[test]
-    fn collects_assistant_output_text() {
-        let payload = serde_json::json!({
-            "type": "message",
-            "role": "assistant",
-            "content": [
-                {"type": "output_text", "text": "First line"},
-                {"type": "output_text", "text": "Second line"},
-                {"type": "input_text", "text": "ignored"}
-            ]
-        });
+    fn parses_kimi_iso_timestamps() {
+        assert_eq!(parse_iso8601_utc_ms("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(
+            parse_iso8601_utc_ms("1970-01-01T00:00:01.250Z"),
+            Some(1_250)
+        );
+    }
 
-        assert_eq!(collect_output_text(&payload), "First line\n\nSecond line");
+    #[test]
+    fn loads_kimi_recent_sessions_and_honors_tombstones() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("context-kimi-test-{}-{stamp}", std::process::id()));
+        let home = root.join("home").join("tester");
+        let codex_out = home.join("codex-out");
+        let markdown = codex_out.join("codex sessions.md");
+        let kimi_home = home.join(".kimi-code");
+        let active_dir = kimi_home
+            .join("sessions")
+            .join("wd_test")
+            .join("session_active");
+        let deleted_dir = kimi_home
+            .join("sessions")
+            .join("wd_test")
+            .join("session_deleted");
+        fs::create_dir_all(codex_out)?;
+        fs::create_dir_all(&active_dir)?;
+        fs::create_dir_all(&deleted_dir)?;
+        fs::write(&markdown, "")?;
+        fs::write(
+            kimi_home.join("session_index.jsonl"),
+            concat!(
+                "{\"sessionId\":\"session_active\",\"sessionDir\":\"/home/tester/.kimi-code/sessions/wd_test/session_active\",\"workDir\":\"/home/tester/codex-out\"}\n",
+                "{\"sessionId\":\"session_deleted\",\"deleted\":true}\n"
+            ),
+        )?;
+        fs::write(
+            active_dir.join("state.json"),
+            r#"{"createdAt":"2026-07-26T19:00:00.000Z","updatedAt":"2026-07-26T20:00:01.250Z","title":"Kimi fixture","workDir":"/home/tester/codex-out","forkedFrom":"session_parent"}"#,
+        )?;
+        fs::write(
+            deleted_dir.join("state.json"),
+            r#"{"updatedAt":"2026-07-26T21:00:00.000Z","title":"Deleted"}"#,
+        )?;
+
+        let recent = load_recent_kimi_contexts(&markdown.to_string_lossy())?;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, "session_active");
+        assert_eq!(recent[0].title, "Kimi fixture");
+        assert_eq!(recent[0].provider, PROVIDER_KIMI);
+        assert_eq!(recent[0].forked_from_id.as_deref(), Some("session_parent"));
+        assert_eq!(recent[0].updated_at, 1_785_096_001_250);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

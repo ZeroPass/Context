@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../src/bindings/bindings.dart';
 import 'models.dart';
 
-enum _PendingOpKind { load, save, open }
+enum _PendingOpKind { load, save }
 
 enum ThemeAppearance { light, sepia, dim, dark }
 
@@ -47,11 +47,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<RustSignalPack<UiState>>? _uiStateSub;
   StreamSubscription<RustSignalPack<OpFinished>>? _opFinishedSub;
   Timer? _autosaveTimer;
-  Timer? _lastAnswersRefreshTimer;
-  bool _pendingLastAnswersRefresh = true;
+  Timer? _recentRefreshTimer;
+  bool _pendingRecentRefresh = true;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
 
-  static const _lastAnswersRefreshInterval = Duration(seconds: 20);
+  static const _recentRefreshInterval = Duration(seconds: 20);
 
   BigInt _nextRequestId = BigInt.one;
   final Map<Uint64, _PendingOp> _pendingOps = <Uint64, _PendingOp>{};
@@ -62,25 +62,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool busy = false;
   bool dirty = false;
   bool autosaveEnabled = true;
-  bool augmentAnswerPathsEnabled = true;
-  bool lastAnswersBusy = false;
-  bool lastAnswersLoaded = false;
-  String answerPathPrefix = '';
+  bool recentBusy = false;
+  SessionProvider recentProvider = SessionProvider.codex;
   String filterQuery = '';
   String? status;
   String? lastError;
-  String? lastAnswersStatus;
+  String? recentStatus;
 
   List<ConfigItem> items = const <ConfigItem>[];
   List<String> warnings = const <String>[];
-  List<RecentContext> recentContexts = const <RecentContext>[];
-  List<LastAnswer> lastAnswers = const <LastAnswer>[];
+  List<RecentContext> recentCodex = const <RecentContext>[];
+  List<RecentContext> recentKimi = const <RecentContext>[];
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _autosaveTimer?.cancel();
-    _lastAnswersRefreshTimer?.cancel();
+    _recentRefreshTimer?.cancel();
     _uiStateSub?.cancel();
     _opFinishedSub?.cancel();
     super.dispose();
@@ -102,19 +100,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     sessionsMarkdownPath = _resolveInitialMarkdownPath(
       _prefs?.getString('sessionsMarkdownPath'),
     );
-    augmentAnswerPathsEnabled =
-        _prefs?.getBool('augmentAnswerPathsEnabled') ?? true;
-    answerPathPrefix = (_prefs?.getString('answerPathPrefix') ?? '').trim();
-    if (answerPathPrefix.isEmpty) {
-      answerPathPrefix = _deriveAnswerPathPrefix(sessionsMarkdownPath);
-    }
+    recentProvider = SessionProviderInfo.parse(
+      _prefs?.getString('recentProvider'),
+    );
 
     InitApp(
       themeSeedColorValue: themeSeedColorValue,
       sessionsMarkdownPath: sessionsMarkdownPath,
     ).sendSignalToRust();
 
-    _startLastAnswersRefreshTimer();
+    _startRecentRefreshTimer();
     notifyListeners();
   }
 
@@ -122,15 +117,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
     if (state == AppLifecycleState.resumed) {
-      unawaited(refreshLastAnswers());
+      unawaited(refreshRecent());
     }
   }
 
-  void _startLastAnswersRefreshTimer() {
-    _lastAnswersRefreshTimer?.cancel();
-    _lastAnswersRefreshTimer = Timer.periodic(
-      _lastAnswersRefreshInterval,
-      (_) => unawaited(refreshLastAnswers()),
+  void _startRecentRefreshTimer() {
+    _recentRefreshTimer?.cancel();
+    _recentRefreshTimer = Timer.periodic(
+      _recentRefreshInterval,
+      (_) => unawaited(refreshRecent()),
     );
   }
 
@@ -140,6 +135,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   List<ConfigItem> get groups =>
       items.where((item) => item.isGroup).toList(growable: false);
+
+  List<RecentContext> get visibleRecent =>
+      recentProvider == SessionProvider.codex ? recentCodex : recentKimi;
 
   bool get hasFilter => filterQuery.trim().isNotEmpty;
 
@@ -159,52 +157,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         item.displayName.toLowerCase(),
         item.commandId.toLowerCase(),
         item.shortId.toLowerCase(),
+        item.provider.label.toLowerCase(),
       ];
       if (haystacks.any((value) => value.contains(query))) {
         out.add(index);
       }
     }
     return out;
-  }
-
-  String _deriveAnswerPathPrefix(String markdownPath) {
-    final trimmed = markdownPath.trim();
-    if (trimmed.isEmpty) {
-      return '';
-    }
-
-    for (final suffix in const <String>[
-      r'\codex sessions.md',
-      '/codex sessions.md',
-    ]) {
-      if (trimmed.endsWith(suffix)) {
-        return trimmed.substring(0, trimmed.length - suffix.length);
-      }
-    }
-
-    final lastSlash = trimmed.lastIndexOf('/');
-    final lastBackslash = trimmed.lastIndexOf('\\');
-    final splitAt = lastSlash > lastBackslash ? lastSlash : lastBackslash;
-    if (splitAt <= 0) {
-      return trimmed;
-    }
-    return trimmed.substring(0, splitAt);
-  }
-
-  void _syncDerivedAnswerPathPrefix(String previousPath, String nextPath) {
-    final current = answerPathPrefix.trim();
-    final previousDerived = _deriveAnswerPathPrefix(previousPath);
-    if (current.isNotEmpty && current != previousDerived) {
-      return;
-    }
-
-    final nextDerived = _deriveAnswerPathPrefix(nextPath);
-    if (answerPathPrefix == nextDerived) {
-      return;
-    }
-
-    answerPathPrefix = nextDerived;
-    _prefs?.setString('answerPathPrefix', answerPathPrefix);
   }
 
   String _resolveInitialMarkdownPath(String? savedPath) {
@@ -379,25 +338,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  void setAugmentAnswerPathsEnabled(bool value) {
-    if (augmentAnswerPathsEnabled == value) {
-      return;
-    }
-    augmentAnswerPathsEnabled = value;
-    _prefs?.setBool('augmentAnswerPathsEnabled', augmentAnswerPathsEnabled);
-    notifyListeners();
-  }
-
-  void setAnswerPathPrefix(String value) {
-    final normalized = value.trim();
-    if (answerPathPrefix == normalized) {
-      return;
-    }
-    answerPathPrefix = normalized;
-    _prefs?.setString('answerPathPrefix', answerPathPrefix);
-    notifyListeners();
-  }
-
   void setFilterQuery(String value) {
     if (filterQuery == value) {
       return;
@@ -406,57 +346,50 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  void setRecentProvider(SessionProvider value) {
+    if (recentProvider == value) {
+      return;
+    }
+    recentProvider = value;
+    _prefs?.setString('recentProvider', value.key);
+    notifyListeners();
+  }
+
   Future<void> loadConfig({String? markdownPath}) async {
     if (markdownPath != null) {
-      final previousPath = sessionsMarkdownPath;
       sessionsMarkdownPath = markdownPath.trim();
       await _prefs?.setString('sessionsMarkdownPath', sessionsMarkdownPath);
-      _syncDerivedAnswerPathPrefix(previousPath, sessionsMarkdownPath);
     }
 
-    lastAnswersBusy = false;
-    lastAnswersLoaded = false;
-    lastAnswersStatus = 'Loading last answers in background...';
-    lastAnswers = const <LastAnswer>[];
-    _pendingLastAnswersRefresh = true;
+    _pendingRecentRefresh = true;
     notifyListeners();
 
     await _runOp(_PendingOpKind.load, (requestId) {
       LoadConfig(
         requestId: requestId,
         sessionsMarkdownPath: sessionsMarkdownPath,
-        loadLastAnswers: false,
       ).sendSignalToRust();
     });
   }
 
-  void ensureLastAnswersLoaded() {
-    if (lastAnswersLoaded) {
-      return;
-    }
-    refreshLastAnswers(queueIfBusy: true);
-  }
-
-  Future<void> refreshLastAnswers({bool queueIfBusy = false}) async {
+  Future<void> refreshRecent({bool queueIfBusy = false}) async {
     if (_lifecycleState != AppLifecycleState.resumed ||
-        lastError != null ||
         sessionsMarkdownPath.trim().isEmpty) {
       return;
     }
 
-    if (busy || lastAnswersBusy) {
+    if (busy || recentBusy) {
       if (queueIfBusy) {
-        _pendingLastAnswersRefresh = true;
+        _pendingRecentRefresh = true;
       }
       return;
     }
 
-    _pendingLastAnswersRefresh = false;
+    _pendingRecentRefresh = false;
 
-    LoadConfig(
+    RefreshRecent(
       requestId: Uint64.fromBigInt(BigInt.zero),
       sessionsMarkdownPath: sessionsMarkdownPath,
-      loadLastAnswers: true,
     ).sendSignalToRust();
   }
 
@@ -470,17 +403,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           items.map((item) => item.toJson()).toList(growable: false),
         ),
       ).sendSignalToRust();
-    });
-  }
-
-  Future<void> openReference(String target) async {
-    final trimmed = target.trim();
-    if (trimmed.isEmpty) {
-      return;
-    }
-
-    await _runOp(_PendingOpKind.open, (requestId) {
-      OpenReference(requestId: requestId, target: trimmed).sendSignalToRust();
     });
   }
 
@@ -575,7 +497,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void renameSession(int index, String title) => renameItem(index, title);
 
   void toggleSessionFast(int index) {
-    if (index < 0 || index >= items.length || !items[index].isSession) {
+    if (index < 0 ||
+        index >= items.length ||
+        !items[index].isSession ||
+        !items[index].supportsFast) {
       return;
     }
 
@@ -620,28 +545,34 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void addSession({
     required String sessionInput,
     required String title,
+    required SessionProvider provider,
     String? groupId,
     bool fast = false,
   }) {
-    final commandId = _extractCommandId(sessionInput);
+    final parsed = parseSessionInput(sessionInput, fallback: provider);
     final insertIndex = _insertIndexForGroup(groupId);
     final updated = List<ConfigItem>.from(items)
       ..insert(
         insertIndex,
-        ConfigItem.session(commandId: commandId, name: title.trim()).copyWith(
-          fast: fast,
-        ),
+        ConfigItem.session(
+          commandId: parsed.id,
+          name: title.trim(),
+          provider: parsed.provider,
+        ).copyWith(fast: parsed.provider == SessionProvider.codex && fast),
       );
     _applyItems(updated);
   }
 
-  bool hasSessionId(String sessionId) {
+  bool hasSession(SessionProvider provider, String sessionId) {
     final normalized = sessionId.trim().toLowerCase();
     if (normalized.isEmpty) {
       return false;
     }
     return items.any(
-      (item) => item.isSession && item.commandId.trim().toLowerCase() == normalized,
+      (item) =>
+          item.isSession &&
+          item.provider == provider &&
+          item.commandId.trim().toLowerCase() == normalized,
     );
   }
 
@@ -923,26 +854,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     busy = state.busy;
     status = state.status;
     lastError = state.lastError;
-    lastAnswersBusy = state.lastAnswersBusy;
-    lastAnswersLoaded = state.lastAnswersLoaded;
-    lastAnswersStatus = state.lastAnswersStatus;
+    recentBusy = state.recentBusy;
+    recentStatus = state.recentStatus;
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     items = _decodeItems(state.itemsJson);
     warnings = _decodeWarnings(state.warningsJson);
-    recentContexts = _decodeRecentContexts(state.recentContextsJson);
-    lastAnswers = _decodeLastAnswers(state.lastAnswersJson);
-    final shouldStartPendingLastAnswersRefresh =
-        _pendingLastAnswersRefresh &&
+    recentCodex = _decodeRecentContexts(state.recentCodexJson);
+    recentKimi = _decodeRecentContexts(state.recentKimiJson);
+    final shouldStartPendingRecentRefresh =
+        _pendingRecentRefresh &&
         !busy &&
         lastError == null &&
-        !lastAnswersBusy &&
+        !recentBusy &&
         sessionsMarkdownPath.trim().isNotEmpty;
-    if (shouldStartPendingLastAnswersRefresh) {
-      _pendingLastAnswersRefresh = false;
-      LoadConfig(
+    if (shouldStartPendingRecentRefresh) {
+      _pendingRecentRefresh = false;
+      RefreshRecent(
         requestId: Uint64.fromBigInt(BigInt.zero),
         sessionsMarkdownPath: sessionsMarkdownPath,
-        loadLastAnswers: true,
       ).sendSignalToRust();
     }
     notifyListeners();
@@ -996,33 +925,50 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
     return decoded
         .whereType<Map>()
-        .map(
-          (item) => RecentContext.fromJson(Map<String, dynamic>.from(item)),
-        )
+        .map((item) => RecentContext.fromJson(Map<String, dynamic>.from(item)))
         .toList(growable: false);
   }
 
-  List<LastAnswer> _decodeLastAnswers(String jsonText) {
-    final decoded = jsonDecode(jsonText);
-    if (decoded is! List) {
-      return const <LastAnswer>[];
-    }
-    return decoded
-        .whereType<Map>()
-        .map((item) => LastAnswer.fromJson(Map<String, dynamic>.from(item)))
-        .toList(growable: false);
-  }
-
-  String _extractCommandId(String input) {
+  ({SessionProvider provider, String id}) parseSessionInput(
+    String input, {
+    required SessionProvider fallback,
+  }) {
     final trimmed = input.trim();
-    final match = RegExp(
-      r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})',
-    ).firstMatch(trimmed);
-    final id = match?.group(1)?.toLowerCase();
-    if (id == null || id.isEmpty) {
-      throw FormatException('Enter a full session id or a codex command.');
+    if (trimmed.isEmpty) {
+      throw const FormatException('Enter a session id or resume command.');
     }
-    return id;
+
+    final codexMatch = RegExp(
+      r'(?:^|\s)codex(?:\.exe)?\s+(?:resume|fork)\s+([A-Za-z0-9._-]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (codexMatch != null) {
+      return (
+        provider: SessionProvider.codex,
+        id: codexMatch.group(1)!.toLowerCase(),
+      );
+    }
+
+    final kimiMatch = RegExp(
+      r'(?:^|[\s&])kimi(?:\.exe)?\s+.*?(?:--session|--resume|-S|-r)(?:=|\s+)([A-Za-z0-9._-]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (kimiMatch != null) {
+      return (provider: SessionProvider.kimi, id: kimiMatch.group(1)!);
+    }
+
+    if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(trimmed)) {
+      throw const FormatException(
+        'Enter a session id, Codex resume command, or Kimi session command.',
+      );
+    }
+
+    final inferred =
+        trimmed.toLowerCase().startsWith('session_') ||
+            trimmed.toLowerCase().startsWith('ses_')
+        ? SessionProvider.kimi
+        : fallback;
+    return (provider: inferred, id: trimmed);
   }
 
   String _makeUniqueGroupId(String name) {
@@ -1070,16 +1016,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return '''
 <!-- context-group: starter|Starter|#83A598 -->
 
-# Recent Work
+# Codex Work
 codex resume 11111111-1111-1111-1111-111111111111
 
-# Investigate Issue
-codex fork 22222222-2222-2222-2222-222222222222
+# Fast Codex Work
+codex resume 22222222-2222-2222-2222-222222222222 -c 'service_tier="fast"'
 
 <!-- /context-group -->
 
-# Scratchpad
-codex resume 33333333-3333-3333-3333-333333333333 --full-auto
+# Kimi Work
+kimi --session session_example_33333333
 ''';
   }
 }

@@ -11,7 +11,12 @@ pub struct InitApp {
 pub struct LoadConfig {
     pub request_id: u64,
     pub sessions_markdown_path: String,
-    pub load_last_answers: bool,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct RefreshRecent {
+    pub request_id: u64,
+    pub sessions_markdown_path: String,
 }
 
 #[derive(Deserialize, DartSignal)]
@@ -19,12 +24,6 @@ pub struct SaveConfig {
     pub request_id: u64,
     pub sessions_markdown_path: String,
     pub items_json: String,
-}
-
-#[derive(Deserialize, DartSignal)]
-pub struct OpenReference {
-    pub request_id: u64,
-    pub target: String,
 }
 
 #[derive(Deserialize, DartSignal)]
@@ -41,11 +40,10 @@ pub struct UiState {
     pub sessions_markdown_path: String,
     pub items_json: String,
     pub warnings_json: String,
-    pub recent_contexts_json: String,
-    pub last_answers_json: String,
-    pub last_answers_busy: bool,
-    pub last_answers_loaded: bool,
-    pub last_answers_status: Option<String>,
+    pub recent_codex_json: String,
+    pub recent_kimi_json: String,
+    pub recent_busy: bool,
+    pub recent_status: Option<String>,
 }
 
 #[derive(Serialize, RustSignal)]

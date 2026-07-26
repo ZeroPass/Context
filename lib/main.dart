@@ -66,7 +66,7 @@ class ContextApp extends StatelessWidget {
                 ),
               ),
             ),
-            home: const SelectionArea(child: HomeScreen()),
+            home: const HomeScreen(),
           );
         },
       ),
@@ -170,7 +170,11 @@ class ContextApp extends StatelessWidget {
       ),
       outline: lift(darkScheme.outline, 0.16),
       outlineVariant: lift(darkScheme.outlineVariant, 0.12),
-      surfaceTint: soften(darkScheme.surfaceTint, lightScheme.surfaceTint, 0.22),
+      surfaceTint: soften(
+        darkScheme.surfaceTint,
+        lightScheme.surfaceTint,
+        0.22,
+      ),
       inversePrimary: soften(
         darkScheme.inversePrimary,
         lightScheme.inversePrimary,

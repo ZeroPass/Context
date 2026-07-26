@@ -1,9 +1,11 @@
 # Context (Rust + Flutter)
 
-Desktop UI for browsing local Codex sessions, previewing curated markdown-based renames, syncing session titles back into Codex, and opening a WSL terminal in a session's working directory.
+Desktop UI for organizing local Codex and Kimi sessions in a markdown file. Context copies provider-correct resume commands, supports Codex fork and Fast commands, and lists the three most recent sessions from each provider.
 
 - Flutter (UI)
 - Rust (backend) via [Rinf](https://pub.dev/packages/rinf)
+- Codex recent sessions from `~/.codex/state_5.sqlite`
+- Kimi recent sessions from `~/.kimi-code/session_index.jsonl`
 
 ## Run (Linux dev)
 

@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -12,31 +10,8 @@ import '../app/models.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
 
-class _InlineRun {
-  const _InlineRun.text(this.text)
-    : copyText = null,
-      openTarget = null;
-
-  const _InlineRun.copy({
-    required this.text,
-    required this.copyText,
-    this.openTarget,
-  });
-
-  final String text;
-  final String? copyText;
-  final String? openTarget;
-
-  bool get isCopyable => copyText != null;
-
-  bool get isOpenable => openTarget != null;
-}
-
 class _PassiveTooltip extends StatefulWidget {
-  const _PassiveTooltip({
-    required this.message,
-    required this.child,
-  });
+  const _PassiveTooltip({required this.message, required this.child});
 
   final String message;
   final Widget child;
@@ -104,10 +79,14 @@ class _PassiveTooltipState extends State<_PassiveTooltip> {
                           vertical: 6,
                         ),
                         decoration: BoxDecoration(
-                          color: scheme.surfaceContainerHigh.withValues(alpha: 0.88),
+                          color: scheme.surfaceContainerHigh.withValues(
+                            alpha: 0.88,
+                          ),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: scheme.outlineVariant.withValues(alpha: 0.38),
+                            color: scheme.outlineVariant.withValues(
+                              alpha: 0.38,
+                            ),
                             width: 0.7,
                           ),
                           boxShadow: [
@@ -142,10 +121,7 @@ class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
   Widget _tooltip(String message, Widget child) {
-    return _PassiveTooltip(
-      message: message,
-      child: child,
-    );
+    return _PassiveTooltip(message: message, child: child);
   }
 
   Future<void> _showError(BuildContext context, Object error) async {
@@ -250,29 +226,6 @@ class HomeScreen extends StatelessWidget {
     ).showSnackBar(SnackBar(content: Text('$label copied.')));
   }
 
-  Future<void> _openReference(
-    BuildContext context,
-    String target,
-    String label,
-  ) async {
-    try {
-      await context.read<AppState>().openReference(target);
-    } catch (error) {
-      if (!context.mounted) {
-        return;
-      }
-      await _showError(context, error);
-      return;
-    }
-
-    if (!context.mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$label opened.')));
-  }
-
   Future<void> _renameItem(
     BuildContext context,
     AppState state,
@@ -333,51 +286,96 @@ class HomeScreen extends StatelessWidget {
     AppState state, {
     String? initialSessionInput,
     String? initialName,
+    SessionProvider initialProvider = SessionProvider.codex,
   }) async {
     final commandController = TextEditingController(
       text: initialSessionInput ?? '',
     );
     final nameController = TextEditingController(text: initialName ?? '');
+    var selectedProvider = initialProvider;
 
     try {
       final accepted = await showDialog<bool>(
         context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('Add Session'),
-          content: SizedBox(
-            width: 420,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: nameController,
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Name',
-                    hintText: 'Optional display name',
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Add Session'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SegmentedButton<SessionProvider>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(
+                        value: SessionProvider.codex,
+                        icon: Icon(Icons.terminal_rounded, size: 16),
+                        label: Text('Codex'),
+                      ),
+                      ButtonSegment(
+                        value: SessionProvider.kimi,
+                        icon: Icon(Icons.nights_stay_outlined, size: 16),
+                        label: Text('Kimi'),
+                      ),
+                    ],
+                    selected: <SessionProvider>{selectedProvider},
+                    onSelectionChanged: (selection) => setDialogState(
+                      () => selectedProvider = selection.first,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: commandController,
-                  decoration: const InputDecoration(
-                    labelText: 'Session id or codex command',
-                    hintText: 'codex resume <id>',
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: nameController,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Name',
+                      hintText: 'Optional display name',
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: commandController,
+                    decoration: InputDecoration(
+                      labelText: 'Session id or resume command',
+                      hintText: selectedProvider == SessionProvider.codex
+                          ? 'codex resume <id>'
+                          : 'kimi --session <id>',
+                    ),
+                    onChanged: (value) {
+                      try {
+                        final parsed = state.parseSessionInput(
+                          value,
+                          fallback: selectedProvider,
+                        );
+                        final lower = value.toLowerCase();
+                        if ((lower.contains('codex ') ||
+                                lower.contains('kimi ')) &&
+                            parsed.provider != selectedProvider) {
+                          setDialogState(
+                            () => selectedProvider = parsed.provider,
+                          );
+                        }
+                      } on FormatException {
+                        // Incomplete commands are expected while typing.
+                      }
+                    },
+                  ),
+                ],
+              ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Add'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Add'),
-            ),
-          ],
         ),
       );
 
@@ -388,6 +386,7 @@ class HomeScreen extends StatelessWidget {
       state.addSession(
         sessionInput: commandController.text,
         title: nameController.text,
+        provider: selectedProvider,
       );
     } catch (error) {
       if (!context.mounted) {
@@ -411,6 +410,7 @@ class HomeScreen extends StatelessWidget {
       state,
       initialSessionInput: item.id,
       initialName: prefilledName,
+      initialProvider: item.provider,
     );
   }
 
@@ -476,6 +476,7 @@ class HomeScreen extends StatelessWidget {
 
   String _configuredSessionTitle(
     AppState state,
+    SessionProvider provider,
     String sessionId,
     String fallback,
   ) {
@@ -484,7 +485,8 @@ class HomeScreen extends StatelessWidget {
       if (!item.isSession) {
         continue;
       }
-      if (item.commandId.trim().toLowerCase() != normalized) {
+      if (item.provider != provider ||
+          item.commandId.trim().toLowerCase() != normalized) {
         continue;
       }
       final configured = item.displayName.trim();
@@ -501,14 +503,24 @@ class HomeScreen extends StatelessWidget {
   String _prefilledRecentContextName(AppState state, RecentContext item) {
     final parentId = item.forkedFromId?.trim() ?? '';
     if (parentId.isNotEmpty) {
-      final parentTitle = _configuredSessionTitle(state, parentId, '');
+      final parentTitle = _configuredSessionTitle(
+        state,
+        item.provider,
+        parentId,
+        '',
+      );
       final normalizedParent = parentTitle.trim();
       if (normalizedParent.isNotEmpty && normalizedParent != parentId) {
         return '$normalizedParent fork';
       }
     }
 
-    return _configuredSessionTitle(state, item.id, item.displayTitle);
+    return _configuredSessionTitle(
+      state,
+      item.provider,
+      item.id,
+      item.displayTitle,
+    );
   }
 
   Widget _buildFastToggle(
@@ -518,48 +530,57 @@ class HomeScreen extends StatelessWidget {
     int index,
   ) {
     final scheme = Theme.of(context).colorScheme;
-    final active = item.fast;
+    final supported = item.supportsFast;
+    final active = supported && item.fast;
 
     return _tooltip(
-      active ? 'Fast session on' : 'Fast session off',
-      Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(999),
-          onTap: () => state.toggleSessionFast(index),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
-            curve: Curves.easeOutCubic,
-            width: 42,
-            height: 24,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: active
-                  ? scheme.primaryContainer.withValues(alpha: 0.96)
-                  : scheme.surfaceContainerHighest.withValues(alpha: 0.82),
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(
+      supported
+          ? active
+                ? 'Fast session on'
+                : 'Fast session off'
+          : 'Fast mode is not available for Kimi.',
+      AnimatedOpacity(
+        opacity: supported ? 1 : 0.34,
+        duration: const Duration(milliseconds: 120),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(999),
+            onTap: supported ? () => state.toggleSessionFast(index) : null,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOutCubic,
+              width: 42,
+              height: 24,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
                 color: active
-                    ? scheme.primary.withValues(alpha: 0.65)
-                    : scheme.outlineVariant,
-                width: active ? 1.1 : 0.8,
+                    ? scheme.primaryContainer.withValues(alpha: 0.96)
+                    : scheme.surfaceContainerHighest.withValues(alpha: 0.82),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: active
+                      ? scheme.primary.withValues(alpha: 0.65)
+                      : scheme.outlineVariant,
+                  width: active ? 1.1 : 0.8,
+                ),
+                boxShadow: active
+                    ? [
+                        BoxShadow(
+                          color: scheme.primary.withValues(alpha: 0.24),
+                          blurRadius: 10,
+                          spreadRadius: 0.2,
+                        ),
+                      ]
+                    : const [],
               ),
-              boxShadow: active
-                  ? [
-                      BoxShadow(
-                        color: scheme.primary.withValues(alpha: 0.24),
-                        blurRadius: 10,
-                        spreadRadius: 0.2,
-                      ),
-                    ]
-                  : const [],
-            ),
-            child: Icon(
-              active ? Icons.bolt_rounded : Icons.bolt_outlined,
-              size: 15,
-              color: active
-                  ? scheme.onPrimaryContainer
-                  : scheme.onSurfaceVariant.withValues(alpha: 0.75),
+              child: Icon(
+                active ? Icons.bolt_rounded : Icons.bolt_outlined,
+                size: 15,
+                color: active
+                    ? scheme.onPrimaryContainer
+                    : scheme.onSurfaceVariant.withValues(alpha: 0.75),
+              ),
             ),
           ),
         ),
@@ -656,259 +677,224 @@ class HomeScreen extends StatelessWidget {
   }
 
   Future<void> _showSettingsDialog(BuildContext context, AppState state) async {
-    final prefixController = TextEditingController(text: state.answerPathPrefix);
-    try {
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) {
-          return StatefulBuilder(
-            builder: (context, setState) => AlertDialog(
-              title: const Text('Settings'),
-              content: SizedBox(
-                width: 420,
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Settings'),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                  Text(
-                    'Markdown file',
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: Theme.of(context).colorScheme.outlineVariant,
-                        width: 0.7,
+                    Text(
+                      'Markdown file',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                    child: SelectableText(
-                      state.sessionsMarkdownPath.trim().isEmpty
-                          ? 'No markdown file selected.'
-                          : state.sessionsMarkdownPath,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          await _pickMarkdownFile(context, state);
-                          prefixController.text = state.answerPathPrefix;
-                          prefixController.selection =
-                              TextSelection.collapsed(
-                                offset: prefixController.text.length,
-                              );
-                          setState(() {});
-                        },
-                        icon: const Icon(Icons.description_outlined, size: 18),
-                        label: const Text('Pick Markdown File'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: state.busy
-                            ? null
-                            : () => _reload(context, state),
-                        icon: const Icon(Icons.refresh_rounded, size: 18),
-                        label: const Text('Reload'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: state.busy
-                            ? null
-                            : () async {
-                                await _createExampleMarkdown(context, state);
-                                prefixController.text = state.answerPathPrefix;
-                                prefixController.selection =
-                                    TextSelection.collapsed(
-                                      offset: prefixController.text.length,
-                                    );
-                                setState(() {});
-                              },
-                        icon: const Icon(Icons.auto_awesome_outlined, size: 18),
-                        label: const Text('Create Example File'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Autosave',
-                          style: Theme.of(context).textTheme.labelLarge
-                              ?.copyWith(fontWeight: FontWeight.w700),
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerLowest
+                            .withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.outlineVariant,
+                          width: 0.7,
                         ),
                       ),
-                      Switch(
-                        value: state.autosaveEnabled,
-                        onChanged: state.busy
-                            ? null
-                            : (value) {
-                                state.setAutosaveEnabled(value);
-                                setState(() {});
-                              },
+                      child: SelectableText(
+                        state.sessionsMarkdownPath.trim().isEmpty
+                            ? 'No markdown file selected.'
+                            : state.sessionsMarkdownPath,
+                        style: Theme.of(context).textTheme.bodySmall,
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Expand Last Answer paths',
-                          style: Theme.of(context).textTheme.labelLarge
-                              ?.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: state.busy
+                              ? null
+                              : () async {
+                                  await _pickMarkdownFile(context, state);
+                                  if (dialogContext.mounted) {
+                                    setDialogState(() {});
+                                  }
+                                },
+                          icon: const Icon(
+                            Icons.description_outlined,
+                            size: 17,
+                          ),
+                          label: const Text('Pick file'),
                         ),
-                      ),
-                      Switch(
-                        value: state.augmentAnswerPathsEnabled,
-                        onChanged: (value) {
-                          state.setAugmentAnswerPathsEnabled(value);
-                          setState(() {});
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: prefixController,
-                    onChanged: (value) {
-                      state.setAnswerPathPrefix(value);
-                      setState(() {});
-                    },
-                    decoration: const InputDecoration(
-                      labelText: 'Workspace path prefix',
-                      hintText:
-                          r'\\wsl.localhost\Ubuntu-24.04\home\user\codex-out',
+                        OutlinedButton.icon(
+                          onPressed: state.busy
+                              ? null
+                              : () async {
+                                  await _reload(context, state);
+                                  if (dialogContext.mounted) {
+                                    setDialogState(() {});
+                                  }
+                                },
+                          icon: const Icon(Icons.refresh_rounded, size: 17),
+                          label: const Text('Reload'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: state.busy
+                              ? null
+                              : () async {
+                                  await _createExampleMarkdown(context, state);
+                                  if (dialogContext.mounted) {
+                                    setDialogState(() {});
+                                  }
+                                },
+                          icon: const Icon(
+                            Icons.auto_awesome_outlined,
+                            size: 17,
+                          ),
+                          label: const Text('Create example'),
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Best effort expansion for relative repo paths shown in Last Answer.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Autosave'),
+                      subtitle: const Text(
+                        'Save changes shortly after editing or reordering.',
+                      ),
+                      value: state.autosaveEnabled,
+                      onChanged: state.busy
+                          ? null
+                          : (value) {
+                              state.setAutosaveEnabled(value);
+                              setDialogState(() {});
+                            },
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Theme mode',
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.2,
+                    const Divider(height: 28),
+                    Text(
+                      'Appearance',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  SegmentedButton<ThemeAppearance>(
-                    showSelectedIcon: false,
-                    segments: const <ButtonSegment<ThemeAppearance>>[
-                      ButtonSegment<ThemeAppearance>(
-                        value: ThemeAppearance.light,
-                        label: Text('Light'),
-                      ),
-                      ButtonSegment<ThemeAppearance>(
-                        value: ThemeAppearance.sepia,
-                        label: Text('Sepia'),
-                      ),
-                      ButtonSegment<ThemeAppearance>(
-                        value: ThemeAppearance.dim,
-                        label: Text('Dusk'),
-                      ),
-                      ButtonSegment<ThemeAppearance>(
-                        value: ThemeAppearance.dark,
-                        label: Text('Dark'),
-                      ),
-                    ],
-                    selected: <ThemeAppearance>{state.themeAppearance},
-                    onSelectionChanged: (selection) {
-                      final appearance = selection.first;
-                      state.setThemeAppearance(appearance);
-                      setState(() {});
-                    },
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    'Theme color',
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.2,
+                    const SizedBox(height: 10),
+                    SegmentedButton<ThemeAppearance>(
+                      showSelectedIcon: false,
+                      segments: const <ButtonSegment<ThemeAppearance>>[
+                        ButtonSegment(
+                          value: ThemeAppearance.light,
+                          label: Text('Light'),
+                        ),
+                        ButtonSegment(
+                          value: ThemeAppearance.sepia,
+                          label: Text('Sepia'),
+                        ),
+                        ButtonSegment(
+                          value: ThemeAppearance.dim,
+                          label: Text('Dusk'),
+                        ),
+                        ButtonSegment(
+                          value: ThemeAppearance.dark,
+                          label: Text('Dark'),
+                        ),
+                      ],
+                      selected: <ThemeAppearance>{state.themeAppearance},
+                      onSelectionChanged: (selection) {
+                        state.setThemeAppearance(selection.first);
+                        setDialogState(() {});
+                      },
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: AppState.themeSeedColors
-                        .map((value) {
-                          final selected = value == state.themeSeedColorValue;
-                          final color = Color(value);
-                          return _tooltip(
-                            '#${value.toRadixString(16).substring(2).toUpperCase()}',
-                            InkWell(
-                              onTap: () {
-                                state.setThemeSeedColor(value);
-                                setState(() {});
-                              },
-                              borderRadius: BorderRadius.circular(999),
-                              child: Container(
-                                width: 32,
-                                height: 32,
-                                decoration: BoxDecoration(
-                                  color: color,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: selected
-                                        ? Theme.of(
-                                            context,
-                                          ).colorScheme.onSurface
-                                        : Theme.of(
-                                            context,
-                                          ).colorScheme.outlineVariant,
-                                    width: selected ? 2.4 : 0.8,
+                    const SizedBox(height: 18),
+                    Text(
+                      'Accent',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: AppState.themeSeedColors
+                          .map((value) {
+                            final selected = value == state.themeSeedColorValue;
+                            final color = Color(value);
+                            final colorLabel =
+                                '#${value.toRadixString(16).substring(2).toUpperCase()}';
+                            return _tooltip(
+                              colorLabel,
+                              InkWell(
+                                onTap: () {
+                                  state.setThemeSeedColor(value);
+                                  setDialogState(() {});
+                                },
+                                borderRadius: BorderRadius.circular(999),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 140),
+                                  width: 32,
+                                  height: 32,
+                                  decoration: BoxDecoration(
+                                    color: color,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: selected
+                                          ? Theme.of(
+                                              context,
+                                            ).colorScheme.onSurface
+                                          : Theme.of(
+                                              context,
+                                            ).colorScheme.outlineVariant,
+                                      width: selected ? 2.4 : 0.8,
+                                    ),
                                   ),
+                                  child: selected
+                                      ? Icon(
+                                          Icons.check_rounded,
+                                          size: 16,
+                                          color:
+                                              ThemeData.estimateBrightnessForColor(
+                                                    color,
+                                                  ) ==
+                                                  Brightness.dark
+                                              ? Colors.white
+                                              : Colors.black,
+                                        )
+                                      : null,
                                 ),
-                                child: selected
-                                    ? Icon(
-                                        Icons.check_rounded,
-                                        size: 16,
-                                        color:
-                                            ThemeData.estimateBrightnessForColor(
-                                                  color,
-                                                ) ==
-                                                Brightness.dark
-                                            ? Colors.white
-                                            : Colors.black,
-                                      )
-                                    : null,
                               ),
-                            ),
-                          );
-                        })
-                        .toList(growable: false),
-                  ),
+                            );
+                          })
+                          .toList(growable: false),
+                    ),
                   ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Close'),
-                ),
-              ],
             ),
-          );
-        },
-      );
-    } finally {
-      prefixController.dispose();
-    }
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   Widget _buildCounterChip(
@@ -927,8 +913,8 @@ class HomeScreen extends StatelessWidget {
       ),
       child: Text(
         '$label $value',
-        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-          fontWeight: FontWeight.w700,
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          fontWeight: FontWeight.w600,
           color: scheme.onSurface,
         ),
       ),
@@ -967,8 +953,7 @@ class HomeScreen extends StatelessWidget {
 
   Widget _buildLoadedLine(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
-    final message =
-        (state.status ?? '').trim().isNotEmpty
+    final message = (state.status ?? '').trim().isNotEmpty
         ? state.status!.trim()
         : state.sessionsMarkdownPath.trim().isEmpty
         ? 'No markdown file selected.'
@@ -1001,6 +986,14 @@ class HomeScreen extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
       decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            scheme.primaryContainer.withValues(alpha: 0.10),
+            Colors.transparent,
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
         border: Border(
           bottom: BorderSide(color: scheme.outlineVariant, width: 0.7),
         ),
@@ -1036,7 +1029,7 @@ class HomeScreen extends StatelessWidget {
                   state.dirty ? 'Unsaved' : 'Saved',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: scheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -1059,98 +1052,382 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildRecentContexts(BuildContext context, AppState state) {
-    if (state.recentContexts.isEmpty) {
-      return const SizedBox.shrink();
+  String _formatRecentAge(int timestampMs) {
+    if (timestampMs <= 0) {
+      return 'recent';
     }
+    final updated = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+    final elapsed = DateTime.now().difference(updated);
+    if (elapsed.isNegative || elapsed.inMinutes < 1) {
+      return 'now';
+    }
+    if (elapsed.inHours < 1) {
+      return '${elapsed.inMinutes}m';
+    }
+    if (elapsed.inDays < 1) {
+      return '${elapsed.inHours}h';
+    }
+    if (elapsed.inDays < 7) {
+      return '${elapsed.inDays}d';
+    }
+    return '${updated.day}.${updated.month}.';
+  }
 
+  Widget _buildRecentProviderTab(
+    BuildContext context,
+    AppState state,
+    SessionProvider provider,
+    int count,
+  ) {
     final scheme = Theme.of(context).colorScheme;
+    final selected = state.recentProvider == provider;
+    final providerColor = _providerColor(scheme, provider);
+
+    return Expanded(
+      child: InkWell(
+        onTap: () => state.setRecentProvider(provider),
+        borderRadius: BorderRadius.circular(9),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: selected
+                ? providerColor.withValues(alpha: 0.16)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(
+              color: selected
+                  ? providerColor.withValues(alpha: 0.55)
+                  : Colors.transparent,
+              width: 0.8,
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                provider == SessionProvider.codex
+                    ? Icons.terminal_rounded
+                    : Icons.nights_stay_outlined,
+                size: 15,
+                color: selected ? providerColor : scheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 7),
+              Text(
+                provider.label,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Container(
+                constraints: const BoxConstraints(minWidth: 20),
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? providerColor.withValues(alpha: 0.22)
+                      : scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  '$count',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: selected
+                        ? scheme.onSurface
+                        : scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecentContexts(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    final providerColor = _providerColor(scheme, state.recentProvider);
+    final recent = state.visibleRecent;
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        border: Border(
-          top: BorderSide(color: scheme.outlineVariant, width: 0.7),
+        gradient: LinearGradient(
+          colors: [
+            providerColor.withValues(alpha: 0.10),
+            scheme.surfaceContainerLowest.withValues(alpha: 0.38),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(
+          color: providerColor.withValues(alpha: 0.30),
+          width: 0.7,
         ),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            'Recent',
-            style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              fontWeight: FontWeight.w700,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+            child: Row(
+              children: [
+                Container(
+                  width: 7,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    color: providerColor,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Recent sessions',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (state.recentStatus?.trim().isNotEmpty == true)
+                        Text(
+                          state.recentStatus!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                                fontSize: 11,
+                              ),
+                        ),
+                    ],
+                  ),
+                ),
+                _tooltip(
+                  'Refresh recent sessions',
+                  IconButton(
+                    onPressed: state.recentBusy
+                        ? null
+                        : () => state.refreshRecent(queueIfBusy: true),
+                    icon: AnimatedRotation(
+                      turns: state.recentBusy ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 300),
+                      child: const Icon(Icons.refresh_rounded, size: 18),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 10),
-          ...state.recentContexts.map((item) {
-            final alreadySaved = state.hasSessionId(item.id);
-            final displayTitle = _configuredSessionTitle(
-              state,
-              item.id,
-              item.displayTitle,
-            );
-            return Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Container(
+              padding: const EdgeInsets.all(3),
               decoration: BoxDecoration(
-                color: scheme.surfaceContainerLowest.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: scheme.outlineVariant,
-                  width: 0.6,
-                ),
+                color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
+                borderRadius: BorderRadius.circular(11),
               ),
               child: Row(
                 children: [
-                  Container(
-                    constraints: const BoxConstraints(minWidth: 64),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHigh.withValues(alpha: 0.75),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      item.shortId,
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
+                  _buildRecentProviderTab(
+                    context,
+                    state,
+                    SessionProvider.codex,
+                    state.recentCodex.length,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      displayTitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  FilledButton.tonalIcon(
-                    onPressed: alreadySaved || state.busy
-                        ? null
-                        : () => _saveRecentContext(context, state, item),
-                    icon: Icon(
-                      alreadySaved
-                          ? Icons.check_rounded
-                          : Icons.add_link_rounded,
-                      size: 16,
-                    ),
-                    label: Text(alreadySaved ? 'Saved' : 'Save'),
+                  _buildRecentProviderTab(
+                    context,
+                    state,
+                    SessionProvider.kimi,
+                    state.recentKimi.length,
                   ),
                 ],
               ),
-            );
-          }),
+            ),
+          ),
+          if (state.recentBusy)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 7, 12, 0),
+              child: LinearProgressIndicator(
+                minHeight: 2,
+                color: providerColor,
+                backgroundColor: providerColor.withValues(alpha: 0.12),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
+            child: recent.isEmpty
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 14,
+                    ),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerLowest.withValues(
+                        alpha: 0.42,
+                      ),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      state.recentBusy
+                          ? 'Reading ${state.recentProvider.label} sessions...'
+                          : 'No recent ${state.recentProvider.label} sessions found.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                : Column(
+                    children: recent
+                        .map((item) {
+                          final alreadySaved = state.hasSession(
+                            item.provider,
+                            item.id,
+                          );
+                          final displayTitle = _configuredSessionTitle(
+                            state,
+                            item.provider,
+                            item.id,
+                            item.displayTitle,
+                          );
+                          final itemColor = _providerColor(
+                            scheme,
+                            item.provider,
+                          );
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            padding: const EdgeInsets.fromLTRB(9, 7, 6, 7),
+                            decoration: BoxDecoration(
+                              color: scheme.surfaceContainerLowest.withValues(
+                                alpha: 0.62,
+                              ),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: scheme.outlineVariant.withValues(
+                                  alpha: 0.8,
+                                ),
+                                width: 0.55,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  constraints: const BoxConstraints(
+                                    minWidth: 72,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: itemColor.withValues(alpha: 0.14),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    item.shortId,
+                                    textAlign: TextAlign.center,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
+                                        ?.copyWith(
+                                          color: scheme.onSurface,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                  ),
+                                ),
+                                const SizedBox(width: 9),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              displayTitle,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .bodyMedium
+                                                  ?.copyWith(
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                            ),
+                                          ),
+                                          if (item.isForked) ...[
+                                            const SizedBox(width: 5),
+                                            _tooltip(
+                                              'Forked session',
+                                              Icon(
+                                                Icons.call_split_rounded,
+                                                size: 13,
+                                                color: itemColor,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                      Text(
+                                        [
+                                          _formatRecentAge(item.updatedAt),
+                                          if (item.workDir?.trim().isNotEmpty ==
+                                              true)
+                                            item.workDir!.trim(),
+                                        ].join('  ·  '),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                              color: scheme.onSurfaceVariant,
+                                              fontSize: 10.5,
+                                            ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 7),
+                                _tooltip(
+                                  alreadySaved
+                                      ? 'Already saved'
+                                      : 'Add to Context',
+                                  IconButton.filledTonal(
+                                    visualDensity: VisualDensity.compact,
+                                    onPressed: alreadySaved || state.busy
+                                        ? null
+                                        : () => _saveRecentContext(
+                                            context,
+                                            state,
+                                            item,
+                                          ),
+                                    icon: Icon(
+                                      alreadySaved
+                                          ? Icons.check_rounded
+                                          : Icons.add_rounded,
+                                      size: 17,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        })
+                        .toList(growable: false),
+                  ),
+          ),
         ],
       ),
     );
@@ -1162,9 +1439,18 @@ class HomeScreen extends StatelessWidget {
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
+        color: scheme.surfaceContainerLowest.withValues(alpha: 0.28),
         border: Border.all(color: scheme.outlineVariant, width: 0.7),
         borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.035),
+            blurRadius: 18,
+            offset: const Offset(0, 5),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1209,634 +1495,20 @@ class HomeScreen extends StatelessWidget {
                 else
                   SliverReorderableList(
                     itemCount: state.items.length,
-                    onReorder: state.busy ? (_, _) {} : state.reorderItems,
+                    onReorderItem: state.busy
+                        ? (_, _) {}
+                        : (oldIndex, adjustedIndex) {
+                            final legacyIndex = adjustedIndex >= oldIndex
+                                ? adjustedIndex + 1
+                                : adjustedIndex;
+                            state.reorderItems(oldIndex, legacyIndex);
+                          },
                     itemBuilder: (context, index) =>
                         _buildItem(context, state, state.items[index], index),
                   ),
-                if (!state.hasFilter)
-                  SliverToBoxAdapter(child: _buildRecentContexts(context, state)),
+                SliverToBoxAdapter(child: _buildRecentContexts(context, state)),
                 const SliverToBoxAdapter(child: SizedBox(height: 16)),
               ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildViewTabs(BuildContext context, AppState state) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-      child: TabBar(
-        isScrollable: true,
-        onTap: (index) {
-          if (index == 1) {
-            state.refreshLastAnswers(queueIfBusy: true);
-          }
-        },
-        tabs: const [
-          Tab(text: 'Contexts'),
-          Tab(text: 'Last Answer'),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLastAnswersHeader(BuildContext context, AppState state) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: scheme.outlineVariant, width: 0.7),
-        ),
-      ),
-      child: Row(
-        children: [
-          _buildCounterChip(
-            context,
-            label: 'Answers',
-            value: '${state.lastAnswers.length}',
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'Latest assistant output from recent Codex sessions',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          _tooltip(
-            'Refresh Last Answer',
-            IconButton(
-              onPressed: state.lastAnswersBusy
-                  ? null
-                  : () => state.refreshLastAnswers(queueIfBusy: true),
-              icon: const Icon(Icons.refresh_rounded, size: 18),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<_InlineRun> _parseInlineRuns(String text) {
-    final pattern = RegExp(
-      r'\[([^\]]+)\]\(([^)\n]+)\)|`([^`\n]+)`|(https?://[^\s)<>\]]+)|(\\\\wsl(?:\.localhost|\$)\\[^\s`]+)|((?:/|\.\.?/)[^\s`)<>\]]+)|((?:[A-Za-z0-9_.-]+/){1,}[A-Za-z0-9_.:-]+)',
-    );
-    final runs = <_InlineRun>[];
-    var cursor = 0;
-
-    for (final match in pattern.allMatches(text)) {
-      if (match.start > cursor) {
-        runs.add(_InlineRun.text(text.substring(cursor, match.start)));
-      }
-
-      if (match.group(1) != null && match.group(2) != null) {
-        final value = match.group(2)!;
-        runs.add(
-          _InlineRun.copy(
-            text: value,
-            copyText: value,
-            openTarget: value,
-          ),
-        );
-      } else {
-        final copied =
-            match.group(3) ??
-            match.group(4) ??
-            match.group(5) ??
-            match.group(6) ??
-            match.group(7) ??
-            '';
-        runs.add(
-          _InlineRun.copy(
-            text: copied,
-            copyText: copied,
-            openTarget: copied,
-          ),
-        );
-      }
-
-      cursor = match.end;
-    }
-
-    if (cursor < text.length) {
-      runs.add(_InlineRun.text(text.substring(cursor)));
-    }
-
-    return runs;
-  }
-
-  bool _isAbsoluteReference(String value) {
-    final trimmed = value.trim();
-    if (trimmed.isEmpty) {
-      return false;
-    }
-    return trimmed.startsWith('http://') ||
-        trimmed.startsWith('https://') ||
-        trimmed.startsWith(r'\\') ||
-        trimmed.startsWith('/') ||
-        RegExp(r'^[A-Za-z]:[\\/]').hasMatch(trimmed);
-  }
-
-  bool _isWebReference(String value) {
-    final trimmed = value.trim();
-    return trimmed.startsWith('http://') || trimmed.startsWith('https://');
-  }
-
-  bool _looksLikeRelativeWorkspacePath(String value) {
-    final trimmed = value.trim();
-    if (trimmed.isEmpty || _isAbsoluteReference(trimmed)) {
-      return false;
-    }
-
-    final normalized = trimmed.replaceAll('\\', '/');
-    return normalized.contains('/');
-  }
-
-  String _stripPathDecorators(String value) {
-    var out = value.trim();
-    final hashIndex = out.indexOf('#');
-    if (hashIndex != -1) {
-      out = out.substring(0, hashIndex);
-    }
-    final lineSuffix = RegExp(r'^(.*?)(:\d+(?::\d+)?)$').firstMatch(out);
-    if (lineSuffix != null) {
-      out = lineSuffix.group(1) ?? out;
-    }
-    return out.trim();
-  }
-
-  String _joinPathPrefix(String prefix, String relativePath) {
-    final separator = prefix.endsWith('/') || prefix.endsWith('\\')
-        ? ''
-        : prefix.contains('\\')
-        ? '\\'
-        : '/';
-    final normalizedRelative = relativePath.replaceFirst(
-      RegExp(r'^[.][/]'),
-      '',
-    );
-    final cleanedRelative = normalizedRelative.replaceFirst(
-      RegExp(r'^[\\/]+'),
-      '',
-    );
-    return '$prefix$separator$cleanedRelative';
-  }
-
-  bool _pathExists(String value) {
-    if (value.trim().isEmpty) {
-      return false;
-    }
-    try {
-      return FileSystemEntity.typeSync(value) != FileSystemEntityType.notFound;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  String _augmentReferenceText(AppState state, String raw) {
-    final trimmed = raw.trim();
-    if (trimmed.isEmpty ||
-        !state.augmentAnswerPathsEnabled ||
-        state.answerPathPrefix.trim().isEmpty ||
-        !_looksLikeRelativeWorkspacePath(trimmed)) {
-      return trimmed;
-    }
-
-    final prefix = state.answerPathPrefix.trim();
-    final candidate = _joinPathPrefix(prefix, trimmed);
-    final probe = _joinPathPrefix(prefix, _stripPathDecorators(trimmed));
-    if (!_pathExists(probe)) {
-      return trimmed;
-    }
-    return candidate;
-  }
-
-  String? _resolveOpenTarget(AppState state, String raw) {
-    final trimmed = raw.trim();
-    if (trimmed.isEmpty) {
-      return null;
-    }
-
-    final resolved = _augmentReferenceText(state, trimmed).trim();
-    if (resolved.isEmpty) {
-      return null;
-    }
-
-    if (_isWebReference(resolved)) {
-      return resolved;
-    }
-
-    final sanitized = _stripPathDecorators(resolved);
-    if (sanitized.isEmpty || !_isAbsoluteReference(sanitized)) {
-      return null;
-    }
-    return sanitized;
-  }
-
-  Widget _buildInlineOpenButton(
-    BuildContext context,
-    String target, {
-    required bool isWeb,
-  }) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    return Padding(
-      padding: const EdgeInsets.only(left: 3, right: 1),
-      child: _tooltip(
-        isWeb ? 'Open link' : 'Open path',
-        InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () => _openReference(
-            context,
-            target,
-            isWeb ? 'Link' : 'Path',
-          ),
-          child: Container(
-            padding: const EdgeInsets.all(1.5),
-            decoration: BoxDecoration(
-              color: scheme.primaryContainer.withValues(alpha: 0.36),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Icon(
-              isWeb ? Icons.open_in_new_rounded : Icons.launch_rounded,
-              size: 12,
-              color: scheme.primary,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInlineText(
-    BuildContext context,
-    String text, {
-    TextStyle? style,
-  }) {
-    final state = context.read<AppState>();
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final baseStyle =
-        style ??
-        theme.textTheme.bodyMedium?.copyWith(height: 1.4) ??
-        const TextStyle(height: 1.4);
-    final spans = <InlineSpan>[];
-
-    for (final run in _parseInlineRuns(text)) {
-      if (!run.isCopyable) {
-        spans.add(TextSpan(text: run.text, style: baseStyle));
-        continue;
-      }
-
-      final resolved = _augmentReferenceText(state, run.copyText!);
-      final openTarget = run.isOpenable
-          ? _resolveOpenTarget(state, run.openTarget!)
-          : null;
-      spans.add(
-        TextSpan(
-          text: resolved,
-          style: baseStyle.copyWith(
-            color: scheme.primary,
-            fontWeight: FontWeight.w600,
-            fontFamily: 'monospace',
-            backgroundColor: scheme.primaryContainer.withValues(alpha: 0.38),
-            decoration: TextDecoration.underline,
-            decorationColor: scheme.primary.withValues(alpha: 0.72),
-          ),
-          recognizer: TapGestureRecognizer()
-            ..onTap = () => _copyCommand(
-              context,
-              resolved,
-              'Reference',
-            ),
-        ),
-      );
-      if (openTarget != null) {
-        spans.add(
-          WidgetSpan(
-            alignment: PlaceholderAlignment.middle,
-            child: _buildInlineOpenButton(
-              context,
-              openTarget,
-              isWeb: _isWebReference(openTarget),
-            ),
-          ),
-        );
-      }
-    }
-
-    return Text.rich(TextSpan(children: spans, style: baseStyle));
-  }
-
-  List<Widget> _buildAnswerBlocks(BuildContext context, String text) {
-    final theme = Theme.of(context);
-    final blocks = text
-        .trim()
-        .split(RegExp(r'\n\s*\n'))
-        .where((block) => block.trim().isNotEmpty)
-        .toList(growable: false);
-
-    if (blocks.isEmpty) {
-      return [
-        _buildInlineText(
-          context,
-          'No assistant answer captured yet.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-      ];
-    }
-
-    final widgets = <Widget>[];
-    for (final block in blocks) {
-      final trimmed = block.trim();
-      if (trimmed.startsWith('```') && trimmed.endsWith('```')) {
-        final code = trimmed
-            .replaceFirst(RegExp(r'^```[^\n]*\n?'), '')
-            .replaceFirst(RegExp(r'\n?```$'), '');
-        widgets.add(
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerHighest.withValues(
-                alpha: 0.42,
-              ),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: theme.colorScheme.outlineVariant,
-                width: 0.55,
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: code.split('\n').map((line) {
-                final style = theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
-                  height: 1.35,
-                );
-                if (line.isEmpty) {
-                  return const SizedBox(height: 8);
-                }
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: _buildInlineText(
-                    context,
-                    line,
-                    style: style,
-                  ),
-                );
-              }).toList(growable: false),
-            ),
-          ),
-        );
-        continue;
-      }
-
-      final lines = trimmed.split('\n');
-      final isBulletBlock = lines.every(
-        (line) => line.trim().startsWith('- ') || line.trim().startsWith('* '),
-      );
-      if (isBulletBlock) {
-        widgets.add(
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: lines.map((line) {
-              final content = line.trim().replaceFirst(RegExp(r'^[-*]\s+'), '');
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(top: 3),
-                      child: Icon(
-                        Icons.circle,
-                        size: 6,
-                        color: theme.colorScheme.primary,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _buildInlineText(
-                        context,
-                        content,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          height: 1.35,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }).toList(growable: false),
-          ),
-        );
-        continue;
-      }
-
-      final headingMatch = RegExp(r'^\*\*(.+?)\*\*$').firstMatch(trimmed);
-      if (headingMatch != null) {
-        widgets.add(
-          Text(
-            headingMatch.group(1) ?? trimmed,
-            style: theme.textTheme.labelLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.15,
-            ),
-          ),
-        );
-        continue;
-      }
-
-      widgets.add(
-        _buildInlineText(
-          context,
-          trimmed,
-          style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
-        ),
-      );
-    }
-
-    return widgets;
-  }
-
-  Widget _buildLastAnswerCard(
-    BuildContext context,
-    AppState state,
-    LastAnswer item,
-    double width,
-  ) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final blocks = _buildAnswerBlocks(context, item.answerText);
-    final displayTitle = _configuredSessionTitle(
-      state,
-      item.id,
-      item.displayTitle,
-    );
-
-    return Container(
-      width: width,
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLowest.withValues(alpha: 0.48),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: scheme.outlineVariant, width: 0.65),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                constraints: const BoxConstraints(minWidth: 68),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 8,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: scheme.primaryContainer.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  item.shortId,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.2,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  displayTitle,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.1,
-                  ),
-                ),
-              ),
-              _tooltip(
-                'Copy answer',
-                IconButton(
-                  onPressed: () => _copyCommand(
-                    context,
-                    item.answerText,
-                    'Answer',
-                  ),
-                  icon: const Icon(Icons.content_copy_rounded, size: 17),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          ...blocks
-              .map(
-                (widget) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: widget,
-                ),
-              )
-              .toList(growable: false),
-          TextButton.icon(
-            onPressed: () =>
-                _copyCommand(context, item.sessionPath, 'Session file'),
-            icon: const Icon(Icons.description_outlined, size: 16),
-            label: const Text('Copy Session File'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLastAnswerPanel(BuildContext context, AppState state) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-      decoration: BoxDecoration(
-        border: Border.all(color: scheme.outlineVariant, width: 0.7),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildLastAnswersHeader(context, state),
-          if (state.lastAnswersBusy)
-            const LinearProgressIndicator(minHeight: 2),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                if (!state.lastAnswersLoaded && !state.lastAnswersBusy) {
-                  return Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-                    child: Text(
-                      state.lastAnswersStatus?.trim().isNotEmpty == true
-                          ? state.lastAnswersStatus!
-                          : 'Loading last answers in background...',
-                    ),
-                  );
-                }
-
-                if (state.lastAnswersBusy && state.lastAnswers.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-                    child: Text(
-                      state.lastAnswersStatus?.trim().isNotEmpty == true
-                          ? state.lastAnswersStatus!
-                          : 'Loading last answers...',
-                    ),
-                  );
-                }
-
-                if (state.lastAnswers.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-                    child: Text(
-                      state.lastAnswersStatus?.trim().isNotEmpty == true
-                          ? state.lastAnswersStatus!
-                          : 'No recent assistant answers found.',
-                    ),
-                  );
-                }
-
-                final cardWidth = constraints.maxWidth - 28;
-
-                return SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: state.lastAnswers
-                        .map(
-                          (item) => Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: _buildLastAnswerCard(
-                              context,
-                              state,
-                              item,
-                              cardWidth,
-                            ),
-                          ),
-                        )
-                        .toList(growable: false),
-                  ),
-                );
-              },
             ),
           ),
         ],
@@ -1983,8 +1655,7 @@ class HomeScreen extends StatelessWidget {
                   _tooltip(
                     'Edit group',
                     IconButton(
-                      onPressed: () =>
-                          _renameItem(context, state, item, index),
+                      onPressed: () => _renameItem(context, state, item, index),
                       icon: const Icon(Icons.palette_outlined, size: 17),
                     ),
                   ),
@@ -2016,12 +1687,18 @@ class HomeScreen extends StatelessWidget {
     bool showDragHandle = true,
   }) {
     final scheme = Theme.of(context).colorScheme;
+    final providerColor = _providerColor(scheme, item.provider);
+    final forkCommand = item.forkCommand;
     final group = forceUngrouped ? null : state.groupForItem(index);
     final isGrouped = item.isSession && group != null;
     final groupColor = isGrouped ? _colorFromHex(group.colorHex) : null;
     final resolvedGroupColor = groupColor ?? scheme.outlineVariant;
-    final isFirstInGroup = forceUngrouped ? true : state.isFirstSessionInGroup(index);
-    final isLastInGroup = forceUngrouped ? true : state.isLastSessionInGroup(index);
+    final isFirstInGroup = forceUngrouped
+        ? true
+        : state.isFirstSessionInGroup(index);
+    final isLastInGroup = forceUngrouped
+        ? true
+        : state.isLastSessionInGroup(index);
     final bottomSpacing = isGrouped ? 0.0 : 6.0;
     final borderRadius = isGrouped
         ? BorderRadius.vertical(
@@ -2031,7 +1708,7 @@ class HomeScreen extends StatelessWidget {
         : BorderRadius.circular(11);
 
     return Container(
-      key: ValueKey('session-${item.commandId}'),
+      key: ValueKey('session-${item.provider.key}-${item.commandId}'),
       margin: EdgeInsets.fromLTRB(12, 0, 12, bottomSpacing),
       child: Row(
         children: [
@@ -2057,17 +1734,13 @@ class HomeScreen extends StatelessWidget {
                 child: InkWell(
                   borderRadius: borderRadius,
                   onTap: () {
-                    _copyCommand(
-                      context,
-                      item.resumeCommand,
-                      'Resume',
-                    );
+                    _copyCommand(context, item.resumeCommand, 'Resume');
                   },
                   child: Row(
                     children: [
                       SizedBox(width: isGrouped ? 16 : 8),
                       Container(
-                        constraints: const BoxConstraints(minWidth: 72),
+                        constraints: const BoxConstraints(minWidth: 108),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 8,
                           vertical: 5,
@@ -2078,17 +1751,36 @@ class HomeScreen extends StatelessWidget {
                               : scheme.primaryContainer.withValues(alpha: 0.45),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: Text(
-                          item.shortId,
-                          textAlign: TextAlign.center,
-                          maxLines: 1,
-                          softWrap: false,
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 12,
-                            letterSpacing: 0.2,
-                            color: scheme.onSurface,
-                          ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              item.provider.label.toUpperCase(),
+                              style: TextStyle(
+                                color: providerColor,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 9,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                item.shortId,
+                                textAlign: TextAlign.center,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                softWrap: false,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                  letterSpacing: 0.15,
+                                  color: scheme.onSurface,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -2108,18 +1800,32 @@ class HomeScreen extends StatelessWidget {
                             item.resumeCommand,
                             'Resume',
                           ),
-                          icon: const Icon(Icons.content_copy_rounded, size: 17),
+                          icon: const Icon(
+                            Icons.content_copy_rounded,
+                            size: 17,
+                          ),
                         ),
                       ),
                       _tooltip(
-                        'Copy fork command',
-                        IconButton(
-                          onPressed: () => _copyCommand(
-                            context,
-                            item.forkCommand,
-                            'Fork',
+                        item.supportsFork
+                            ? 'Copy fork command'
+                            : 'Use /fork command inside Kimi.',
+                        AnimatedOpacity(
+                          opacity: item.supportsFork ? 1 : 0.34,
+                          duration: const Duration(milliseconds: 120),
+                          child: IconButton(
+                            onPressed: forkCommand == null
+                                ? null
+                                : () => _copyCommand(
+                                    context,
+                                    forkCommand,
+                                    'Fork',
+                                  ),
+                            icon: const Icon(
+                              Icons.call_split_rounded,
+                              size: 17,
+                            ),
                           ),
-                          icon: const Icon(Icons.call_split_rounded, size: 17),
                         ),
                       ),
                       _tooltip(
@@ -2217,52 +1923,79 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final scheme = Theme.of(context).colorScheme;
 
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        appBar: AppBar(
-          centerTitle: false,
-          title: const Text('Context'),
-          actions: [
-            TextButton.icon(
-              onPressed: state.busy ? null : () => _addSession(context, state),
-              icon: const Icon(Icons.add_link_rounded, size: 18),
-              label: const Text('Add Entry'),
+    return Scaffold(
+      appBar: AppBar(
+        centerTitle: false,
+        surfaceTintColor: Colors.transparent,
+        flexibleSpace: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                scheme.surface,
+                scheme.primaryContainer.withValues(alpha: 0.18),
+              ],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
             ),
-            TextButton.icon(
-              onPressed: state.busy ? null : () => _addGroup(context, state),
-              icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-              label: const Text('Add Group'),
-            ),
-            _tooltip(
-              'Settings',
-              IconButton(
-                onPressed: () => _showSettingsDialog(context, state),
-                icon: const Icon(Icons.settings_outlined),
-              ),
-            ),
-            const SizedBox(width: 4),
-          ],
+          ),
         ),
-        body: Column(
+        title: Text(
+          'Context',
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+          ),
+        ),
+        actions: [
+          FilledButton.tonalIcon(
+            onPressed: state.busy ? null : () => _addSession(context, state),
+            icon: const Icon(Icons.add_link_rounded, size: 17),
+            label: const Text('Add Entry'),
+          ),
+          const SizedBox(width: 6),
+          TextButton.icon(
+            onPressed: state.busy ? null : () => _addGroup(context, state),
+            icon: const Icon(Icons.create_new_folder_outlined, size: 17),
+            label: const Text('Add Group'),
+          ),
+          _tooltip(
+            'Settings',
+            IconButton(
+              onPressed: () => _showSettingsDialog(context, state),
+              icon: const Icon(Icons.settings_outlined, size: 20),
+            ),
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [scheme.surface, scheme.primary.withValues(alpha: 0.025)],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildWarnings(context, state),
-            _buildViewTabs(context, state),
-            Expanded(
-              child: TabBarView(
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  _buildContextPanel(context, state),
-                  _buildLastAnswerPanel(context, state),
-                ],
-              ),
-            ),
+            Expanded(child: _buildContextPanel(context, state)),
           ],
         ),
       ),
     );
+  }
+
+  Color _providerColor(ColorScheme scheme, SessionProvider provider) {
+    if (provider == SessionProvider.codex) {
+      return scheme.primary;
+    }
+    return scheme.brightness == Brightness.dark
+        ? const Color(0xFF76D4DD)
+        : const Color(0xFF177F8B);
   }
 
   Color _colorFromHex(String hex) {
