@@ -1,5 +1,5 @@
 name: context
-description: "Context - organize and resume local Codex and Kimi sessions."
+description: "Context - organize and resume local Codex, Kimi, OpenCode, and Qwen Code sessions."
 publish_to: 'none'
 
 version: 0.1.0+2

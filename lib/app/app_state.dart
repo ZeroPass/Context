@@ -10,7 +10,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../src/bindings/bindings.dart';
 import 'models.dart';
 
-enum _PendingOpKind { load, save }
+enum _PendingOpKind {
+  load,
+  save,
+  codexAccountLoad,
+  codexAccountSave,
+  codexAccountSwitch,
+  codexAccountRename,
+  codexAccountDelete,
+}
 
 enum ThemeAppearance { light, sepia, dim, dark }
 
@@ -51,7 +59,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool _pendingRecentRefresh = true;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
 
-  static const _recentRefreshInterval = Duration(seconds: 20);
+  static const _recentRefreshInterval = Duration(seconds: 30);
 
   BigInt _nextRequestId = BigInt.one;
   final Map<Uint64, _PendingOp> _pendingOps = <Uint64, _PendingOp>{};
@@ -68,11 +76,22 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String? status;
   String? lastError;
   String? recentStatus;
+  List<CodexAccount> codexAccounts = const <CodexAccount>[];
+  String? codexActiveAccount;
+  bool codexAccountBusy = false;
+  String? codexAccountStatus;
+  String? codexAccountError;
 
   List<ConfigItem> items = const <ConfigItem>[];
   List<String> warnings = const <String>[];
   List<RecentContext> recentCodex = const <RecentContext>[];
   List<RecentContext> recentKimi = const <RecentContext>[];
+  List<RecentContext> recentOpencode = const <RecentContext>[];
+  List<RecentContext> recentQwen = const <RecentContext>[];
+  bool _codexAccountRequestInFlight = false;
+  bool _codexAccountsLoaded = false;
+  bool _codexAccountLoadAwaitingState = false;
+  int _codexAccountsStateVersion = 0;
 
   @override
   void dispose() {
@@ -103,11 +122,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     recentProvider = SessionProviderInfo.parse(
       _prefs?.getString('recentProvider'),
     );
+    codexActiveAccount = _normalizeCodexAccountSlot(
+      _prefs?.getString('codexActiveAccount'),
+    );
 
     InitApp(
       themeSeedColorValue: themeSeedColorValue,
       sessionsMarkdownPath: sessionsMarkdownPath,
     ).sendSignalToRust();
+    unawaited(loadCodexAccounts());
 
     _startRecentRefreshTimer();
     notifyListeners();
@@ -117,7 +140,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
     if (state == AppLifecycleState.resumed) {
-      unawaited(refreshRecent());
+      _refreshLiveData();
     }
   }
 
@@ -125,8 +148,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _recentRefreshTimer?.cancel();
     _recentRefreshTimer = Timer.periodic(
       _recentRefreshInterval,
-      (_) => unawaited(refreshRecent()),
+      (_) => _refreshLiveData(),
     );
+  }
+
+  void _refreshLiveData() {
+    unawaited(refreshRecent());
+    if (recentProvider == SessionProvider.codex) {
+      unawaited(loadCodexAccounts());
+    }
   }
 
   int get sessionCount => items.where((item) => item.isSession).length;
@@ -136,8 +166,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<ConfigItem> get groups =>
       items.where((item) => item.isGroup).toList(growable: false);
 
-  List<RecentContext> get visibleRecent =>
-      recentProvider == SessionProvider.codex ? recentCodex : recentKimi;
+  List<RecentContext> get visibleRecent => switch (recentProvider) {
+    SessionProvider.codex => recentCodex,
+    SessionProvider.kimi => recentKimi,
+    SessionProvider.opencode => recentOpencode,
+    SessionProvider.qwen => recentQwen,
+  };
 
   bool get hasFilter => filterQuery.trim().isNotEmpty;
 
@@ -348,16 +382,236 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void setRecentProvider(SessionProvider value) {
     if (recentProvider == value) {
+      if (value == SessionProvider.codex) {
+        unawaited(loadCodexAccounts());
+      }
       return;
     }
     recentProvider = value;
     _prefs?.setString('recentProvider', value.key);
     notifyListeners();
+    if (value == SessionProvider.codex) {
+      unawaited(loadCodexAccounts());
+    }
+  }
+
+  Future<void> loadCodexAccounts() async {
+    if (_codexAccountRequestInFlight || sessionsMarkdownPath.trim().isEmpty) {
+      return;
+    }
+
+    final stateVersionBeforeLoad = _codexAccountsStateVersion;
+    _codexAccountsLoaded = false;
+    _codexAccountLoadAwaitingState = false;
+    try {
+      await _runCodexAccountRequest(
+        kind: _PendingOpKind.codexAccountLoad,
+        status: 'Loading Codex accounts...',
+        sender: (requestId) {
+          LoadCodexAccounts(
+            requestId: requestId,
+            sessionsMarkdownPath: sessionsMarkdownPath,
+          ).sendSignalToRust();
+        },
+      );
+      if (_codexAccountsStateVersion != stateVersionBeforeLoad) {
+        _codexAccountsLoaded = true;
+        _reconcileCodexActiveAccount();
+        notifyListeners();
+      } else {
+        _codexAccountLoadAwaitingState = true;
+      }
+    } catch (_) {
+      _codexAccountLoadAwaitingState = false;
+      // The account error is exposed through codexAccountError.
+    }
+  }
+
+  Future<void> saveCodexAccount(String slot, [String? displayName]) async {
+    final normalizedSlot = _normalizeCodexAccountSlot(slot);
+    final normalizedDisplayName = _normalizeCodexAccountDisplayName(
+      displayName ?? normalizedSlot,
+    );
+    if (normalizedSlot == null || !_isValidCodexAccountSlot(normalizedSlot)) {
+      throw const FormatException(
+        'Use a positive numeric account slot, such as 1 or 2.',
+      );
+    }
+    if (normalizedDisplayName == null) {
+      throw const FormatException('Enter a non-empty display name.');
+    }
+
+    await _runCodexAccountRequest(
+      kind: _PendingOpKind.codexAccountSave,
+      status: 'Saving current Codex account in slot $normalizedSlot...',
+      sender: (requestId) {
+        SaveCodexAccount(
+          requestId: requestId,
+          sessionsMarkdownPath: sessionsMarkdownPath,
+          slot: normalizedSlot,
+          displayName: normalizedDisplayName,
+        ).sendSignalToRust();
+      },
+    );
+    await loadCodexAccounts();
+  }
+
+  Future<void> switchCodexAccount(String slot) async {
+    final targetSlot = _normalizeCodexAccountSlot(slot);
+    if (targetSlot == null) {
+      throw const FormatException('Choose a saved Codex account first.');
+    }
+
+    final currentSlot = codexActiveAccount ?? '';
+    if (_sameCodexAccountSlot(currentSlot, targetSlot)) {
+      return;
+    }
+
+    await _runCodexAccountRequest(
+      kind: _PendingOpKind.codexAccountSwitch,
+      status: 'Switching to Codex account slot $targetSlot...',
+      sender: (requestId) {
+        SwitchCodexAccount(
+          requestId: requestId,
+          sessionsMarkdownPath: sessionsMarkdownPath,
+          currentSlot: currentSlot,
+          targetSlot: targetSlot,
+        ).sendSignalToRust();
+      },
+    );
+
+    codexActiveAccount = targetSlot;
+    await _prefs?.setString('codexActiveAccount', targetSlot);
+    notifyListeners();
+    await loadCodexAccounts();
+  }
+
+  Future<void> renameCodexAccount(String slot, String displayName) async {
+    final normalizedSlot = _normalizeCodexAccountSlot(slot);
+    final normalizedDisplayName = _normalizeCodexAccountDisplayName(
+      displayName,
+    );
+    if (normalizedSlot == null) {
+      throw const FormatException('Choose a saved Codex account first.');
+    }
+    if (normalizedDisplayName == null) {
+      throw const FormatException('Enter a non-empty display name.');
+    }
+
+    await _runCodexAccountRequest(
+      kind: _PendingOpKind.codexAccountRename,
+      status: 'Renaming Codex account slot $normalizedSlot...',
+      sender: (requestId) {
+        RenameCodexAccount(
+          requestId: requestId,
+          sessionsMarkdownPath: sessionsMarkdownPath,
+          slot: normalizedSlot,
+          displayName: normalizedDisplayName,
+        ).sendSignalToRust();
+      },
+    );
+    await loadCodexAccounts();
+  }
+
+  Future<void> deleteCodexAccount(String slot) async {
+    final normalizedSlot = _normalizeCodexAccountSlot(slot);
+    if (normalizedSlot == null) {
+      throw const FormatException('Choose a saved Codex account first.');
+    }
+    final deletingActive = _sameCodexAccountSlot(
+      codexActiveAccount,
+      normalizedSlot,
+    );
+
+    await _runCodexAccountRequest(
+      kind: _PendingOpKind.codexAccountDelete,
+      status: 'Deleting Codex account slot $normalizedSlot...',
+      sender: (requestId) {
+        DeleteCodexAccount(
+          requestId: requestId,
+          sessionsMarkdownPath: sessionsMarkdownPath,
+          slot: normalizedSlot,
+        ).sendSignalToRust();
+      },
+    );
+
+    if (deletingActive) {
+      codexActiveAccount = null;
+      await _prefs?.remove('codexActiveAccount');
+      notifyListeners();
+    }
+    await loadCodexAccounts();
+  }
+
+  Future<void> _runCodexAccountRequest({
+    required _PendingOpKind kind,
+    required String status,
+    required void Function(Uint64 requestId) sender,
+  }) async {
+    if (_codexAccountRequestInFlight) {
+      throw StateError('A Codex account operation is already running.');
+    }
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      throw StateError('Pick a sessions markdown file first.');
+    }
+
+    _codexAccountRequestInFlight = true;
+    codexAccountBusy = true;
+    codexAccountStatus = status;
+    codexAccountError = null;
+    notifyListeners();
+
+    try {
+      await _runOp(kind, sender);
+    } catch (error) {
+      codexAccountError = _accountErrorText(error);
+      codexAccountStatus = 'Codex account operation failed.';
+      notifyListeners();
+      rethrow;
+    } finally {
+      _codexAccountRequestInFlight = false;
+      codexAccountBusy = false;
+      notifyListeners();
+    }
+  }
+
+  String? _normalizeCodexAccountSlot(String? value) {
+    final normalized = (value ?? '').trim();
+    return normalized.isEmpty ? null : normalized;
+  }
+
+  String? _normalizeCodexAccountDisplayName(String? value) {
+    final normalized = (value ?? '').trim();
+    return normalized.isEmpty ? null : normalized;
+  }
+
+  bool _isValidCodexAccountSlot(String value) {
+    return RegExp(r'^[1-9][0-9]*$').hasMatch(value);
+  }
+
+  bool _sameCodexAccountSlot(String? first, String? second) {
+    final left = _normalizeCodexAccountSlot(first);
+    final right = _normalizeCodexAccountSlot(second);
+    return left != null &&
+        right != null &&
+        left.toLowerCase() == right.toLowerCase();
+  }
+
+  String _accountErrorText(Object error) {
+    final text = error.toString().trim();
+    return text.startsWith('Exception: ')
+        ? text.substring('Exception: '.length)
+        : text;
   }
 
   Future<void> loadConfig({String? markdownPath}) async {
     if (markdownPath != null) {
-      sessionsMarkdownPath = markdownPath.trim();
+      final nextPath = markdownPath.trim();
+      if (nextPath != sessionsMarkdownPath) {
+        _codexAccountsLoaded = false;
+        codexAccounts = const <CodexAccount>[];
+      }
+      sessionsMarkdownPath = nextPath;
       await _prefs?.setString('sessionsMarkdownPath', sessionsMarkdownPath);
     }
 
@@ -370,6 +624,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         sessionsMarkdownPath: sessionsMarkdownPath,
       ).sendSignalToRust();
     });
+    if (recentProvider == SessionProvider.codex) {
+      unawaited(loadCodexAccounts());
+    }
   }
 
   Future<void> refreshRecent({bool queueIfBusy = false}) async {
@@ -496,20 +753,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void renameSession(int index, String title) => renameItem(index, title);
 
-  void toggleSessionFast(int index) {
-    if (index < 0 ||
-        index >= items.length ||
-        !items[index].isSession ||
-        !items[index].supportsFast) {
-      return;
-    }
-
-    final updated = List<ConfigItem>.from(items);
-    final item = updated[index];
-    updated[index] = item.copyWith(fast: !item.fast);
-    _applyItems(updated);
-  }
-
   void updateGroup(
     int index, {
     required String name,
@@ -547,7 +790,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     required String title,
     required SessionProvider provider,
     String? groupId,
-    bool fast = false,
   }) {
     final parsed = parseSessionInput(sessionInput, fallback: provider);
     final insertIndex = _insertIndexForGroup(groupId);
@@ -558,7 +800,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           commandId: parsed.id,
           name: title.trim(),
           provider: parsed.provider,
-        ).copyWith(fast: parsed.provider == SessionProvider.codex && fast),
+        ),
       );
     _applyItems(updated);
   }
@@ -856,11 +1098,34 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     lastError = state.lastError;
     recentBusy = state.recentBusy;
     recentStatus = state.recentStatus;
+    if (state.sessionsMarkdownPath != sessionsMarkdownPath) {
+      _codexAccountsLoaded = false;
+    }
+    codexAccounts = _decodeCodexAccounts(state.codexAccountsJson);
+    _codexAccountsStateVersion += 1;
+    if (_codexAccountLoadAwaitingState) {
+      _codexAccountLoadAwaitingState = false;
+      _codexAccountsLoaded = true;
+    }
+    final nativeActiveAccount = _normalizeCodexAccountSlot(
+      state.codexActiveAccount,
+    );
+    if (nativeActiveAccount != null) {
+      codexActiveAccount = nativeActiveAccount;
+      _prefs?.setString('codexActiveAccount', nativeActiveAccount);
+    } else if (_codexAccountsLoaded) {
+      _reconcileCodexActiveAccount();
+    }
+    codexAccountBusy = state.codexAccountBusy || _codexAccountRequestInFlight;
+    codexAccountStatus = state.codexAccountStatus;
+    codexAccountError = state.codexAccountError;
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     items = _decodeItems(state.itemsJson);
     warnings = _decodeWarnings(state.warningsJson);
     recentCodex = _decodeRecentContexts(state.recentCodexJson);
     recentKimi = _decodeRecentContexts(state.recentKimiJson);
+    recentOpencode = _decodeRecentContexts(state.recentOpencodeJson);
+    recentQwen = _decodeRecentContexts(state.recentQwenJson);
     final shouldStartPendingRecentRefresh =
         _pendingRecentRefresh &&
         !busy &&
@@ -929,6 +1194,48 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         .toList(growable: false);
   }
 
+  List<CodexAccount> _decodeCodexAccounts(String jsonText) {
+    final decoded = jsonDecode(jsonText);
+    final entries = decoded is List
+        ? decoded
+        : decoded is Map && decoded['accounts'] is List
+        ? decoded['accounts'] as List
+        : null;
+    if (entries == null) {
+      return const <CodexAccount>[];
+    }
+
+    final out = <CodexAccount>[];
+    final seen = <String>{};
+    for (final item in entries) {
+      final account = switch (item) {
+        Map() => CodexAccount.fromJson(Map<String, dynamic>.from(item)),
+        String() => CodexAccount(slot: item.trim(), name: item.trim()),
+        _ => null,
+      };
+      if (account == null ||
+          account.slot.isEmpty ||
+          account.displayName.isEmpty ||
+          !seen.add(account.identityKey)) {
+        continue;
+      }
+      out.add(account);
+    }
+    return out.toList(growable: false);
+  }
+
+  void _reconcileCodexActiveAccount() {
+    final active = codexActiveAccount;
+    if (active == null ||
+        codexAccounts.any(
+          (account) => _sameCodexAccountSlot(account.slot, active),
+        )) {
+      return;
+    }
+    codexActiveAccount = null;
+    _prefs?.remove('codexActiveAccount');
+  }
+
   ({SessionProvider provider, String id}) parseSessionInput(
     String input, {
     required SessionProvider fallback,
@@ -957,16 +1264,33 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return (provider: SessionProvider.kimi, id: kimiMatch.group(1)!);
     }
 
+    final opencodeMatch = RegExp(
+      r'(?:^|[\s&])opencode(?:\.exe)?\s+.*?(?:--session|-s)(?:=|\s+)([A-Za-z0-9._-]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (opencodeMatch != null) {
+      return (provider: SessionProvider.opencode, id: opencodeMatch.group(1)!);
+    }
+
+    final qwenMatch = RegExp(
+      r'(?:^|[\s&])qwen(?:\.exe)?\s+.*?(?:--resume|-r)(?:=|\s+)([A-Za-z0-9._-]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (qwenMatch != null) {
+      return (provider: SessionProvider.qwen, id: qwenMatch.group(1)!);
+    }
+
     if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(trimmed)) {
       throw const FormatException(
-        'Enter a session id, Codex resume command, or Kimi session command.',
+        'Enter a session id, Codex resume command, Kimi session command, OpenCode session command, or Qwen resume command.',
       );
     }
 
-    final inferred =
-        trimmed.toLowerCase().startsWith('session_') ||
-            trimmed.toLowerCase().startsWith('ses_')
+    final normalized = trimmed.toLowerCase();
+    final inferred = normalized.startsWith('session_')
         ? SessionProvider.kimi
+        : normalized.startsWith('ses_')
+        ? SessionProvider.opencode
         : fallback;
     return (provider: inferred, id: trimmed);
   }
@@ -1019,8 +1343,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 # Codex Work
 codex resume 11111111-1111-1111-1111-111111111111
 
-# Fast Codex Work
-codex resume 22222222-2222-2222-2222-222222222222 -c 'service_tier="fast"'
+# Another Codex Work
+codex resume 22222222-2222-2222-2222-222222222222
 
 <!-- /context-group -->
 

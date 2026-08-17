@@ -10,6 +10,146 @@ import '../app/models.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
 
+class _CodexWeeklyUsage {
+  const _CodexWeeklyUsage({
+    required this.actualPercent,
+    required this.expectedPercent,
+    required this.remainingPercent,
+    required this.resetAt,
+  });
+
+  final double actualPercent;
+  final double expectedPercent;
+  final double remainingPercent;
+  final DateTime resetAt;
+
+  double get paceDeltaPercent => actualPercent - expectedPercent;
+  double get targetLeftPercent => 100 - expectedPercent;
+}
+
+class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
+  const _CodexWeeklyUsageBackgroundPainter({
+    required this.actualPercent,
+    required this.expectedPercent,
+    required this.usedColor,
+    required this.underTargetColor,
+    required this.overTargetColor,
+    required this.remainingColor,
+    required this.targetMarkerColor,
+    required this.actualEdgeColor,
+  });
+
+  final double actualPercent;
+  final double expectedPercent;
+  final Color usedColor;
+  final Color underTargetColor;
+  final Color overTargetColor;
+  final Color remainingColor;
+  final Color targetMarkerColor;
+  final Color actualEdgeColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) {
+      return;
+    }
+
+    final actual = actualPercent.clamp(0, 100).toDouble() / 100;
+    final target = expectedPercent.clamp(0, 100).toDouble() / 100;
+
+    final cardRect = Offset.zero & size;
+    final cardClip = RRect.fromRectAndRadius(
+      cardRect,
+      const Radius.circular(8.2),
+    );
+
+    void drawSection(double start, double end, Color color) {
+      if (end <= start) {
+        return;
+      }
+      final section = Rect.fromLTRB(
+        size.width * start,
+        0,
+        size.width * end,
+        size.height,
+      );
+      final paint = Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            color.withValues(alpha: color.opacity * 0.72),
+            color,
+            color.withValues(alpha: color.opacity * 0.88),
+          ],
+          stops: const [0, 0.52, 1],
+        ).createShader(section);
+      canvas.drawRect(section, paint);
+    }
+
+    canvas.save();
+    canvas.clipRRect(cardClip);
+
+    if (actual <= target) {
+      drawSection(0, actual, usedColor);
+      drawSection(actual, target, underTargetColor);
+    } else {
+      drawSection(0, target, usedColor);
+      drawSection(target, actual, overTargetColor);
+    }
+    final coloredThrough = actual > target ? actual : target;
+    drawSection(coloredThrough, 1, remainingColor);
+
+    final highlightPaint = Paint()
+      ..shader = const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [Color(0x09000000), Color(0x00000000)],
+      ).createShader(cardRect);
+    canvas.drawRect(cardRect, highlightPaint);
+
+    final targetPaint = Paint()
+      ..color = targetMarkerColor
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 1;
+    final targetX = size.width * target;
+    canvas.drawLine(
+      Offset(targetX, 1.5),
+      Offset(targetX, size.height - 1.5),
+      targetPaint,
+    );
+
+    if ((actual - target).abs() > 0.001) {
+      final actualPaint = Paint()
+        ..color = actualEdgeColor
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = 1;
+      final actualX = size.width * actual;
+      canvas.drawLine(
+        Offset(actualX, 2.5),
+        Offset(actualX, size.height - 2.5),
+        actualPaint,
+      );
+    }
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(
+    covariant _CodexWeeklyUsageBackgroundPainter oldDelegate,
+  ) {
+    return actualPercent != oldDelegate.actualPercent ||
+        expectedPercent != oldDelegate.expectedPercent ||
+        usedColor != oldDelegate.usedColor ||
+        underTargetColor != oldDelegate.underTargetColor ||
+        overTargetColor != oldDelegate.overTargetColor ||
+        remainingColor != oldDelegate.remainingColor ||
+        targetMarkerColor != oldDelegate.targetMarkerColor ||
+        actualEdgeColor != oldDelegate.actualEdgeColor;
+  }
+}
+
 class _PassiveTooltip extends StatefulWidget {
   const _PassiveTooltip({required this.message, required this.child});
 
@@ -319,6 +459,16 @@ class HomeScreen extends StatelessWidget {
                         icon: Icon(Icons.nights_stay_outlined, size: 16),
                         label: Text('Kimi'),
                       ),
+                      ButtonSegment(
+                        value: SessionProvider.opencode,
+                        icon: Icon(Icons.code_rounded, size: 16),
+                        label: Text('OpenCode'),
+                      ),
+                      ButtonSegment(
+                        value: SessionProvider.qwen,
+                        icon: Icon(Icons.auto_awesome_rounded, size: 16),
+                        label: Text('Qwen'),
+                      ),
                     ],
                     selected: <SessionProvider>{selectedProvider},
                     onSelectionChanged: (selection) => setDialogState(
@@ -339,9 +489,12 @@ class HomeScreen extends StatelessWidget {
                     controller: commandController,
                     decoration: InputDecoration(
                       labelText: 'Session id or resume command',
-                      hintText: selectedProvider == SessionProvider.codex
-                          ? 'codex resume <id>'
-                          : 'kimi --session <id>',
+                      hintText: switch (selectedProvider) {
+                        SessionProvider.codex => 'codex resume <id>',
+                        SessionProvider.kimi => 'kimi --session <id>',
+                        SessionProvider.opencode => 'opencode --session <id>',
+                        SessionProvider.qwen => 'qwen --resume <id>',
+                      },
                     ),
                     onChanged: (value) {
                       try {
@@ -351,7 +504,9 @@ class HomeScreen extends StatelessWidget {
                         );
                         final lower = value.toLowerCase();
                         if ((lower.contains('codex ') ||
-                                lower.contains('kimi ')) &&
+                                lower.contains('kimi ') ||
+                                lower.contains('opencode ') ||
+                                lower.contains('qwen ')) &&
                             parsed.provider != selectedProvider) {
                           setDialogState(
                             () => selectedProvider = parsed.provider,
@@ -412,6 +567,277 @@ class HomeScreen extends StatelessWidget {
       initialName: prefilledName,
       initialProvider: item.provider,
     );
+  }
+
+  Future<void> _saveCodexAccount(BuildContext context, AppState state) async {
+    final account = await _showCodexAccountSaveDialog(
+      context,
+      initialSlot: _nextCodexAccountSlot(state),
+    );
+    if (account == null) {
+      return;
+    }
+    final (slot, displayName) = account;
+
+    final exists = state.codexAccounts.any(
+      (account) => account.identityKey == slot.trim().toLowerCase(),
+    );
+    if (exists) {
+      final overwrite = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Overwrite account $slot?'),
+          content: const Text(
+            'The current Codex credentials will replace the saved account in this slot.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Overwrite'),
+            ),
+          ],
+        ),
+      );
+      if (overwrite != true) {
+        return;
+      }
+    }
+
+    try {
+      await state.saveCodexAccount(slot, displayName);
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
+  Future<void> _switchCodexAccount(
+    BuildContext context,
+    AppState state,
+    String slot,
+  ) async {
+    try {
+      await state.switchCodexAccount(slot);
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
+  Future<void> _renameCodexAccount(
+    BuildContext context,
+    AppState state,
+    CodexAccount account,
+  ) async {
+    final displayName = await _showCodexAccountDisplayNameDialog(
+      context,
+      title: 'Rename Codex account',
+      initialName: account.displayName,
+    );
+    if (displayName == null) {
+      return;
+    }
+
+    try {
+      await state.renameCodexAccount(account.slot, displayName);
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
+  Future<void> _deleteCodexAccount(
+    BuildContext context,
+    AppState state,
+    CodexAccount account,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete ${account.displayName}?'),
+        content: Text(
+          'Remove the saved Codex account in slot ${account.slot}. '
+          'This does not delete the live auth.json file.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete saved account'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+
+    try {
+      await state.deleteCodexAccount(account.slot);
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
+  Future<(String, String)?> _showCodexAccountSaveDialog(
+    BuildContext context, {
+    required String initialSlot,
+  }) async {
+    final slotController = TextEditingController(text: initialSlot);
+    final nameController = TextEditingController(text: initialSlot);
+    String? slotError;
+    String? nameError;
+
+    try {
+      return await showDialog<(String, String)?>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            final slot = slotController.text.trim();
+            final displayName = nameController.text.trim();
+            final slotValid = RegExp(r'^[1-9][0-9]*$').hasMatch(slot);
+            final nameValid = displayName.isNotEmpty;
+
+            void submit() {
+              if (!slotValid || !nameValid) {
+                setDialogState(() {
+                  slotError = slotValid
+                      ? null
+                      : 'Use a positive number, for example 1 or 2.';
+                  nameError = nameValid ? null : 'Enter a display name.';
+                });
+                return;
+              }
+              Navigator.of(dialogContext).pop((slot, displayName));
+            }
+
+            return AlertDialog(
+              title: const Text('Save Codex account'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    controller: slotController,
+                    autofocus: true,
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.next,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: InputDecoration(
+                      labelText: 'Account slot',
+                      hintText: '1 or 2',
+                      errorText: slotError,
+                    ),
+                    onChanged: (_) => setDialogState(() => slotError = null),
+                    onSubmitted: (_) => submit(),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: nameController,
+                    textInputAction: TextInputAction.done,
+                    decoration: InputDecoration(
+                      labelText: 'Display name',
+                      hintText: 'name@example.com or a label',
+                      errorText: nameError,
+                    ),
+                    onChanged: (_) => setDialogState(() => nameError = null),
+                    onSubmitted: (_) => submit(),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(onPressed: submit, child: const Text('Save')),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      slotController.dispose();
+      nameController.dispose();
+    }
+  }
+
+  Future<String?> _showCodexAccountDisplayNameDialog(
+    BuildContext context, {
+    required String title,
+    required String initialName,
+  }) async {
+    final controller = TextEditingController(text: initialName);
+    String? validationError;
+
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            void submit() {
+              final value = controller.text.trim();
+              if (value.isEmpty) {
+                setDialogState(() => validationError = 'Enter a display name.');
+                return;
+              }
+              Navigator.of(dialogContext).pop(value);
+            }
+
+            return AlertDialog(
+              title: Text(title),
+              content: TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: 'Display name',
+                  hintText: 'name@example.com or a label',
+                  errorText: validationError,
+                ),
+                onChanged: (_) => setDialogState(() => validationError = null),
+                onSubmitted: (_) => submit(),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(onPressed: submit, child: const Text('Save')),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  String _nextCodexAccountSlot(AppState state) {
+    var candidate = 1;
+    final used = state.codexAccounts
+        .map((account) => account.slot.trim().toLowerCase())
+        .toSet();
+    while (used.contains('$candidate')) {
+      candidate += 1;
+    }
+    return '$candidate';
   }
 
   Future<void> _addGroup(BuildContext context, AppState state) async {
@@ -520,71 +946,6 @@ class HomeScreen extends StatelessWidget {
       item.provider,
       item.id,
       item.displayTitle,
-    );
-  }
-
-  Widget _buildFastToggle(
-    BuildContext context,
-    AppState state,
-    ConfigItem item,
-    int index,
-  ) {
-    final scheme = Theme.of(context).colorScheme;
-    final supported = item.supportsFast;
-    final active = supported && item.fast;
-
-    return _tooltip(
-      supported
-          ? active
-                ? 'Fast session on'
-                : 'Fast session off'
-          : 'Fast mode is not available for Kimi.',
-      AnimatedOpacity(
-        opacity: supported ? 1 : 0.34,
-        duration: const Duration(milliseconds: 120),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(999),
-            onTap: supported ? () => state.toggleSessionFast(index) : null,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              curve: Curves.easeOutCubic,
-              width: 42,
-              height: 24,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: active
-                    ? scheme.primaryContainer.withValues(alpha: 0.96)
-                    : scheme.surfaceContainerHighest.withValues(alpha: 0.82),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                  color: active
-                      ? scheme.primary.withValues(alpha: 0.65)
-                      : scheme.outlineVariant,
-                  width: active ? 1.1 : 0.8,
-                ),
-                boxShadow: active
-                    ? [
-                        BoxShadow(
-                          color: scheme.primary.withValues(alpha: 0.24),
-                          blurRadius: 10,
-                          spreadRadius: 0.2,
-                        ),
-                      ]
-                    : const [],
-              ),
-              child: Icon(
-                active ? Icons.bolt_rounded : Icons.bolt_outlined,
-                size: 15,
-                color: active
-                    ? scheme.onPrimaryContainer
-                    : scheme.onSurfaceVariant.withValues(alpha: 0.75),
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -1106,9 +1467,12 @@ class HomeScreen extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                provider == SessionProvider.codex
-                    ? Icons.terminal_rounded
-                    : Icons.nights_stay_outlined,
+                switch (provider) {
+                  SessionProvider.codex => Icons.terminal_rounded,
+                  SessionProvider.kimi => Icons.nights_stay_outlined,
+                  SessionProvider.opencode => Icons.code_rounded,
+                  SessionProvider.qwen => Icons.auto_awesome_rounded,
+                },
                 size: 15,
                 color: selected ? providerColor : scheme.onSurfaceVariant,
               ),
@@ -1147,6 +1511,614 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
+  Widget _buildCodexAccountSection(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    final providerColor = _providerColor(scheme, SessionProvider.codex);
+    final accountSectionSurfaceColor = scheme.surfaceContainerLowest
+        .withValues(alpha: 0.38);
+    final neutralAccountOutlineColor = HSLColor.fromColor(
+      scheme.outlineVariant,
+    ).withSaturation(0).toColor();
+    final activeSlot = state.codexActiveAccount?.trim();
+    final accountBusy = state.codexAccountBusy;
+    final accountError = state.codexAccountError;
+    final accountStatus = state.codexAccountStatus;
+    final hasAccountError = accountError?.trim().isNotEmpty ?? false;
+    final hasAccountStatus = accountStatus?.trim().isNotEmpty ?? false;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+        decoration: BoxDecoration(
+          color: accountSectionSurfaceColor,
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(
+            color: neutralAccountOutlineColor.withValues(alpha: 0.25),
+            width: 0.65,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.account_circle_outlined,
+                  size: 17,
+                  color: providerColor,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  'Codex account',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    activeSlot == null
+                        ? 'Current slot: not saved'
+                        : 'Current slot: $activeSlot',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _tooltip(
+                  'Refresh saved Codex accounts',
+                  IconButton(
+                    onPressed: state.busy || accountBusy
+                        ? null
+                        : () => unawaited(state.loadCodexAccounts()),
+                    icon: const Icon(Icons.refresh_rounded, size: 17),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+                _tooltip(
+                  'Save current Codex account',
+                  IconButton(
+                    onPressed: state.busy || accountBusy
+                        ? null
+                        : () => _saveCodexAccount(context, state),
+                    icon: const Icon(Icons.add_rounded, size: 18),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 7),
+            if (state.codexAccounts.isEmpty)
+              Row(
+                children: [
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 15,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'No saved accounts yet. Save the current one with a slot and display name.',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            else
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: state.codexAccounts
+                    .map(
+                      (account) => _buildCodexAccountRow(
+                        context,
+                        state,
+                        account,
+                        activeSlot: activeSlot,
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            SizedBox(
+              height: 9,
+              child: accountBusy
+                  ? Align(
+                      alignment: Alignment.bottomCenter,
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 2,
+                        child: LinearProgressIndicator(
+                          minHeight: 2,
+                          color: neutralAccountOutlineColor,
+                          backgroundColor: neutralAccountOutlineColor.withValues(
+                            alpha: 0.12,
+                          ),
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 22),
+              child: hasAccountError
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        accountError!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelSmall?.copyWith(color: scheme.error),
+                      ),
+                    )
+                  : hasAccountStatus
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        accountStatus!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCodexAccountRow(
+    BuildContext context,
+    AppState state,
+    CodexAccount account, {
+    required String? activeSlot,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = activeSlot?.trim().toLowerCase() == account.identityKey;
+    final enabled = !state.busy && !state.codexAccountBusy;
+    final usage = _weeklyUsageFor(account, DateTime.now());
+    final underTargetColor = scheme.brightness == Brightness.dark
+        ? const Color(0xFF6AD697)
+        : const Color(0xFF138A4B);
+    final overTargetColor = scheme.brightness == Brightness.dark
+        ? const Color(0xFFFF7070)
+        : const Color(0xFFC62828);
+    final accountCardSurfaceColor = scheme.surfaceContainerLowest.withValues(
+      alpha: 0.62,
+    );
+    final neutralQuotaOutlineColor = HSLColor.fromColor(
+      scheme.outlineVariant,
+    ).withSaturation(0).toColor();
+    final quotaTooltipMessage = usage == null
+        ? ''
+        : 'Spent ${_formatCodexPercent(usage.actualPercent)}% last recorded.\n'
+              'Fair target by now: ${_formatCodexPercent(usage.expectedPercent)}% used '
+              '(${_formatCodexPercent(usage.targetLeftPercent)}% target left).';
+    final quotaSemanticsLabel = usage == null
+        ? null
+        : 'Weekly usage ${_formatCodexPercent(usage.actualPercent)} percent used, '
+              'last recorded.\n'
+              'Fair target by now ${_formatCodexPercent(usage.expectedPercent)} percent '
+              'used, or ${_formatCodexPercent(usage.targetLeftPercent)} percent target left.';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: EdgeInsets.zero,
+      decoration: BoxDecoration(
+        color: accountCardSurfaceColor,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(
+          color: selected
+              ? underTargetColor.withValues(alpha: 0.44)
+              : neutralQuotaOutlineColor.withValues(alpha: 0.28),
+          width: selected ? 0.9 : 0.65,
+        ),
+      ),
+      child: _tooltip(
+        quotaTooltipMessage,
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8.2),
+          child: Stack(
+            children: [
+              if (usage != null)
+                Positioned.fill(
+                  child: Semantics(
+                    container: true,
+                    label: quotaSemanticsLabel,
+                    child: IgnorePointer(
+                      child: CustomPaint(
+                        painter: _CodexWeeklyUsageBackgroundPainter(
+                          actualPercent: usage.actualPercent,
+                          expectedPercent: usage.expectedPercent,
+                          usedColor: underTargetColor.withValues(alpha: 0.32),
+                          underTargetColor: underTargetColor.withValues(
+                            alpha: 0.20,
+                          ),
+                          overTargetColor: overTargetColor.withValues(
+                            alpha: 0.17,
+                          ),
+                          remainingColor: accountCardSurfaceColor,
+                          targetMarkerColor: scheme.onSurface.withValues(
+                            alpha: 0.23,
+                          ),
+                          actualEdgeColor: scheme.onSurface.withValues(
+                            alpha: 0.16,
+                          ),
+                        ),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+                  ),
+                ),
+              SizedBox(
+                width: double.infinity,
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8.2),
+                    onTap: enabled && !selected
+                        ? () => unawaited(
+                            _switchCodexAccount(
+                              context,
+                              state,
+                              account.slot,
+                            ),
+                          )
+                        : null,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(7, 5, 4, 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 3,
+                                    vertical: 2,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        account.displayName,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                              fontWeight: selected
+                                                  ? FontWeight.w700
+                                                  : FontWeight.w600,
+                                            ),
+                                      ),
+                                      Text(
+                                        'Slot ${account.slot}${selected ? ' · active' : ''}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelSmall
+                                            ?.copyWith(
+                                              color: selected
+                                                  ? underTargetColor
+                                                  : scheme.onSurfaceVariant,
+                                            ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 60, height: 30),
+                            ],
+                          ),
+                          _buildCodexWeeklyUsage(context, account, usage),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 5,
+                right: 4,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      onPressed: enabled
+                          ? () => unawaited(
+                              _renameCodexAccount(context, state, account),
+                            )
+                          : null,
+                      tooltip: 'Rename account',
+                      icon: const Icon(Icons.edit_outlined, size: 16),
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 30,
+                        minHeight: 30,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: enabled
+                          ? () => unawaited(
+                              _deleteCodexAccount(context, state, account),
+                            )
+                          : null,
+                      tooltip: 'Delete saved account',
+                      icon: const Icon(
+                        Icons.delete_outline_rounded,
+                        size: 16,
+                      ),
+                      color: scheme.error,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 30,
+                        minHeight: 30,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCodexWeeklyUsage(
+    BuildContext context,
+    CodexAccount account,
+    _CodexWeeklyUsage? usage,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    if (usage == null) {
+      final error = account.weeklyError?.trim();
+      return Padding(
+        padding: const EdgeInsets.only(top: 3, left: 3),
+        child: Row(
+          children: [
+            Icon(
+              Icons.query_stats_rounded,
+              size: 14,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                error == null || error.isEmpty
+                    ? 'Usage unavailable'
+                    : 'Usage unavailable · $error',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final delta = usage.paceDeltaPercent;
+    final underPace = delta < -1;
+    final overPace = delta > 1;
+    final paceText = underPace
+        ? '${_formatPaceDifference(delta.abs(), account.effectiveWeeklyWindowSeconds)} too slow'
+        : overPace
+        ? '${_formatPaceDifference(delta.abs(), account.effectiveWeeklyWindowSeconds)} too fast'
+        : 'on pace';
+    final paceColor = underPace
+        ? (scheme.brightness == Brightness.dark
+              ? const Color(0xFF65C18C)
+              : const Color(0xFF267A4B))
+        : overPace
+        ? scheme.error
+        : scheme.onSurfaceVariant;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, left: 3, right: 3),
+      child: Row(
+        children: [
+          Icon(
+            Icons.schedule_outlined,
+            size: 13,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              '${_formatCodexPercent(usage.remainingPercent)}% left (resets ${_formatCodexReset(usage.resetAt)})',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: 7),
+          Icon(Icons.speed_outlined, size: 13, color: paceColor),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text(
+              'Pace: $paceText',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: paceColor,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  _CodexWeeklyUsage? _weeklyUsageFor(CodexAccount account, DateTime now) {
+    if (!account.hasWeeklyUsage) {
+      return null;
+    }
+
+    final resetAt = DateTime.fromMillisecondsSinceEpoch(account.weeklyResetAt!);
+    final window = Duration(seconds: account.effectiveWeeklyWindowSeconds);
+    if (window.inMilliseconds <= 0) {
+      return null;
+    }
+    final windowStart = resetAt.subtract(window);
+    final elapsedMilliseconds = now.difference(windowStart).inMilliseconds;
+    final expectedPercent = (elapsedMilliseconds / window.inMilliseconds * 100)
+        .clamp(0, 100)
+        .toDouble();
+    final actualPercent = account.weeklyUsedPercent!.clamp(0, 100).toDouble();
+
+    return _CodexWeeklyUsage(
+      actualPercent: actualPercent,
+      expectedPercent: expectedPercent,
+      remainingPercent: 100 - actualPercent,
+      resetAt: resetAt,
+    );
+  }
+
+  String _formatPaceDifference(double deltaPercent, int windowSeconds) {
+    final seconds = (deltaPercent / 100 * windowSeconds).round();
+    final minutes = Duration(seconds: seconds).inMinutes;
+    if (minutes < 60) {
+      return '<1h';
+    }
+    final days = minutes ~/ (24 * 60);
+    final remainingHours = (minutes % (24 * 60)) ~/ 60;
+    if (days > 0) {
+      return remainingHours == 0 ? '${days}d' : '${days}d ${remainingHours}h';
+    }
+    return '${minutes ~/ 60}h';
+  }
+
+  String _formatCodexPercent(double value) =>
+      value.round().clamp(0, 100).toString();
+
+  String _formatCodexReset(DateTime value) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$hour:$minute on ${value.day} ${months[value.month - 1]}';
+  }
+
+  Widget _buildRecentSectionHeader(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    final providerColor = _providerColor(scheme, state.recentProvider);
+    final recentSubtitle = _recentSubtitle(state);
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+          child: Row(
+            children: [
+              Container(
+                width: 7,
+                height: 22,
+                decoration: BoxDecoration(
+                  color: providerColor,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Recent sessions',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (recentSubtitle.isNotEmpty)
+                      Text(
+                        recentSubtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              _tooltip(
+                'Refresh recent sessions',
+                IconButton(
+                  onPressed: state.recentBusy
+                      ? null
+                      : () => state.refreshRecent(queueIfBusy: true),
+                  icon: state.recentBusy
+                      ? SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: providerColor,
+                          ),
+                        )
+                      : const Icon(Icons.refresh_rounded, size: 18),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _recentSubtitle(AppState state) {
+    if (state.recentBusy) {
+      return 'Refreshing...';
+    }
+
+    final status = state.recentStatus?.trim().toLowerCase() ?? '';
+    if (status.contains('failed') ||
+        status.contains('error') ||
+        status.contains('unavailable')) {
+      return 'Refresh unavailable';
+    }
+
+    return '${state.visibleRecent.length} loaded';
+  }
+
   Widget _buildRecentContexts(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
     final providerColor = _providerColor(scheme, state.recentProvider);
@@ -1175,60 +2147,7 @@ class HomeScreen extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
-            child: Row(
-              children: [
-                Container(
-                  width: 7,
-                  height: 22,
-                  decoration: BoxDecoration(
-                    color: providerColor,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Recent sessions',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (state.recentStatus?.trim().isNotEmpty == true)
-                        Text(
-                          state.recentStatus!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: scheme.onSurfaceVariant,
-                                fontSize: 11,
-                              ),
-                        ),
-                    ],
-                  ),
-                ),
-                _tooltip(
-                  'Refresh recent sessions',
-                  IconButton(
-                    onPressed: state.recentBusy
-                        ? null
-                        : () => state.refreshRecent(queueIfBusy: true),
-                    icon: AnimatedRotation(
-                      turns: state.recentBusy ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 300),
-                      child: const Icon(Icons.refresh_rounded, size: 18),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
             child: Container(
               padding: const EdgeInsets.all(3),
               decoration: BoxDecoration(
@@ -1249,19 +2168,25 @@ class HomeScreen extends StatelessWidget {
                     SessionProvider.kimi,
                     state.recentKimi.length,
                   ),
+                  _buildRecentProviderTab(
+                    context,
+                    state,
+                    SessionProvider.opencode,
+                    state.recentOpencode.length,
+                  ),
+                  _buildRecentProviderTab(
+                    context,
+                    state,
+                    SessionProvider.qwen,
+                    state.recentQwen.length,
+                  ),
                 ],
               ),
             ),
           ),
-          if (state.recentBusy)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 7, 12, 0),
-              child: LinearProgressIndicator(
-                minHeight: 2,
-                color: providerColor,
-                backgroundColor: providerColor.withValues(alpha: 0.12),
-              ),
-            ),
+          if (state.recentProvider == SessionProvider.codex)
+            _buildCodexAccountSection(context, state),
+          _buildRecentSectionHeader(context, state),
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
             child: recent.isEmpty
@@ -1278,8 +2203,8 @@ class HomeScreen extends StatelessWidget {
                     ),
                     child: Text(
                       state.recentBusy
-                          ? 'Reading ${state.recentProvider.label} sessions...'
-                          : 'No recent ${state.recentProvider.label} sessions found.',
+                          ? 'Reading recent sessions...'
+                          : 'No recent sessions found.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
@@ -1738,78 +2663,88 @@ class HomeScreen extends StatelessWidget {
                   },
                   child: Row(
                     children: [
-                      SizedBox(width: isGrouped ? 16 : 8),
-                      Container(
-                        constraints: const BoxConstraints(minWidth: 108),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isGrouped
-                              ? resolvedGroupColor.withValues(alpha: 0.18)
-                              : scheme.primaryContainer.withValues(alpha: 0.45),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              item.provider.label.toUpperCase(),
-                              style: TextStyle(
-                                color: providerColor,
-                                fontWeight: FontWeight.w800,
-                                fontSize: 9,
-                                letterSpacing: 0.5,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                item.shortId,
-                                textAlign: TextAlign.center,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                softWrap: false,
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12,
-                                  letterSpacing: 0.15,
-                                  color: scheme.onSurface,
+                      Expanded(
+                        child: _tooltip(
+                          'Click card to copy resume command',
+                          Row(
+                            children: [
+                              SizedBox(width: isGrouped ? 16 : 8),
+                              Container(
+                                constraints: const BoxConstraints(
+                                  minWidth: 108,
+                                ),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isGrouped
+                                      ? resolvedGroupColor.withValues(
+                                          alpha: 0.18,
+                                        )
+                                      : scheme.primaryContainer.withValues(
+                                          alpha: 0.45,
+                                        ),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Text(
+                                      item.provider.label.toUpperCase(),
+                                      style: TextStyle(
+                                        color: providerColor,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 9,
+                                        letterSpacing: 0.5,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Flexible(
+                                      child: Text(
+                                        item.shortId,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        softWrap: false,
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 12,
+                                          letterSpacing: 0.15,
+                                          color: scheme.onSurface,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      _buildFastToggle(context, state, item, index),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: _buildNameArea(context, state, item, index),
-                        ),
-                      ),
-                      _tooltip(
-                        'Copy resume command',
-                        IconButton(
-                          onPressed: () => _copyCommand(
-                            context,
-                            item.resumeCommand,
-                            'Resume',
-                          ),
-                          icon: const Icon(
-                            Icons.content_copy_rounded,
-                            size: 17,
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: _buildNameArea(
+                                    context,
+                                    state,
+                                    item,
+                                    index,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
                       _tooltip(
                         item.supportsFork
                             ? 'Copy fork command'
-                            : 'Use /fork command inside Kimi.',
+                            : switch (item.provider) {
+                                SessionProvider.kimi =>
+                                  'Use /fork command inside Kimi.',
+                                SessionProvider.qwen =>
+                                  'Use /fork command inside Qwen Code.',
+                                _ => 'Fork command unavailable.',
+                              },
                         AnimatedOpacity(
                           opacity: item.supportsFork ? 1 : 0.34,
                           duration: const Duration(milliseconds: 120),
@@ -1993,9 +2928,19 @@ class HomeScreen extends StatelessWidget {
     if (provider == SessionProvider.codex) {
       return scheme.primary;
     }
+    if (provider == SessionProvider.kimi) {
+      return scheme.brightness == Brightness.dark
+          ? const Color(0xFF76D4DD)
+          : const Color(0xFF177F8B);
+    }
+    if (provider == SessionProvider.opencode) {
+      return scheme.brightness == Brightness.dark
+          ? const Color(0xFFD7A8FF)
+          : const Color(0xFF7A3EAA);
+    }
     return scheme.brightness == Brightness.dark
-        ? const Color(0xFF76D4DD)
-        : const Color(0xFF177F8B);
+        ? const Color(0xFFFFB15C)
+        : const Color(0xFFB85C00);
   }
 
   Color _colorFromHex(String hex) {

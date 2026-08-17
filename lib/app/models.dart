@@ -1,6 +1,6 @@
 enum ConfigItemKind { group, session, groupEnd }
 
-enum SessionProvider { codex, kimi }
+enum SessionProvider { codex, kimi, opencode, qwen }
 
 extension SessionProviderInfo on SessionProvider {
   String get key => name;
@@ -8,14 +8,103 @@ extension SessionProviderInfo on SessionProvider {
   String get label => switch (this) {
     SessionProvider.codex => 'Codex',
     SessionProvider.kimi => 'Kimi',
+    SessionProvider.opencode => 'OpenCode',
+    SessionProvider.qwen => 'Qwen Code',
   };
 
   static SessionProvider parse(Object? value) {
     final normalized = (value ?? '').toString().trim().toLowerCase();
-    return normalized == SessionProvider.kimi.name
-        ? SessionProvider.kimi
-        : SessionProvider.codex;
+    if (normalized == SessionProvider.kimi.name) {
+      return SessionProvider.kimi;
+    }
+    if (normalized == SessionProvider.opencode.name) {
+      return SessionProvider.opencode;
+    }
+    if (normalized == SessionProvider.qwen.name ||
+        normalized == 'qwen-code' ||
+        normalized == 'qwen code') {
+      return SessionProvider.qwen;
+    }
+    return SessionProvider.codex;
   }
+}
+
+class CodexAccount {
+  static const defaultWeeklyWindowSeconds = 604800;
+
+  const CodexAccount({
+    required this.slot,
+    required this.name,
+    this.updatedAt,
+    this.weeklyUsedPercent,
+    this.weeklyResetAt,
+    this.weeklyWindowSeconds,
+    this.weeklyError,
+  });
+
+  factory CodexAccount.fromJson(Map<String, dynamic> json) {
+    final slot =
+        _optionalTrimmedString(json['slot']) ??
+        _optionalTrimmedString(json['name']) ??
+        _optionalTrimmedString(json['label']) ??
+        '';
+    final name =
+        _optionalTrimmedString(json['name']) ??
+        _optionalTrimmedString(json['label']) ??
+        slot;
+    return CodexAccount(
+      slot: slot,
+      name: name,
+      updatedAt: _optionalInt(json['updated_at']),
+      weeklyUsedPercent: _optionalPercent(json['weekly_used_percent']),
+      weeklyResetAt: _optionalInt(json['weekly_reset_at']),
+      weeklyWindowSeconds: _optionalInt(json['weekly_window_seconds']),
+      weeklyError: _optionalTrimmedString(json['weekly_error']),
+    );
+  }
+
+  final String slot;
+  final String name;
+  final int? updatedAt;
+  final double? weeklyUsedPercent;
+  final int? weeklyResetAt;
+  final int? weeklyWindowSeconds;
+  final String? weeklyError;
+
+  String get displayName => name.trim().isEmpty ? slot : name.trim();
+
+  String get identityKey => slot.trim().toLowerCase();
+
+  int get effectiveWeeklyWindowSeconds =>
+      weeklyWindowSeconds ?? defaultWeeklyWindowSeconds;
+
+  bool get hasWeeklyUsage =>
+      weeklyError == null &&
+      weeklyUsedPercent != null &&
+      weeklyResetAt != null &&
+      effectiveWeeklyWindowSeconds > 0;
+}
+
+String? _optionalTrimmedString(Object? value) {
+  final result = (value ?? '').toString().trim();
+  return result.isEmpty ? null : result;
+}
+
+int? _optionalInt(Object? value) {
+  if (value is num) {
+    return value.toInt();
+  }
+  return int.tryParse((value ?? '').toString().trim());
+}
+
+double? _optionalPercent(Object? value) {
+  final result = value is num
+      ? value.toDouble()
+      : double.tryParse((value ?? '').toString().trim());
+  if (result == null || !result.isFinite || result < 0 || result > 100) {
+    return null;
+  }
+  return result;
 }
 
 class RecentContext {
@@ -67,7 +156,6 @@ class ConfigItem {
     required this.commandId,
     required this.colorHex,
     required this.provider,
-    required this.fast,
   });
 
   factory ConfigItem.fromJson(Map<String, dynamic> json) {
@@ -83,7 +171,6 @@ class ConfigItem {
       commandId: (json['command_id'] ?? '').toString(),
       colorHex: (json['color_hex'] ?? '').toString(),
       provider: SessionProviderInfo.parse(json['provider']),
-      fast: json['fast'] == true,
     );
   }
 
@@ -99,7 +186,6 @@ class ConfigItem {
       commandId: '',
       colorHex: colorHex,
       provider: SessionProvider.codex,
-      fast: false,
     );
   }
 
@@ -115,7 +201,6 @@ class ConfigItem {
       commandId: commandId,
       colorHex: '',
       provider: provider,
-      fast: false,
     );
   }
 
@@ -127,7 +212,6 @@ class ConfigItem {
       commandId: '',
       colorHex: '',
       provider: SessionProvider.codex,
-      fast: false,
     );
   }
 
@@ -137,7 +221,6 @@ class ConfigItem {
   final String commandId;
   final String colorHex;
   final SessionProvider provider;
-  final bool fast;
 
   bool get isGroup => kind == ConfigItemKind.group;
 
@@ -145,9 +228,10 @@ class ConfigItem {
 
   bool get isGroupEnd => kind == ConfigItemKind.groupEnd;
 
-  bool get supportsFast => isSession && provider == SessionProvider.codex;
-
-  bool get supportsFork => isSession && provider == SessionProvider.codex;
+  bool get supportsFork =>
+      isSession &&
+      (provider == SessionProvider.codex ||
+          provider == SessionProvider.opencode);
 
   String get identityKey => '${provider.key}:${commandId.trim().toLowerCase()}';
 
@@ -160,16 +244,23 @@ class ConfigItem {
     if (provider == SessionProvider.kimi) {
       return 'kimi --session $commandId';
     }
-    final base = 'codex resume $commandId';
-    return fast ? '$base -c \'service_tier="fast"\'' : base;
+    if (provider == SessionProvider.opencode) {
+      return 'opencode --session $commandId';
+    }
+    if (provider == SessionProvider.qwen) {
+      return 'qwen --resume $commandId';
+    }
+    return 'codex resume $commandId';
   }
 
   String? get forkCommand {
     if (!supportsFork) {
       return null;
     }
-    final base = 'codex fork $commandId';
-    return fast ? '$base -c \'service_tier="fast"\'' : base;
+    if (provider == SessionProvider.opencode) {
+      return 'opencode --session $commandId --fork';
+    }
+    return 'codex fork $commandId';
   }
 
   ConfigItem copyWith({
@@ -179,7 +270,6 @@ class ConfigItem {
     String? commandId,
     String? colorHex,
     SessionProvider? provider,
-    bool? fast,
   }) {
     return ConfigItem(
       kind: kind ?? this.kind,
@@ -188,7 +278,6 @@ class ConfigItem {
       commandId: commandId ?? this.commandId,
       colorHex: colorHex ?? this.colorHex,
       provider: provider ?? this.provider,
-      fast: fast ?? this.fast,
     );
   }
 
@@ -203,7 +292,6 @@ class ConfigItem {
     'command_id': commandId,
     'color_hex': colorHex,
     'provider': provider.key,
-    'fast': supportsFast && fast,
   };
 }
 
@@ -212,7 +300,9 @@ String _shortSessionId(String rawValue) {
   if (value.isEmpty) {
     return '';
   }
-  final lastDash = value.lastIndexOf('-');
-  final tail = lastDash == -1 ? value : value.substring(lastDash + 1).trim();
-  return tail.isEmpty ? value : tail;
+  const visibleLength = 4;
+  if (value.length <= visibleLength) {
+    return value;
+  }
+  return value.substring(value.length - visibleLength);
 }
