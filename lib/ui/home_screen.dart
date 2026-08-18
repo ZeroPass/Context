@@ -18,7 +18,6 @@ class _CodexWeeklyUsage {
     required this.expectedPercent,
     required this.remainingPercent,
     required this.resetAt,
-    required this.usesManualReset,
     required this.effectivePaceWindowSeconds,
   });
 
@@ -26,7 +25,6 @@ class _CodexWeeklyUsage {
   final double expectedPercent;
   final double remainingPercent;
   final DateTime resetAt;
-  final bool usesManualReset;
   final int effectivePaceWindowSeconds;
 
   double get paceDeltaPercent => actualPercent - expectedPercent;
@@ -2447,33 +2445,57 @@ class HomeScreen extends StatelessWidget {
       padding: const EdgeInsets.only(top: 4, left: 3, right: 3),
       child: Row(
         children: [
-          Icon(
-            Icons.schedule_outlined,
-            size: 13,
-            color: scheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: 5),
           Expanded(
-            child: Text(
-              '${_formatCodexPercent(usage.remainingPercent)}% left'
-                  '${usage.usesManualReset ? ' (resets ${_formatCodexReset(usage.resetAt)})' : ''}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.schedule_outlined,
+                  size: 13,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    '${_formatCodexPercent(usage.remainingPercent)}% left',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           const SizedBox(width: 7),
-          Icon(Icons.speed_outlined, size: 13, color: paceColor),
-          const SizedBox(width: 5),
-          Flexible(
+          Expanded(
+            child: Row(
+              children: [
+                Icon(Icons.speed_outlined, size: 13, color: paceColor),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    'Pace: $paceText',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: paceColor,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
             child: Text(
-              'Pace: $paceText',
+              'Resets at ${_formatCodexResetLabel(usage.resetAt)}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: paceColor,
+                color: scheme.onSurfaceVariant,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -2527,7 +2549,6 @@ class HomeScreen extends StatelessWidget {
       expectedPercent: expectedPercent,
       remainingPercent: 100 - actualPercent,
       resetAt: resetAt,
-      usesManualReset: usesManualReset,
       effectivePaceWindowSeconds: effectivePaceWindow.inSeconds,
     );
   }
@@ -2549,7 +2570,16 @@ class HomeScreen extends StatelessWidget {
   String _formatCodexPercent(double value) =>
       value.round().clamp(0, 100).toString();
 
-  String _formatCodexReset(DateTime value) {
+  String _formatCodexResetLabel(DateTime value) {
+    const weekdays = <String>[
+      'Mon',
+      'Tue',
+      'Wed',
+      'Thu',
+      'Fri',
+      'Sat',
+      'Sun',
+    ];
     const months = <String>[
       'Jan',
       'Feb',
@@ -2566,7 +2596,8 @@ class HomeScreen extends StatelessWidget {
     ];
     final hour = value.hour.toString().padLeft(2, '0');
     final minute = value.minute.toString().padLeft(2, '0');
-    return '$hour:$minute on ${value.day} ${months[value.month - 1]}';
+    return '${weekdays[value.weekday - 1]} ${value.day} '
+        '${months[value.month - 1]} $hour:$minute';
   }
 
   String _formatCodexResetPreview(DateTime value) {
