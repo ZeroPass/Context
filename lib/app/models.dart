@@ -38,6 +38,7 @@ class CodexAccount {
     this.updatedAt,
     this.weeklyUsedPercent,
     this.weeklyResetAt,
+    this.manualResetAt,
     this.weeklyWindowSeconds,
     this.weeklyError,
   });
@@ -58,6 +59,7 @@ class CodexAccount {
       updatedAt: _optionalInt(json['updated_at']),
       weeklyUsedPercent: _optionalPercent(json['weekly_used_percent']),
       weeklyResetAt: _optionalInt(json['weekly_reset_at']),
+      manualResetAt: _optionalInt(json['manual_reset_at']),
       weeklyWindowSeconds: _optionalInt(json['weekly_window_seconds']),
       weeklyError: _optionalTrimmedString(json['weekly_error']),
     );
@@ -68,6 +70,7 @@ class CodexAccount {
   final int? updatedAt;
   final double? weeklyUsedPercent;
   final int? weeklyResetAt;
+  final int? manualResetAt;
   final int? weeklyWindowSeconds;
   final String? weeklyError;
 

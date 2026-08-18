@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -16,15 +18,114 @@ class _CodexWeeklyUsage {
     required this.expectedPercent,
     required this.remainingPercent,
     required this.resetAt,
+    required this.usesManualReset,
+    required this.effectivePaceWindowSeconds,
   });
 
   final double actualPercent;
   final double expectedPercent;
   final double remainingPercent;
   final DateTime resetAt;
+  final bool usesManualReset;
+  final int effectivePaceWindowSeconds;
 
   double get paceDeltaPercent => actualPercent - expectedPercent;
   double get targetLeftPercent => 100 - expectedPercent;
+}
+
+class _OneStepCupertinoPickerItem extends StatelessWidget {
+  const _OneStepCupertinoPickerItem({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final pickerState = context
+        .findAncestorStateOfType<_OneStepCupertinoPickerState>();
+    return Listener(
+      onPointerSignal: pickerState?._handlePointerSignal,
+      child: child,
+    );
+  }
+}
+
+class _OneStepCupertinoPicker extends StatefulWidget {
+  const _OneStepCupertinoPicker({
+    required this.controller,
+    required this.itemCount,
+    required this.child,
+  }) : assert(itemCount > 0);
+
+  final FixedExtentScrollController controller;
+  final int itemCount;
+  final Widget child;
+
+  @override
+  State<_OneStepCupertinoPicker> createState() =>
+      _OneStepCupertinoPickerState();
+}
+
+class _OneStepCupertinoPickerState extends State<_OneStepCupertinoPicker> {
+  int? _pendingWheelTarget;
+  PointerSignalEvent? _registeredWheelEvent;
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent ||
+        event.scrollDelta.dy == 0 ||
+        !widget.controller.hasClients) {
+      return;
+    }
+    if (identical(_registeredWheelEvent, event)) {
+      return;
+    }
+
+    final currentItem = widget.controller.selectedItem;
+    final direction = event.scrollDelta.dy.sign.toInt();
+    final targetItem = (currentItem + direction)
+        .clamp(0, widget.itemCount - 1)
+        .toInt();
+    _pendingWheelTarget = targetItem;
+    _registeredWheelEvent = event;
+
+    GestureBinding.instance.pointerSignalResolver.register(
+      event,
+      (resolvedEvent) {
+        _registeredWheelEvent = null;
+        _pendingWheelTarget = null;
+        (resolvedEvent as PointerScrollEvent).respond(
+          allowPlatformDefault: false,
+        );
+        if (mounted && widget.controller.hasClients) {
+          widget.controller.jumpToItem(targetItem);
+        }
+      },
+    );
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    final targetItem = _pendingWheelTarget;
+    if (targetItem == null || notification is! ScrollUpdateNotification) {
+      return false;
+    }
+
+    _registeredWheelEvent = null;
+    _pendingWheelTarget = null;
+    if (widget.controller.hasClients) {
+      widget.controller.jumpToItem(targetItem);
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return NotificationListener<ScrollNotification>(
+      onNotification: _handleScrollNotification,
+      child: Listener(
+        onPointerSignal: _handlePointerSignal,
+        child: widget.child,
+      ),
+    );
+  }
 }
 
 class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
@@ -56,6 +157,8 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
 
     final actual = actualPercent.clamp(0, 100).toDouble() / 100;
     final target = expectedPercent.clamp(0, 100).toDouble() / 100;
+    final onPace = (actualPercent - expectedPercent).abs() <= 1;
+    final visualActual = onPace ? target : actual;
 
     final cardRect = Offset.zero & size;
     final cardClip = RRect.fromRectAndRadius(
@@ -90,14 +193,14 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
     canvas.save();
     canvas.clipRRect(cardClip);
 
-    if (actual <= target) {
-      drawSection(0, actual, usedColor);
-      drawSection(actual, target, underTargetColor);
+    if (visualActual <= target) {
+      drawSection(0, visualActual, usedColor);
+      drawSection(visualActual, target, underTargetColor);
     } else {
       drawSection(0, target, usedColor);
-      drawSection(target, actual, overTargetColor);
+      drawSection(target, visualActual, overTargetColor);
     }
-    final coloredThrough = actual > target ? actual : target;
+    final coloredThrough = visualActual > target ? visualActual : target;
     drawSection(coloredThrough, 1, remainingColor);
 
     final highlightPaint = Paint()
@@ -119,7 +222,7 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
       targetPaint,
     );
 
-    if ((actual - target).abs() > 0.001) {
+    if (!onPace && (actual - target).abs() > 0.001) {
       final actualPaint = Paint()
         ..color = actualEdgeColor
         ..strokeCap = StrokeCap.round
@@ -695,6 +798,300 @@ class HomeScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _setCodexManualReset(
+    BuildContext context,
+    AppState state,
+  ) async {
+    final apiResetAt = _latestCodexApiResetAt(state);
+    if (apiResetAt == null) {
+      await _showError(
+        context,
+        StateError('No weekly reset is available yet.'),
+      );
+      return;
+    }
+
+    final configuredManualResetAt = _configuredCodexManualResetAt(state);
+    final manualResetAt = await _showCodexManualResetDialog(
+      context,
+      apiResetAt: apiResetAt,
+      configuredManualResetAt: configuredManualResetAt,
+    );
+    if (manualResetAt == null) {
+      return;
+    }
+    if (!manualResetAt.isAfter(DateTime.now())) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(
+        context,
+        StateError('Choose a future Codex reset time.'),
+      );
+      return;
+    }
+
+    try {
+      await state.setCodexManualReset(manualResetAt);
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
+  Future<void> _clearCodexManualReset(
+    BuildContext context,
+    AppState state,
+  ) async {
+    try {
+      await state.clearCodexManualReset();
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(context, error);
+    }
+  }
+
+  Future<DateTime?> _showCodexManualResetDialog(
+    BuildContext context, {
+    required DateTime apiResetAt,
+    required DateTime? configuredManualResetAt,
+  }) async {
+    final initialOffsets = _codexManualResetPickerOffsets(
+      apiResetAt,
+      configuredManualResetAt,
+    );
+    var dayOffset = initialOffsets.day;
+    var hourOffset = initialOffsets.hour;
+    String? validationError;
+    final dayOffsets = List<int>.generate(7, (index) => index - 6);
+    final hourOffsets = List<int>.generate(24, (index) => index - 23);
+    final dayController = FixedExtentScrollController(
+      initialItem: dayOffsets.indexOf(dayOffset),
+    );
+    final hourController = FixedExtentScrollController(
+      initialItem: hourOffsets.indexOf(hourOffset),
+    );
+
+    Widget buildOffsetPicker({
+      required String label,
+      required String unit,
+      required List<int> values,
+      required FixedExtentScrollController controller,
+      required int selectedValue,
+      required ValueChanged<int> onChanged,
+    }) {
+      final theme = Theme.of(context);
+      final scheme = theme.colorScheme;
+      return Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              label,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 3),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHighest.withValues(alpha: 0.42),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: scheme.outlineVariant.withValues(alpha: 0.28),
+                  width: 0.6,
+                ),
+              ),
+              child: SizedBox(
+                height: 108,
+                child: _OneStepCupertinoPicker(
+                  controller: controller,
+                  itemCount: values.length,
+                  child: CupertinoPicker(
+                    backgroundColor: Colors.transparent,
+                    diameterRatio: 1.25,
+                    itemExtent: 30,
+                    magnification: 1.06,
+                    onSelectedItemChanged: (index) {
+                      if (index < 0 || index >= values.length) {
+                        return;
+                      }
+                      final value = values[index];
+                      if (value == selectedValue) {
+                        return;
+                      }
+                      onChanged(value);
+                    },
+                    scrollController: controller,
+                    squeeze: 1.15,
+                    useMagnifier: true,
+                    children: [
+                      for (final value in values)
+                        _OneStepCupertinoPickerItem(
+                          child: Center(
+                            child: Text(
+                              '$value $unit',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: scheme.onSurface,
+                                fontWeight: value == selectedValue
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    try {
+      return await showDialog<DateTime?>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            final preview = apiResetAt.add(
+              Duration(days: dayOffset, hours: hourOffset),
+            );
+            final previewIsFuture = preview.isAfter(DateTime.now());
+            final previewError = validationError ??
+                (previewIsFuture ? null : 'Choose a future reset time.');
+
+            void submit() {
+              if (!preview.isAfter(DateTime.now())) {
+                setDialogState(
+                  () => validationError = 'Choose a future reset time.',
+                );
+                return;
+              }
+              Navigator.of(dialogContext).pop(preview);
+            }
+
+            return AlertDialog(
+              title: Text(
+                configuredManualResetAt == null
+                    ? 'Set manual Codex reset'
+                    : 'Edit manual Codex reset',
+              ),
+              content: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        buildOffsetPicker(
+                          label: 'Day offset',
+                          unit: 'days',
+                          values: dayOffsets,
+                          controller: dayController,
+                          selectedValue: dayOffset,
+                          onChanged: (value) {
+                            setDialogState(() {
+                              dayOffset = value;
+                              validationError = null;
+                            });
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        buildOffsetPicker(
+                          label: 'Hour offset',
+                          unit: 'hours',
+                          values: hourOffsets,
+                          controller: hourController,
+                          selectedValue: hourOffset,
+                          onChanged: (value) {
+                            setDialogState(() {
+                              hourOffset = value;
+                              validationError = null;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest
+                            .withValues(alpha: 0.42),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            'Resulting reset',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurfaceVariant,
+                                ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _formatCodexResetPreview(preview),
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (previewError != null) ...[
+                      const SizedBox(height: 7),
+                      Text(
+                        previewError,
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: previewIsFuture ? submit : null,
+                  child: Text(
+                    configuredManualResetAt == null ? 'Set' : 'Save',
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      dayController.dispose();
+      hourController.dispose();
+    }
+  }
+
   Future<(String, String)?> _showCodexAccountSaveDialog(
     BuildContext context, {
     required String initialSlot,
@@ -838,6 +1235,59 @@ class HomeScreen extends StatelessWidget {
       candidate += 1;
     }
     return '$candidate';
+  }
+
+  DateTime? _latestCodexApiResetAt(AppState state) {
+    int? latestTimestamp;
+    for (final account in state.codexAccounts) {
+      final timestamp = account.weeklyResetAt;
+      if (timestamp == null ||
+          (latestTimestamp != null && timestamp <= latestTimestamp)) {
+        continue;
+      }
+      latestTimestamp = timestamp;
+    }
+    return latestTimestamp == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(latestTimestamp);
+  }
+
+  DateTime? _configuredCodexManualResetAt(AppState state) {
+    var latestManualResetAt = state.codexActiveManualResetAt;
+    for (final account in state.codexAccounts) {
+      final timestamp = account.manualResetAt;
+      if (timestamp == null) {
+        continue;
+      }
+      final manualResetAt = DateTime.fromMillisecondsSinceEpoch(timestamp);
+      if (latestManualResetAt == null ||
+          manualResetAt.isAfter(latestManualResetAt)) {
+        latestManualResetAt = manualResetAt;
+      }
+    }
+    return latestManualResetAt;
+  }
+
+  ({int day, int hour}) _codexManualResetPickerOffsets(
+    DateTime apiResetAt,
+    DateTime? configuredManualResetAt,
+  ) {
+    if (configuredManualResetAt == null) {
+      return (day: 0, hour: 0);
+    }
+
+    final offset = configuredManualResetAt.difference(apiResetAt);
+    const minimumOffset = Duration(days: -6, hours: -23);
+    final clampedOffset = Duration(
+      microseconds: offset.inMicroseconds
+          .clamp(minimumOffset.inMicroseconds, 0)
+          .toInt(),
+    );
+    final dayOffset = clampedOffset.inDays;
+    return (
+      day: dayOffset,
+      hour: clampedOffset.inHours - dayOffset * 24,
+    );
   }
 
   Future<void> _addGroup(BuildContext context, AppState state) async {
@@ -1525,6 +1975,13 @@ class HomeScreen extends StatelessWidget {
     final accountStatus = state.codexAccountStatus;
     final hasAccountError = accountError?.trim().isNotEmpty ?? false;
     final hasAccountStatus = accountStatus?.trim().isNotEmpty ?? false;
+    final now = DateTime.now();
+    final configuredManualResetAt = _configuredCodexManualResetAt(state);
+    final manualResetAt = configuredManualResetAt?.isAfter(now) == true
+        ? configuredManualResetAt
+        : null;
+    final apiResetAt = _latestCodexApiResetAt(state);
+    final hasConfiguredManualReset = configuredManualResetAt != null;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
@@ -1590,6 +2047,49 @@ class HomeScreen extends StatelessWidget {
                     visualDensity: VisualDensity.compact,
                   ),
                 ),
+                Tooltip(
+                  message: hasConfiguredManualReset
+                      ? 'Edit manual reset'
+                      : 'Set manual reset',
+                  child: IconButton(
+                    onPressed: state.busy || accountBusy || apiResetAt == null
+                        ? null
+                        : () => unawaited(
+                            _setCodexManualReset(context, state),
+                          ),
+                    icon: Icon(
+                      hasConfiguredManualReset
+                          ? Icons.edit_calendar_outlined
+                          : Icons.add_alarm_outlined,
+                      size: 16,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 30,
+                      minHeight: 30,
+                    ),
+                  ),
+                ),
+                if (hasConfiguredManualReset)
+                  Tooltip(
+                    message: 'Remove manual reset',
+                    child: IconButton(
+                      onPressed: state.busy || accountBusy
+                          ? null
+                          : () => unawaited(
+                              _clearCodexManualReset(context, state),
+                            ),
+                      icon: const Icon(Icons.close_rounded, size: 16),
+                      color: scheme.error,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 30,
+                        minHeight: 30,
+                      ),
+                    ),
+                  ),
               ],
             ),
             const SizedBox(height: 7),
@@ -1622,6 +2122,8 @@ class HomeScreen extends StatelessWidget {
                         state,
                         account,
                         activeSlot: activeSlot,
+                        now: now,
+                        manualResetAt: manualResetAt,
                       ),
                     )
                     .toList(growable: false),
@@ -1684,11 +2186,17 @@ class HomeScreen extends StatelessWidget {
     AppState state,
     CodexAccount account, {
     required String? activeSlot,
+    required DateTime now,
+    required DateTime? manualResetAt,
   }) {
     final scheme = Theme.of(context).colorScheme;
     final selected = activeSlot?.trim().toLowerCase() == account.identityKey;
     final enabled = !state.busy && !state.codexAccountBusy;
-    final usage = _weeklyUsageFor(account, DateTime.now());
+    final usage = _weeklyUsageFor(
+      account,
+      now,
+      manualResetAt: manualResetAt,
+    );
     final underTargetColor = scheme.brightness == Brightness.dark
         ? const Color(0xFF6AD697)
         : const Color(0xFF138A4B);
@@ -1923,9 +2431,9 @@ class HomeScreen extends StatelessWidget {
     final underPace = delta < -1;
     final overPace = delta > 1;
     final paceText = underPace
-        ? '${_formatPaceDifference(delta.abs(), account.effectiveWeeklyWindowSeconds)} too slow'
+        ? '${_formatPaceDifference(delta.abs(), usage.effectivePaceWindowSeconds)} too slow'
         : overPace
-        ? '${_formatPaceDifference(delta.abs(), account.effectiveWeeklyWindowSeconds)} too fast'
+        ? '${_formatPaceDifference(delta.abs(), usage.effectivePaceWindowSeconds)} too fast'
         : 'on pace';
     final paceColor = underPace
         ? (scheme.brightness == Brightness.dark
@@ -1947,7 +2455,8 @@ class HomeScreen extends StatelessWidget {
           const SizedBox(width: 5),
           Expanded(
             child: Text(
-              '${_formatCodexPercent(usage.remainingPercent)}% left (resets ${_formatCodexReset(usage.resetAt)})',
+              '${_formatCodexPercent(usage.remainingPercent)}% left'
+                  '${usage.usesManualReset ? ' (resets ${_formatCodexReset(usage.resetAt)})' : ''}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -1974,19 +2483,41 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  _CodexWeeklyUsage? _weeklyUsageFor(CodexAccount account, DateTime now) {
-    if (!account.hasWeeklyUsage) {
+  _CodexWeeklyUsage? _weeklyUsageFor(
+    CodexAccount account,
+    DateTime now, {
+    DateTime? manualResetAt,
+  }) {
+    if (account.weeklyError != null || account.weeklyUsedPercent == null) {
       return null;
     }
 
-    final resetAt = DateTime.fromMillisecondsSinceEpoch(account.weeklyResetAt!);
-    final window = Duration(seconds: account.effectiveWeeklyWindowSeconds);
-    if (window.inMilliseconds <= 0) {
+    final apiWindow = Duration(seconds: account.effectiveWeeklyWindowSeconds);
+    if (apiWindow.inMilliseconds <= 0) {
       return null;
     }
-    final windowStart = resetAt.subtract(window);
-    final elapsedMilliseconds = now.difference(windowStart).inMilliseconds;
-    final expectedPercent = (elapsedMilliseconds / window.inMilliseconds * 100)
+    final apiResetAt = account.weeklyResetAt == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(account.weeklyResetAt!);
+    final usesManualReset = manualResetAt?.isAfter(now) == true;
+    final resetAt = usesManualReset
+        ? manualResetAt
+        : apiResetAt;
+    if (resetAt == null) {
+      return null;
+    }
+    if (apiResetAt == null) {
+      return null;
+    }
+    final cycleStart = apiResetAt.subtract(apiWindow);
+    final effectivePaceWindow = resetAt.difference(cycleStart);
+    if (effectivePaceWindow.inMilliseconds <= 0 ||
+        effectivePaceWindow.inSeconds <= 0) {
+      return null;
+    }
+    final elapsedMilliseconds = now.difference(cycleStart).inMilliseconds;
+    final expectedPercent =
+        (elapsedMilliseconds / effectivePaceWindow.inMilliseconds * 100)
         .clamp(0, 100)
         .toDouble();
     final actualPercent = account.weeklyUsedPercent!.clamp(0, 100).toDouble();
@@ -1996,6 +2527,8 @@ class HomeScreen extends StatelessWidget {
       expectedPercent: expectedPercent,
       remainingPercent: 100 - actualPercent,
       resetAt: resetAt,
+      usesManualReset: usesManualReset,
+      effectivePaceWindowSeconds: effectivePaceWindow.inSeconds,
     );
   }
 
@@ -2034,6 +2567,36 @@ class HomeScreen extends StatelessWidget {
     final hour = value.hour.toString().padLeft(2, '0');
     final minute = value.minute.toString().padLeft(2, '0');
     return '$hour:$minute on ${value.day} ${months[value.month - 1]}';
+  }
+
+  String _formatCodexResetPreview(DateTime value) {
+    const weekdays = <String>[
+      'Mon',
+      'Tue',
+      'Wed',
+      'Thu',
+      'Fri',
+      'Sat',
+      'Sun',
+    ];
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '${weekdays[value.weekday - 1]}, ${value.day} '
+        '${months[value.month - 1]} ${value.year} at $hour:$minute';
   }
 
   Widget _buildRecentSectionHeader(BuildContext context, AppState state) {

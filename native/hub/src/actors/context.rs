@@ -18,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::signals::{
-    DeleteCodexAccount, InitApp, LoadCodexAccounts, LoadConfig, OpFinished, RefreshRecent,
-    RenameCodexAccount, SaveCodexAccount, SaveConfig, SetThemeSeed, SwitchCodexAccount, UiState,
+    ClearCodexManualReset, DeleteCodexAccount, InitApp, LoadCodexAccounts, LoadConfig, OpFinished,
+    RefreshRecent, RenameCodexAccount, SaveCodexAccount, SaveConfig, SetCodexManualReset,
+    SetThemeSeed, SwitchCodexAccount, UiState,
 };
 
 const PROVIDER_CODEX: &str = "codex";
@@ -31,7 +32,9 @@ const CODEX_ACCOUNTS_DIR: &str = "context-accounts";
 const CODEX_AUTH_FILE: &str = "auth.json";
 const CODEX_ACCOUNT_METADATA_FILE: &str = "metadata.json";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
-const CODEX_USAGE_ERROR: &str = "Weekly usage unavailable.";
+const CODEX_USAGE_ERROR: &str = "Weekly usage unavailable (network or parse failure).";
+const CODEX_USAGE_CREDENTIAL_ERROR: &str =
+    "Weekly usage unavailable: API rejected Codex credentials (HTTP 401/403).";
 const CODEX_USAGE_MAX_BODY_BYTES: usize = 512 * 1024;
 const CODEX_USAGE_CONNECT_TIMEOUT_SECONDS: u64 = 5;
 const CODEX_USAGE_TIMEOUT_SECONDS: u64 = 12;
@@ -78,6 +81,8 @@ struct CodexAccountMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly_reset_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    manual_reset_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     weekly_window_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly_error: Option<String>,
@@ -87,6 +92,8 @@ struct CodexAccountMetadata {
 struct CodexAccountLabels {
     #[serde(flatten)]
     labels: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manual_reset_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +101,21 @@ struct WeeklyUsage {
     used_percent: f64,
     reset_at_ms: Option<i64>,
     window_seconds: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexUsageError {
+    Unavailable,
+    CredentialRejected,
+}
+
+impl CodexUsageError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => CODEX_USAGE_ERROR,
+            Self::CredentialRejected => CODEX_USAGE_CREDENTIAL_ERROR,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +185,12 @@ impl ContextActor {
         ));
         owned.spawn(Self::forward_dart_signal::<SaveConfig>(self_addr.clone()));
         owned.spawn(Self::forward_dart_signal::<LoadCodexAccounts>(
+            self_addr.clone(),
+        ));
+        owned.spawn(Self::forward_dart_signal::<SetCodexManualReset>(
+            self_addr.clone(),
+        ));
+        owned.spawn(Self::forward_dart_signal::<ClearCodexManualReset>(
             self_addr.clone(),
         ));
         owned.spawn(Self::forward_dart_signal::<SaveCodexAccount>(
@@ -321,6 +349,85 @@ impl ContextActor {
             }
             Err(_) => {
                 let error = anyhow!("Could not load Codex accounts.");
+                self.codex_account_error = Some(error.to_string());
+                self.codex_account_status = Some(error.to_string());
+                Err(error)
+            }
+        };
+
+        self.codex_account_busy = false;
+        self.emit_state();
+        outcome
+    }
+
+    async fn set_codex_manual_reset(&mut self, path: String, manual_reset_at: i64) -> Result<()> {
+        if self.codex_account_busy {
+            return Err(anyhow!("Codex account operation is already in progress."));
+        }
+        if let Err(error) = validate_codex_manual_reset_at(manual_reset_at) {
+            self.codex_account_error = Some(error.to_string());
+            self.codex_account_status = Some("Could not set Codex manual reset.".to_owned());
+            self.emit_state();
+            return Err(error);
+        }
+        self.set_sessions_markdown_path(path);
+        self.codex_account_busy = true;
+        self.codex_account_error = None;
+        self.codex_account_status = Some("Setting Codex manual reset...".to_owned());
+        self.emit_state();
+
+        let path = self.sessions_markdown_path.clone();
+        let result = spawn_blocking(move || set_codex_manual_reset_file(&path, manual_reset_at))
+            .await;
+        let outcome = match result {
+            Ok(Ok(accounts)) => {
+                self.codex_accounts = accounts;
+                self.codex_account_status = Some("Set Codex manual reset.".to_owned());
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                self.codex_account_error = Some(error.to_string());
+                self.codex_account_status = Some("Could not set Codex manual reset.".to_owned());
+                Err(error)
+            }
+            Err(_) => {
+                let error = anyhow!("Could not set Codex manual reset.");
+                self.codex_account_error = Some(error.to_string());
+                self.codex_account_status = Some(error.to_string());
+                Err(error)
+            }
+        };
+
+        self.codex_account_busy = false;
+        self.emit_state();
+        outcome
+    }
+
+    async fn clear_codex_manual_reset(&mut self, path: String) -> Result<()> {
+        if self.codex_account_busy {
+            return Err(anyhow!("Codex account operation is already in progress."));
+        }
+        self.set_sessions_markdown_path(path);
+        self.codex_account_busy = true;
+        self.codex_account_error = None;
+        self.codex_account_status = Some("Clearing Codex manual reset...".to_owned());
+        self.emit_state();
+
+        let path = self.sessions_markdown_path.clone();
+        let result = spawn_blocking(move || clear_codex_manual_reset_file(&path)).await;
+        let outcome = match result {
+            Ok(Ok(accounts)) => {
+                self.codex_accounts = accounts;
+                self.codex_account_status = Some("Cleared Codex manual reset.".to_owned());
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                self.codex_account_error = Some(error.to_string());
+                self.codex_account_status = Some("Could not clear Codex manual reset.".to_owned());
+                Err(error)
+            }
+            Err(_) => {
+                let error = anyhow!("Could not clear Codex manual reset.");
                 self.codex_account_error = Some(error.to_string());
                 self.codex_account_status = Some(error.to_string());
                 Err(error)
@@ -773,6 +880,32 @@ impl Notifiable<LoadCodexAccounts> for ContextActor {
     async fn notify(&mut self, msg: LoadCodexAccounts, _: &Context<Self>) {
         match self
             .load_codex_accounts(Some(msg.sessions_markdown_path))
+            .await
+        {
+            Ok(()) => self.finish_op(msg.request_id, true, None),
+            Err(error) => self.finish_op(msg.request_id, false, Some(error.to_string())),
+        }
+    }
+}
+
+#[async_trait]
+impl Notifiable<SetCodexManualReset> for ContextActor {
+    async fn notify(&mut self, msg: SetCodexManualReset, _: &Context<Self>) {
+        match self
+            .set_codex_manual_reset(msg.sessions_markdown_path, msg.manual_reset_at)
+            .await
+        {
+            Ok(()) => self.finish_op(msg.request_id, true, None),
+            Err(error) => self.finish_op(msg.request_id, false, Some(error.to_string())),
+        }
+    }
+}
+
+#[async_trait]
+impl Notifiable<ClearCodexManualReset> for ContextActor {
+    async fn notify(&mut self, msg: ClearCodexManualReset, _: &Context<Self>) {
+        match self
+            .clear_codex_manual_reset(msg.sessions_markdown_path)
             .await
         {
             Ok(()) => self.finish_op(msg.request_id, true, None),
@@ -2167,6 +2300,45 @@ fn account_metadata_path(accounts_dir: &Path) -> PathBuf {
     accounts_dir.join(CODEX_ACCOUNT_METADATA_FILE)
 }
 
+fn infer_codex_live_auth_path(accounts_dir: &Path) -> Option<PathBuf> {
+    accounts_dir
+        .parent()
+        .map(|codex_dir| codex_dir.join(CODEX_AUTH_FILE))
+}
+
+fn unix_epoch_millis() -> Result<i64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| anyhow!("System clock is before the Unix epoch."))?;
+    i64::try_from(duration.as_millis())
+        .map_err(|_| anyhow!("System clock is outside the supported range."))
+}
+
+fn validate_codex_manual_reset_at(manual_reset_at: i64) -> Result<()> {
+    if manual_reset_at <= unix_epoch_millis()? {
+        return Err(anyhow!(
+            "Codex manual reset timestamp must be in the future."
+        ));
+    }
+    Ok(())
+}
+
+fn effective_codex_manual_reset_at(
+    accounts_dir: &Path,
+    labels: &mut CodexAccountLabels,
+) -> Result<Option<i64>> {
+    let Some(manual_reset_at) = labels.manual_reset_at else {
+        return Ok(None);
+    };
+    if manual_reset_at > unix_epoch_millis()? {
+        return Ok(Some(manual_reset_at));
+    }
+
+    labels.manual_reset_at = None;
+    write_codex_account_labels(accounts_dir, labels)?;
+    Ok(None)
+}
+
 fn list_codex_accounts_for_markdown(markdown_path: &str) -> Result<Vec<CodexAccountMetadata>> {
     if markdown_path.trim().is_empty() {
         return Ok(Vec::new());
@@ -2180,7 +2352,10 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
         return Ok(Vec::new());
     }
 
-    let labels = read_codex_account_labels(accounts_dir)?;
+    let mut labels = read_codex_account_labels(accounts_dir)?;
+    let manual_reset_at = effective_codex_manual_reset_at(accounts_dir, &mut labels)?;
+    let live_auth_bytes =
+        infer_codex_live_auth_path(accounts_dir).and_then(|path| fs::read(path).ok());
     let entries =
         fs::read_dir(accounts_dir).map_err(|_| anyhow!("Could not list saved Codex accounts."))?;
     let mut accounts = Vec::new();
@@ -2209,17 +2384,22 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
             .get(&slot)
             .and_then(|label| normalize_codex_account_display_name(label).ok())
             .unwrap_or_else(|| slot.clone());
+        let usage = match read_codex_snapshot_bytes_for_usage(&path) {
+            Ok(snapshot_bytes) => fetch_codex_weekly_usage(prefer_live_codex_auth(
+                &snapshot_bytes,
+                live_auth_bytes.as_deref(),
+            )),
+            Err(()) => Err(CodexUsageError::Unavailable),
+        };
         let (weekly_used_percent, weekly_reset_at, weekly_window_seconds, weekly_error) =
-            match read_codex_snapshot_bytes_for_usage(&path)
-                .and_then(|bytes| fetch_codex_weekly_usage(&bytes))
-            {
+            match usage {
                 Ok(usage) => (
                     Some(usage.used_percent),
                     usage.reset_at_ms,
                     Some(usage.window_seconds),
                     None,
                 ),
-                Err(()) => (None, None, None, Some(CODEX_USAGE_ERROR.to_owned())),
+                Err(error) => (None, None, None, Some(error.message().to_owned())),
             };
         accounts.push(CodexAccountMetadata {
             slot,
@@ -2227,6 +2407,7 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
             updated_at,
             weekly_used_percent,
             weekly_reset_at,
+            manual_reset_at,
             weekly_window_seconds,
             weekly_error,
         });
@@ -2256,13 +2437,16 @@ fn read_codex_account_labels(accounts_dir: &Path) -> Result<CodexAccountLabels> 
             Some((slot, label))
         })
         .collect();
-    Ok(CodexAccountLabels { labels })
+    Ok(CodexAccountLabels {
+        labels,
+        manual_reset_at: stored.manual_reset_at,
+    })
 }
 
 fn write_codex_account_labels(accounts_dir: &Path, labels: &CodexAccountLabels) -> Result<()> {
     ensure_codex_accounts_dir(accounts_dir)?;
     let path = account_metadata_path(accounts_dir);
-    if labels.labels.is_empty() {
+    if labels.labels.is_empty() && labels.manual_reset_at.is_none() {
         if path.is_file() {
             fs::remove_file(path)
                 .map_err(|_| anyhow!("Could not replace Codex account metadata."))?;
@@ -2277,6 +2461,25 @@ fn write_codex_account_labels(accounts_dir: &Path, labels: &CodexAccountLabels) 
         return Err(error);
     }
     Ok(())
+}
+
+fn set_codex_manual_reset_at(accounts_dir: &Path, manual_reset_at: i64) -> Result<()> {
+    validate_codex_manual_reset_at(manual_reset_at)?;
+    let mut labels = read_codex_account_labels(accounts_dir)?;
+    labels.manual_reset_at = Some(manual_reset_at);
+    write_codex_account_labels(accounts_dir, &labels)
+}
+
+fn clear_codex_manual_reset_at(accounts_dir: &Path) -> Result<()> {
+    if !accounts_dir.is_dir() {
+        return Ok(());
+    }
+    let mut labels = read_codex_account_labels(accounts_dir)?;
+    if labels.manual_reset_at.is_none() {
+        return Ok(());
+    }
+    labels.manual_reset_at = None;
+    write_codex_account_labels(accounts_dir, &labels)
 }
 
 fn set_codex_account_label(accounts_dir: &Path, slot: &str, label: &str) -> Result<()> {
@@ -2301,6 +2504,43 @@ fn read_codex_snapshot_bytes_for_usage(path: &Path) -> std::result::Result<Vec<u
         return Err(());
     }
     Ok(bytes)
+}
+
+fn codex_auth_account_id(auth_bytes: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(auth_bytes).ok()?;
+    let account_id = value
+        .get("tokens")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|tokens| tokens.get("account_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && !value
+                    .chars()
+                    .any(|character| character == '\0' || character == '\r' || character == '\n')
+        })?;
+    Some(account_id.to_owned())
+}
+
+fn prefer_live_codex_auth<'a>(
+    snapshot_bytes: &'a [u8],
+    live_auth_bytes: Option<&'a [u8]>,
+) -> &'a [u8] {
+    let Some(live_auth_bytes) = live_auth_bytes else {
+        return snapshot_bytes;
+    };
+    let Some(snapshot_account_id) = codex_auth_account_id(snapshot_bytes) else {
+        return snapshot_bytes;
+    };
+    let Some(live_account_id) = codex_auth_account_id(live_auth_bytes) else {
+        return snapshot_bytes;
+    };
+    if snapshot_account_id == live_account_id {
+        live_auth_bytes
+    } else {
+        snapshot_bytes
+    }
 }
 
 fn codex_auth_tokens(auth_bytes: &[u8]) -> std::result::Result<(String, Option<String>), ()> {
@@ -2346,11 +2586,25 @@ fn escape_curl_config_value(value: &str) -> Option<String> {
     Some(value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn fetch_codex_weekly_usage(auth_bytes: &[u8]) -> std::result::Result<WeeklyUsage, ()> {
-    let (access_token, account_id) = codex_auth_tokens(auth_bytes)?;
-    let access_token = escape_curl_config_value(&access_token).ok_or(())?;
+fn codex_usage_error_for_http_status(status: u16) -> CodexUsageError {
+    if matches!(status, 401 | 403) {
+        CodexUsageError::CredentialRejected
+    } else {
+        CodexUsageError::Unavailable
+    }
+}
+
+fn fetch_codex_weekly_usage(
+    auth_bytes: &[u8],
+) -> std::result::Result<WeeklyUsage, CodexUsageError> {
+    let (access_token, account_id) =
+        codex_auth_tokens(auth_bytes).map_err(|_| CodexUsageError::Unavailable)?;
+    let access_token =
+        escape_curl_config_value(&access_token).ok_or(CodexUsageError::Unavailable)?;
     let account_id = match account_id.as_deref() {
-        Some(account_id) => Some(escape_curl_config_value(account_id).ok_or(())?),
+        Some(account_id) => Some(
+            escape_curl_config_value(account_id).ok_or(CodexUsageError::Unavailable)?,
+        ),
         None => None,
     };
     let mut curl_config = format!(
@@ -2384,44 +2638,53 @@ fn fetch_codex_weekly_usage(auth_bytes: &[u8]) -> std::result::Result<WeeklyUsag
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| ())?;
+        .map_err(|_| CodexUsageError::Unavailable)?;
     let write_result = child
         .stdin
         .take()
-        .ok_or(())
-        .and_then(|mut stdin| stdin.write_all(curl_config.as_bytes()).map_err(|_| ()));
+        .ok_or(CodexUsageError::Unavailable)
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(curl_config.as_bytes())
+                .map_err(|_| CodexUsageError::Unavailable)
+        });
     if write_result.is_err() {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(());
+        return Err(CodexUsageError::Unavailable);
     }
-    let output = child.wait_with_output().map_err(|_| ())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| CodexUsageError::Unavailable)?;
     if !output.status.success() {
-        return Err(());
+        return Err(CodexUsageError::Unavailable);
     }
     let newline = output
         .stdout
         .iter()
         .rposition(|byte| *byte == b'\n')
-        .ok_or(())?;
-    let status = std::str::from_utf8(&output.stdout[newline + 1..]).map_err(|_| ())?;
+        .ok_or(CodexUsageError::Unavailable)?;
+    let status = std::str::from_utf8(&output.stdout[newline + 1..])
+        .map_err(|_| CodexUsageError::Unavailable)?;
     if status.len() != 3 || !status.chars().all(|character| character.is_ascii_digit()) {
-        return Err(());
+        return Err(CodexUsageError::Unavailable);
     }
-    let status = status.parse::<u16>().map_err(|_| ())?;
+    let status = status
+        .parse::<u16>()
+        .map_err(|_| CodexUsageError::Unavailable)?;
     if !(200..300).contains(&status) {
-        return Err(());
+        return Err(codex_usage_error_for_http_status(status));
     }
     let body = &output.stdout[..newline];
     if body.len() > CODEX_USAGE_MAX_BODY_BYTES {
-        return Err(());
+        return Err(CodexUsageError::Unavailable);
     }
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .ok_or(())?;
-    parse_weekly_usage_response(body, now_ms)
+        .ok_or(CodexUsageError::Unavailable)?;
+    parse_weekly_usage_response(body, now_ms).map_err(|_| CodexUsageError::Unavailable)
 }
 
 fn parse_usage_window(value: &serde_json::Value, now_ms: i64) -> Option<WeeklyUsage> {
@@ -2615,6 +2878,21 @@ fn save_snapshot_bytes(accounts_dir: &Path, slot: &str, bytes: &[u8]) -> Result<
         return Err(error);
     }
     Ok(())
+}
+
+fn set_codex_manual_reset_file(
+    markdown_path: &str,
+    manual_reset_at: i64,
+) -> Result<Vec<CodexAccountMetadata>> {
+    let paths = infer_codex_account_paths(markdown_path)?;
+    set_codex_manual_reset_at(&paths.accounts_dir, manual_reset_at)?;
+    list_codex_account_metadata(&paths.accounts_dir)
+}
+
+fn clear_codex_manual_reset_file(markdown_path: &str) -> Result<Vec<CodexAccountMetadata>> {
+    let paths = infer_codex_account_paths(markdown_path)?;
+    clear_codex_manual_reset_at(&paths.accounts_dir)?;
+    list_codex_account_metadata(&paths.accounts_dir)
 }
 
 fn save_codex_account_file(
@@ -3291,14 +3569,16 @@ mod tests {
 
     use super::{
         ConfigItem, PROVIDER_CODEX, PROVIDER_KIMI, PROVIDER_OPENCODE, PROVIDER_QWEN,
+        CodexUsageError, codex_usage_error_for_http_status,
         delete_codex_account_file, deserialize_items, list_codex_account_metadata,
         load_recent_kimi_contexts, load_recent_qwen_contexts, parse_iso8601_utc_ms,
         parse_markdown_items, parse_opencode_session_list, parse_session_command,
         parse_weekly_usage_response, process_listing_has_codex, query_recent_codex_contexts,
-        query_recent_opencode_contexts, read_codex_account_labels, remove_codex_account_label,
-        rename_codex_account_file, render_markdown_items, replace_file_from_temp,
-        replace_live_auth_with_rollback, save_codex_account_file, save_snapshot_bytes,
-        set_codex_account_label, validate_codex_account_slot,
+        prefer_live_codex_auth, query_recent_opencode_contexts, read_codex_account_labels,
+        remove_codex_account_label, rename_codex_account_file, render_markdown_items,
+        replace_file_from_temp, replace_live_auth_with_rollback, save_codex_account_file,
+        save_snapshot_bytes, set_codex_account_label, set_codex_manual_reset_at,
+        validate_codex_account_slot,
     };
 
     #[test]
@@ -3379,6 +3659,45 @@ mod tests {
             ["1", "2", "12"]
         );
         assert!(accounts.iter().all(|account| account.updated_at.is_some()));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn applies_and_expires_global_codex_manual_reset_override() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-manual-reset-test-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("1.json"), b"{}")?;
+        fs::write(root.join("2.json"), b"{}")?;
+        set_codex_account_label(&root, "1", "one")?;
+
+        assert!(set_codex_manual_reset_at(&root, 0).is_err());
+        let future = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?
+            + 60_000;
+        set_codex_manual_reset_at(&root, future)?;
+        let accounts = list_codex_account_metadata(&root)?;
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts
+            .iter()
+            .all(|account| account.manual_reset_at == Some(future)));
+        assert_eq!(read_codex_account_labels(&root)?.labels["1"], "one");
+
+        fs::write(
+            root.join("metadata.json"),
+            br#"{"1":"one","manual_reset_at":0}"#,
+        )?;
+        let accounts = list_codex_account_metadata(&root)?;
+        assert!(accounts
+            .iter()
+            .all(|account| account.manual_reset_at.is_none()));
+        let labels = read_codex_account_labels(&root)?;
+        assert_eq!(labels.labels.get("1").map(String::as_str), Some("one"));
+        assert!(labels.manual_reset_at.is_none());
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -3511,6 +3830,49 @@ mod tests {
         }"#;
         assert!(parse_weekly_usage_response(invalid_body, 0).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn prefers_live_codex_auth_only_for_matching_account() {
+        let snapshot: &[u8] =
+            br#"{"tokens":{"account_id":"account-1","access_token":"saved"}}"#;
+        let live: &[u8] =
+            br#"{"tokens":{"account_id":"account-1","access_token":"fresh"}}"#;
+        let other: &[u8] =
+            br#"{"tokens":{"account_id":"account-2","access_token":"other"}}"#;
+        let invalid_live: &[u8] = br#"{}"#;
+
+        assert_eq!(prefer_live_codex_auth(snapshot, Some(live)), live);
+        assert_eq!(prefer_live_codex_auth(snapshot, Some(other)), snapshot);
+        assert_eq!(prefer_live_codex_auth(snapshot, None), snapshot);
+        assert_eq!(
+            prefer_live_codex_auth(snapshot, Some(invalid_live)),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn classifies_codex_usage_credential_rejections_without_response_details() {
+        assert_eq!(
+            codex_usage_error_for_http_status(401),
+            CodexUsageError::CredentialRejected
+        );
+        assert_eq!(
+            codex_usage_error_for_http_status(403),
+            CodexUsageError::CredentialRejected
+        );
+        assert_eq!(
+            codex_usage_error_for_http_status(500),
+            CodexUsageError::Unavailable
+        );
+        assert_eq!(
+            CodexUsageError::CredentialRejected.message(),
+            "Weekly usage unavailable: API rejected Codex credentials (HTTP 401/403)."
+        );
+        assert_eq!(
+            CodexUsageError::Unavailable.message(),
+            "Weekly usage unavailable (network or parse failure)."
+        );
     }
 
     #[test]

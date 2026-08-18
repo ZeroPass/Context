@@ -33,6 +33,19 @@ pub struct LoadCodexAccounts {
 }
 
 #[derive(Deserialize, DartSignal)]
+pub struct SetCodexManualReset {
+    pub request_id: u64,
+    pub sessions_markdown_path: String,
+    pub manual_reset_at: i64,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct ClearCodexManualReset {
+    pub request_id: u64,
+    pub sessions_markdown_path: String,
+}
+
+#[derive(Deserialize, DartSignal)]
 pub struct SaveCodexAccount {
     pub request_id: u64,
     pub sessions_markdown_path: String,

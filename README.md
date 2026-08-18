@@ -33,29 +33,18 @@ Docs:
 
 - `BUILD_WINDOWS_APPX_POWERSHELL.md`
 
-## Shared APPX tooling
+## APPX tooling
 
-This project expects a shared `appx/` folder **next to** the project folder (so multiple apps can share Flutter + pub cache):
+The APPX kit is included under `appx/scripts/`, so this clone is self-contained
+for packaging scripts. The wrappers in `scripts/` invoke only this local kit;
+no additional APPX kit checkout or environment override is needed.
 
-```text
-<workspace>\
-  appx\
-  Context\
-```
-
-You can also set `APPX_ROOT` to point at your shared `appx` folder.
-
-To get the shared `appx/` folder, clone it as a sibling folder named `appx`:
-
-```bash
-git clone git@github.com:ZeroPass/appx-kit.git appx
-```
-
-If `appx/` is not a sibling folder, set `APPX_ROOT` (PowerShell example):
-
-```powershell
-$env:APPX_ROOT = "D:\\path\\to\\appx"
-```
+The kit does not vendor Flutter, Rust, Visual Studio, certificates, generated
+APPX files, or caches. By default, the scripts keep Flutter and Rust-related
+dependencies in the external local `%LOCALAPPDATA%\\AppxKit\\deps` cache.
+`APPX_DEPS_ROOT` and `APPX_DEPS_ROOT_LOCAL` can override the dependency roots;
+see [the Windows APPX build guide](BUILD_WINDOWS_APPX_POWERSHELL.md) for the
+cache and prerequisite details.
 
 ## Regenerate Dart bindings (Rinf)
 

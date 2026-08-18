@@ -18,6 +18,8 @@ enum _PendingOpKind {
   codexAccountSwitch,
   codexAccountRename,
   codexAccountDelete,
+  codexAccountManualResetSet,
+  codexAccountManualResetClear,
 }
 
 enum ThemeAppearance { light, sepia, dim, dark }
@@ -89,6 +91,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RecentContext> recentOpencode = const <RecentContext>[];
   List<RecentContext> recentQwen = const <RecentContext>[];
   bool _codexAccountRequestInFlight = false;
+  bool _codexAccountLoadPending = false;
   bool _codexAccountsLoaded = false;
   bool _codexAccountLoadAwaitingState = false;
   int _codexAccountsStateVersion = 0;
@@ -172,6 +175,26 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     SessionProvider.opencode => recentOpencode,
     SessionProvider.qwen => recentQwen,
   };
+
+  CodexAccount? get activeCodexAccount {
+    final active = codexActiveAccount;
+    if (active == null) {
+      return null;
+    }
+    for (final account in codexAccounts) {
+      if (_sameCodexAccountSlot(account.slot, active)) {
+        return account;
+      }
+    }
+    return null;
+  }
+
+  DateTime? get codexActiveManualResetAt {
+    final manualResetAt = activeCodexAccount?.manualResetAt;
+    return manualResetAt == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(manualResetAt);
+  }
 
   bool get hasFilter => filterQuery.trim().isNotEmpty;
 
@@ -396,7 +419,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> loadCodexAccounts() async {
-    if (_codexAccountRequestInFlight || sessionsMarkdownPath.trim().isEmpty) {
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      return;
+    }
+    if (_codexAccountRequestInFlight) {
+      _codexAccountLoadPending = true;
       return;
     }
 
@@ -453,7 +480,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         ).sendSignalToRust();
       },
     );
-    await loadCodexAccounts();
   }
 
   Future<void> switchCodexAccount(String slot) async {
@@ -483,7 +509,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     codexActiveAccount = targetSlot;
     await _prefs?.setString('codexActiveAccount', targetSlot);
     notifyListeners();
-    await loadCodexAccounts();
   }
 
   Future<void> renameCodexAccount(String slot, String displayName) async {
@@ -510,7 +535,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         ).sendSignalToRust();
       },
     );
-    await loadCodexAccounts();
   }
 
   Future<void> deleteCodexAccount(String slot) async {
@@ -540,7 +564,33 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       await _prefs?.remove('codexActiveAccount');
       notifyListeners();
     }
-    await loadCodexAccounts();
+  }
+
+  Future<void> setCodexManualReset(DateTime value) async {
+    await _runCodexAccountRequest(
+      kind: _PendingOpKind.codexAccountManualResetSet,
+      status: 'Setting Codex manual reset...',
+      sender: (requestId) {
+        SetCodexManualReset(
+          requestId: requestId,
+          sessionsMarkdownPath: sessionsMarkdownPath,
+          manualResetAt: value.millisecondsSinceEpoch,
+        ).sendSignalToRust();
+      },
+    );
+  }
+
+  Future<void> clearCodexManualReset() async {
+    await _runCodexAccountRequest(
+      kind: _PendingOpKind.codexAccountManualResetClear,
+      status: 'Clearing Codex manual reset...',
+      sender: (requestId) {
+        ClearCodexManualReset(
+          requestId: requestId,
+          sessionsMarkdownPath: sessionsMarkdownPath,
+        ).sendSignalToRust();
+      },
+    );
   }
 
   Future<void> _runCodexAccountRequest({
@@ -572,6 +622,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _codexAccountRequestInFlight = false;
       codexAccountBusy = false;
       notifyListeners();
+      if (_codexAccountLoadPending) {
+        _codexAccountLoadPending = false;
+        unawaited(loadCodexAccounts());
+      }
     }
   }
 

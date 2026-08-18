@@ -39,6 +39,12 @@ USBWSL-portable/
 config.txt
 *:Zone.Identifier
 
+# Local user/session data
+/context.md
+/codex sessions.md
+/auth.json
+/.codex/context-accounts/
+
 # Backend build artifacts
 backend/.venv/
 backend/__pycache__/

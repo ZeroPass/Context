@@ -2,16 +2,28 @@
 
 This guide builds `Context.appx` on a Windows machine using one PowerShell command.
 
+The APPX kit is included in this checkout under `appx\\scripts\\`, so the clone is
+self-contained for its packaging scripts. The wrappers use this local kit
+directly. Flutter, Rust, Visual Studio, the Windows SDK, and their caches remain
+external prerequisites.
+
 ## What this does
 
 The bootstrap script will:
 
-1. Find Flutter on `PATH` OR reuse/download a portable Flutter SDK to a shared `appx\\deps\\flutter` folder (default)
+1. Find Flutter on `PATH` OR reuse/download a portable Flutter SDK to the external local `%LOCALAPPDATA%\\AppxKit\\deps\\flutter` cache (default)
 2. Run `flutter doctor -v`
 3. Install Visual Studio Build Tools (Desktop C++) if missing (UAC prompt)
 4. Build the Windows release binary
 5. Create/trust a local dev signing certificate (LocalMachine\\Root + LocalMachine\\TrustedPeople; UAC prompt)
 6. Package and sign `Context.appx`
+
+When Flutter is not on `PATH`, the cache root can be overridden with
+`APPX_DEPS_ROOT`; `APPX_DEPS_ROOT_LOCAL` controls the local NTFS fallback used
+when a WSL/UNC Flutter path cannot run Dart. If `PUB_CACHE` is unset, the
+bootstrap uses `<DepsRoot>\\pub-cache`. The scripts may download Flutter and
+Rust and may install or repair Visual Studio Build Tools; none of those tools,
+certificates, generated APPX files, or caches are stored in this checkout.
 
 Output:
 
