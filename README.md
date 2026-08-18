@@ -1,6 +1,10 @@
 # Context (Rust + Flutter)
 
-Desktop UI for organizing local Codex, Kimi, OpenCode, and Qwen Code sessions in a markdown file. Context copies provider-correct resume and fork commands, and lists the three most recent sessions from each provider.
+Context session manager for Codex, Kimi Code, OpenCode, and Qwen Code. Offers account switching and pacing on Codex as well.
+
+## Screenshot
+
+![Context app screenshot](./Context%20app%20screenshoot.png)
 
 - Flutter (UI)
 - Rust (backend) via [Rinf](https://pub.dev/packages/rinf)
