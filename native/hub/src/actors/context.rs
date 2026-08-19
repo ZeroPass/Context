@@ -150,6 +150,13 @@ struct LoadedRecent {
     status: String,
 }
 
+#[derive(Debug)]
+struct LoadedCodexAccounts {
+    accounts: Vec<CodexAccountMetadata>,
+    active_slot: Option<String>,
+    active_slot_error: Option<String>,
+}
+
 struct ContextActor {
     initialized: bool,
     theme_seed_color_value: i64,
@@ -325,21 +332,24 @@ impl ContextActor {
         self.emit_state();
 
         let path = self.sessions_markdown_path.clone();
-        let result = spawn_blocking(move || list_codex_accounts_for_markdown(&path)).await;
+        let current_slot_hint = self.codex_active_account.clone().unwrap_or_default();
+        let result = spawn_blocking(move || {
+            load_codex_accounts_for_markdown(&path, &current_slot_hint)
+        })
+        .await;
         let outcome = match result {
-            Ok(Ok(accounts)) => {
-                self.codex_accounts = accounts;
-                if !self.codex_active_account.as_ref().is_some_and(|active| {
-                    self.codex_accounts
-                        .iter()
-                        .any(|account| &account.slot == active)
-                }) {
-                    self.codex_active_account = None;
-                }
-                self.codex_account_status = Some(format!(
-                    "{} saved Codex account(s).",
-                    self.codex_accounts.len()
-                ));
+            Ok(Ok(loaded)) => {
+                self.codex_accounts = loaded.accounts;
+                self.codex_active_account = loaded.active_slot;
+                self.codex_account_error = loaded.active_slot_error;
+                self.codex_account_status = if self.codex_account_error.is_some() {
+                    Some("Could not verify the current Codex account slot.".to_owned())
+                } else {
+                    Some(format!(
+                        "{} saved Codex account(s).",
+                        self.codex_accounts.len()
+                    ))
+                };
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -513,23 +523,6 @@ impl ContextActor {
         if self.codex_account_busy {
             return Err(anyhow!("Codex account operation is already in progress."));
         }
-        let current_slot = current_slot.trim().to_owned();
-        if current_slot.is_empty() {
-            let error = anyhow!("Save current Codex credentials first.");
-            self.codex_account_error = Some(error.to_string());
-            self.codex_account_status = Some(error.to_string());
-            self.emit_state();
-            return Err(error);
-        }
-        let current_slot = match validate_codex_account_slot(&current_slot) {
-            Ok(slot) => slot,
-            Err(error) => {
-                self.codex_account_error = Some(error.to_string());
-                self.codex_account_status = Some("Could not switch Codex account.".to_owned());
-                self.emit_state();
-                return Err(error);
-            }
-        };
         let target_slot = match validate_codex_account_slot(&target_slot) {
             Ok(slot) => slot,
             Err(error) => {
@@ -546,10 +539,10 @@ impl ContextActor {
         self.emit_state();
 
         let path = self.sessions_markdown_path.clone();
-        let operation_current = current_slot.clone();
+        let operation_current_hint = current_slot;
         let operation_target = target_slot.clone();
         let result = spawn_blocking(move || {
-            switch_codex_account_file(&path, &operation_current, &operation_target)
+            switch_codex_account_file(&path, &operation_current_hint, &operation_target)
         })
         .await;
         let outcome = match result {
@@ -2306,6 +2299,53 @@ fn infer_codex_live_auth_path(accounts_dir: &Path) -> Option<PathBuf> {
         .map(|codex_dir| codex_dir.join(CODEX_AUTH_FILE))
 }
 
+const CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR: &str =
+    "Save current Codex credentials once because the live account's saved-slot ownership cannot be determined uniquely.";
+
+fn codex_active_account_ownership_error() -> anyhow::Error {
+    anyhow!(CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR)
+}
+
+fn resolve_codex_active_account_slot(
+    paths: &CodexAccountPaths,
+    _current_slot_hint: &str,
+) -> Result<String> {
+    // The persisted Dart hint is advisory and may be empty or stale.
+    let live_auth_bytes = read_json_object_bytes(
+        &paths.auth_path,
+        CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR,
+        CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR,
+    )?;
+    let live_identity = codex_auth_account_id(&live_auth_bytes);
+    let mut identity_matches = Vec::new();
+    let mut byte_matches = Vec::new();
+
+    for (slot, path) in list_codex_account_snapshot_paths(&paths.accounts_dir)? {
+        let Ok(snapshot_bytes) = read_codex_snapshot_bytes_for_usage(&path) else {
+            continue;
+        };
+        if live_identity.as_deref().is_some_and(|live_identity| {
+            codex_auth_account_id(&snapshot_bytes).as_deref() == Some(live_identity)
+        }) {
+            identity_matches.push(slot.clone());
+        }
+        if snapshot_bytes == live_auth_bytes {
+            byte_matches.push(slot);
+        }
+    }
+
+    if identity_matches.len() == 1 {
+        return Ok(identity_matches.remove(0));
+    }
+    if identity_matches.len() > 1 {
+        return Err(codex_active_account_ownership_error());
+    }
+    if byte_matches.len() == 1 {
+        return Ok(byte_matches.remove(0));
+    }
+    Err(codex_active_account_ownership_error())
+}
+
 fn unix_epoch_millis() -> Result<i64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2339,26 +2379,42 @@ fn effective_codex_manual_reset_at(
     Ok(None)
 }
 
-fn list_codex_accounts_for_markdown(markdown_path: &str) -> Result<Vec<CodexAccountMetadata>> {
+fn load_codex_accounts_for_markdown(
+    markdown_path: &str,
+    current_slot_hint: &str,
+) -> Result<LoadedCodexAccounts> {
     if markdown_path.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(LoadedCodexAccounts {
+            accounts: Vec::new(),
+            active_slot: None,
+            active_slot_error: None,
+        });
     }
     let paths = infer_codex_account_paths(markdown_path)?;
-    list_codex_account_metadata(&paths.accounts_dir)
+    let accounts = list_codex_account_metadata(&paths.accounts_dir)?;
+    let (active_slot, active_slot_error) = if accounts.is_empty() {
+        (None, None)
+    } else {
+        match resolve_codex_active_account_slot(&paths, current_slot_hint) {
+            Ok(slot) => (Some(slot), None),
+            Err(error) => (None, Some(error.to_string())),
+        }
+    };
+    Ok(LoadedCodexAccounts {
+        accounts,
+        active_slot,
+        active_slot_error,
+    })
 }
 
-fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMetadata>> {
+fn list_codex_account_snapshot_paths(accounts_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     if !accounts_dir.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut labels = read_codex_account_labels(accounts_dir)?;
-    let manual_reset_at = effective_codex_manual_reset_at(accounts_dir, &mut labels)?;
-    let live_auth_bytes =
-        infer_codex_live_auth_path(accounts_dir).and_then(|path| fs::read(path).ok());
     let entries =
         fs::read_dir(accounts_dir).map_err(|_| anyhow!("Could not list saved Codex accounts."))?;
-    let mut accounts = Vec::new();
+    let mut snapshots = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file()
@@ -2374,6 +2430,23 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
         let Ok(slot) = validate_codex_account_slot(stem) else {
             continue;
         };
+        snapshots.push((slot, path));
+    }
+    snapshots.sort_by(|(left, _), (right, _)| compare_codex_account_slots(left, right));
+    Ok(snapshots)
+}
+
+fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMetadata>> {
+    if !accounts_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut labels = read_codex_account_labels(accounts_dir)?;
+    let manual_reset_at = effective_codex_manual_reset_at(accounts_dir, &mut labels)?;
+    let live_auth_bytes =
+        infer_codex_live_auth_path(accounts_dir).and_then(|path| fs::read(path).ok());
+    let mut accounts = Vec::new();
+    for (slot, path) in list_codex_account_snapshot_paths(accounts_dir)? {
         let updated_at = fs::metadata(&path)
             .ok()
             .and_then(|metadata| metadata.modified().ok())
@@ -2412,7 +2485,6 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
             weekly_error,
         });
     }
-    accounts.sort_by(|left, right| compare_codex_account_slots(&left.slot, &right.slot));
     Ok(accounts)
 }
 
@@ -2987,14 +3059,10 @@ where
 
 fn switch_codex_account_file(
     markdown_path: &str,
-    current_slot: &str,
+    current_slot_hint: &str,
     target_slot: &str,
 ) -> Result<Vec<CodexAccountMetadata>> {
-    let current_slot = validate_codex_account_slot(current_slot)?;
     let target_slot = validate_codex_account_slot(target_slot)?;
-    if current_slot.is_empty() {
-        return Err(anyhow!("Save current Codex credentials first."));
-    }
     ensure_codex_not_running(markdown_path)?;
     let paths = infer_codex_account_paths(markdown_path)?;
     let current_bytes = read_json_object_bytes(
@@ -3002,6 +3070,7 @@ fn switch_codex_account_file(
         "Current Codex credentials are unavailable.",
         "Current Codex credentials are invalid.",
     )?;
+    let current_slot = resolve_codex_active_account_slot(&paths, current_slot_hint)?;
     let target_bytes = if current_slot == target_slot {
         current_bytes.clone()
     } else {
@@ -3568,17 +3637,18 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        ConfigItem, PROVIDER_CODEX, PROVIDER_KIMI, PROVIDER_OPENCODE, PROVIDER_QWEN,
-        CodexUsageError, codex_usage_error_for_http_status,
+        ConfigItem, CodexAccountPaths, CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR, PROVIDER_CODEX,
+        PROVIDER_KIMI, PROVIDER_OPENCODE, PROVIDER_QWEN, CodexUsageError,
+        codex_usage_error_for_http_status,
         delete_codex_account_file, deserialize_items, list_codex_account_metadata,
         load_recent_kimi_contexts, load_recent_qwen_contexts, parse_iso8601_utc_ms,
         parse_markdown_items, parse_opencode_session_list, parse_session_command,
         parse_weekly_usage_response, process_listing_has_codex, query_recent_codex_contexts,
         prefer_live_codex_auth, query_recent_opencode_contexts, read_codex_account_labels,
         remove_codex_account_label, rename_codex_account_file, render_markdown_items,
-        replace_file_from_temp, replace_live_auth_with_rollback, save_codex_account_file,
-        save_snapshot_bytes, set_codex_account_label, set_codex_manual_reset_at,
-        validate_codex_account_slot,
+        replace_file_from_temp, replace_live_auth_with_rollback, resolve_codex_active_account_slot,
+        save_codex_account_file, save_snapshot_bytes, set_codex_account_label,
+        set_codex_manual_reset_at, validate_codex_account_slot,
     };
 
     #[test]
@@ -3849,6 +3919,115 @@ mod tests {
             prefer_live_codex_auth(snapshot, Some(invalid_live)),
             snapshot
         );
+    }
+
+    #[test]
+    fn resolves_unique_codex_account_identity_before_byte_fallback() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-resolve-identity-test-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        let paths = CodexAccountPaths {
+            auth_path: root.join("auth.json"),
+            accounts_dir: root.clone(),
+        };
+        let live_auth = br#"{"tokens":{"account_id":" account-live "}}"#;
+        fs::write(&paths.auth_path, live_auth)?;
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "1",
+            br#"{"tokens":{"account_id":"account-other"}}"#,
+        )?;
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "2",
+            br#"{"tokens":{"account_id":"account-live"}}"#,
+        )?;
+
+        assert_eq!(resolve_codex_active_account_slot(&paths, "")?, "2");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recovers_codex_active_slot_from_empty_or_stale_hint() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-resolve-hint-test-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        let paths = CodexAccountPaths {
+            auth_path: root.join("auth.json"),
+            accounts_dir: root.clone(),
+        };
+        fs::write(
+            &paths.auth_path,
+            br#"{"tokens":{"account_id":"account-live"}}"#,
+        )?;
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "3",
+            br#"{"tokens":{"account_id":"account-live"}}"#,
+        )?;
+
+        assert_eq!(resolve_codex_active_account_slot(&paths, "")?, "3");
+        assert_eq!(resolve_codex_active_account_slot(&paths, "99")?, "3");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_ambiguous_or_unmatched_codex_account_ownership() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-resolve-fail-closed-test-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        let paths = CodexAccountPaths {
+            auth_path: root.join("auth.json"),
+            accounts_dir: root.clone(),
+        };
+        fs::write(
+            &paths.auth_path,
+            br#"{"tokens":{"account_id":"account-live"}}"#,
+        )?;
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "1",
+            br#"{"tokens":{"account_id":"account-live"}}"#,
+        )?;
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "2",
+            br#"{"tokens":{"account_id":"account-live"}}"#,
+        )?;
+
+        let error = resolve_codex_active_account_slot(&paths, "1")
+            .expect_err("duplicate identities must not choose a slot");
+        assert_eq!(error.to_string(), CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR);
+
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "1",
+            br#"{"tokens":{"account_id":"account-other"}}"#,
+        )?;
+        save_snapshot_bytes(
+            &paths.accounts_dir,
+            "2",
+            br#"{"tokens":{"account_id":"account-other-2"}}"#,
+        )?;
+        let error = resolve_codex_active_account_slot(&paths, "1")
+            .expect_err("unmatched identity must not choose a slot");
+        assert_eq!(error.to_string(), CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

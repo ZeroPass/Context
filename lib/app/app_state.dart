@@ -92,9 +92,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RecentContext> recentQwen = const <RecentContext>[];
   bool _codexAccountRequestInFlight = false;
   bool _codexAccountLoadPending = false;
-  bool _codexAccountsLoaded = false;
-  bool _codexAccountLoadAwaitingState = false;
-  int _codexAccountsStateVersion = 0;
 
   @override
   void dispose() {
@@ -427,9 +424,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
-    final stateVersionBeforeLoad = _codexAccountsStateVersion;
-    _codexAccountsLoaded = false;
-    _codexAccountLoadAwaitingState = false;
     try {
       await _runCodexAccountRequest(
         kind: _PendingOpKind.codexAccountLoad,
@@ -441,15 +435,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           ).sendSignalToRust();
         },
       );
-      if (_codexAccountsStateVersion != stateVersionBeforeLoad) {
-        _codexAccountsLoaded = true;
-        _reconcileCodexActiveAccount();
-        notifyListeners();
-      } else {
-        _codexAccountLoadAwaitingState = true;
-      }
+      notifyListeners();
     } catch (_) {
-      _codexAccountLoadAwaitingState = false;
       // The account error is exposed through codexAccountError.
     }
   }
@@ -662,7 +649,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (markdownPath != null) {
       final nextPath = markdownPath.trim();
       if (nextPath != sessionsMarkdownPath) {
-        _codexAccountsLoaded = false;
         codexAccounts = const <CodexAccount>[];
       }
       sessionsMarkdownPath = nextPath;
@@ -1152,23 +1138,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     lastError = state.lastError;
     recentBusy = state.recentBusy;
     recentStatus = state.recentStatus;
-    if (state.sessionsMarkdownPath != sessionsMarkdownPath) {
-      _codexAccountsLoaded = false;
-    }
     codexAccounts = _decodeCodexAccounts(state.codexAccountsJson);
-    _codexAccountsStateVersion += 1;
-    if (_codexAccountLoadAwaitingState) {
-      _codexAccountLoadAwaitingState = false;
-      _codexAccountsLoaded = true;
-    }
     final nativeActiveAccount = _normalizeCodexAccountSlot(
       state.codexActiveAccount,
     );
-    if (nativeActiveAccount != null) {
+    final hasVerifiedNativeActiveAccount = nativeActiveAccount != null &&
+        codexAccounts.any(
+          (account) => _sameCodexAccountSlot(account.slot, nativeActiveAccount),
+        );
+    if (hasVerifiedNativeActiveAccount) {
       codexActiveAccount = nativeActiveAccount;
       _prefs?.setString('codexActiveAccount', nativeActiveAccount);
-    } else if (_codexAccountsLoaded) {
-      _reconcileCodexActiveAccount();
+    } else {
+      codexActiveAccount = null;
+      _prefs?.remove('codexActiveAccount');
     }
     codexAccountBusy = state.codexAccountBusy || _codexAccountRequestInFlight;
     codexAccountStatus = state.codexAccountStatus;
@@ -1276,18 +1259,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       out.add(account);
     }
     return out.toList(growable: false);
-  }
-
-  void _reconcileCodexActiveAccount() {
-    final active = codexActiveAccount;
-    if (active == null ||
-        codexAccounts.any(
-          (account) => _sameCodexAccountSlot(account.slot, active),
-        )) {
-      return;
-    }
-    codexActiveAccount = null;
-    _prefs?.remove('codexActiveAccount');
   }
 
   ({SessionProvider provider, String id}) parseSessionInput(

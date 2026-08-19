@@ -2190,6 +2190,7 @@ class HomeScreen extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final selected = activeSlot?.trim().toLowerCase() == account.identityKey;
     final enabled = !state.busy && !state.codexAccountBusy;
+    final switchEnabled = enabled && activeSlot?.isNotEmpty == true;
     final usage = _weeklyUsageFor(
       account,
       now,
@@ -2274,7 +2275,7 @@ class HomeScreen extends StatelessWidget {
                   color: Colors.transparent,
                   child: InkWell(
                     borderRadius: BorderRadius.circular(8.2),
-                    onTap: enabled && !selected
+                    onTap: switchEnabled && !selected
                         ? () => unawaited(
                             _switchCodexAccount(
                               context,
