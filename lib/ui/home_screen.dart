@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
@@ -30,6 +32,8 @@ class _CodexWeeklyUsage {
   double get paceDeltaPercent => actualPercent - expectedPercent;
   double get targetLeftPercent => 100 - expectedPercent;
 }
+
+const _codexPaceTolerancePercent = 0.5;
 
 class _OneStepCupertinoPickerItem extends StatelessWidget {
   const _OneStepCupertinoPickerItem({required this.child});
@@ -85,19 +89,18 @@ class _OneStepCupertinoPickerState extends State<_OneStepCupertinoPicker> {
     _pendingWheelTarget = targetItem;
     _registeredWheelEvent = event;
 
-    GestureBinding.instance.pointerSignalResolver.register(
-      event,
-      (resolvedEvent) {
-        _registeredWheelEvent = null;
-        _pendingWheelTarget = null;
-        (resolvedEvent as PointerScrollEvent).respond(
-          allowPlatformDefault: false,
-        );
-        if (mounted && widget.controller.hasClients) {
-          widget.controller.jumpToItem(targetItem);
-        }
-      },
-    );
+    GestureBinding.instance.pointerSignalResolver.register(event, (
+      resolvedEvent,
+    ) {
+      _registeredWheelEvent = null;
+      _pendingWheelTarget = null;
+      (resolvedEvent as PointerScrollEvent).respond(
+        allowPlatformDefault: false,
+      );
+      if (mounted && widget.controller.hasClients) {
+        widget.controller.jumpToItem(targetItem);
+      }
+    });
   }
 
   bool _handleScrollNotification(ScrollNotification notification) {
@@ -131,7 +134,6 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
     required this.actualPercent,
     required this.expectedPercent,
     required this.usedColor,
-    required this.underTargetColor,
     required this.overTargetColor,
     required this.remainingColor,
     required this.targetMarkerColor,
@@ -141,7 +143,6 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
   final double actualPercent;
   final double expectedPercent;
   final Color usedColor;
-  final Color underTargetColor;
   final Color overTargetColor;
   final Color remainingColor;
   final Color targetMarkerColor;
@@ -155,8 +156,9 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
 
     final actual = actualPercent.clamp(0, 100).toDouble() / 100;
     final target = expectedPercent.clamp(0, 100).toDouble() / 100;
-    final onPace = (actualPercent - expectedPercent).abs() <= 1;
-    final visualActual = onPace ? target : actual;
+    final onPace =
+        (actualPercent - expectedPercent).abs() <= _codexPaceTolerancePercent;
+    final overPace = !onPace && actual > target;
 
     final cardRect = Offset.zero & size;
     final cardClip = RRect.fromRectAndRadius(
@@ -191,15 +193,14 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
     canvas.save();
     canvas.clipRRect(cardClip);
 
-    if (visualActual <= target) {
-      drawSection(0, visualActual, usedColor);
-      drawSection(visualActual, target, underTargetColor);
+    if (!overPace) {
+      drawSection(0, actual, usedColor);
+      drawSection(actual, 1, remainingColor);
     } else {
       drawSection(0, target, usedColor);
-      drawSection(target, visualActual, overTargetColor);
+      drawSection(target, actual, overTargetColor);
+      drawSection(actual, 1, remainingColor);
     }
-    final coloredThrough = visualActual > target ? visualActual : target;
-    drawSection(coloredThrough, 1, remainingColor);
 
     final highlightPaint = Paint()
       ..shader = const LinearGradient(
@@ -237,18 +238,197 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(
-    covariant _CodexWeeklyUsageBackgroundPainter oldDelegate,
-  ) {
+  bool shouldRepaint(covariant _CodexWeeklyUsageBackgroundPainter oldDelegate) {
     return actualPercent != oldDelegate.actualPercent ||
         expectedPercent != oldDelegate.expectedPercent ||
         usedColor != oldDelegate.usedColor ||
-        underTargetColor != oldDelegate.underTargetColor ||
         overTargetColor != oldDelegate.overTargetColor ||
         remainingColor != oldDelegate.remainingColor ||
         targetMarkerColor != oldDelegate.targetMarkerColor ||
         actualEdgeColor != oldDelegate.actualEdgeColor;
   }
+}
+
+const _codexDitherTileSize = 64;
+
+class _CodexDither extends StatefulWidget {
+  const _CodexDither({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_CodexDither> createState() => _CodexDitherState();
+}
+
+class _CodexDitherState extends State<_CodexDither> {
+  ui.Image? _tile;
+  ui.ImageShader? _shader;
+  ui.Image? _shaderTile;
+  double? _shaderDevicePixelRatio;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadTile());
+  }
+
+  Future<void> _loadTile() async {
+    try {
+      final tile = await _createCodexDitherTile();
+      if (!mounted) {
+        tile.dispose();
+        return;
+      }
+      final oldTile = _tile;
+      _tile = tile;
+      try {
+        _updateShader();
+      } on Object {
+        _tile = oldTile;
+        tile.dispose();
+        rethrow;
+      }
+      oldTile?.dispose();
+      setState(() {});
+    } on Object {
+      // Dithering is optional; keep the content usable if tile creation fails.
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _updateShader();
+  }
+
+  void _updateShader() {
+    final tile = _tile;
+    if (tile == null) {
+      _disposeShader();
+      return;
+    }
+
+    final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+    if (identical(_shaderTile, tile) &&
+        _shaderDevicePixelRatio == devicePixelRatio) {
+      return;
+    }
+
+    final shader = ui.ImageShader(
+      tile,
+      ui.TileMode.repeated,
+      ui.TileMode.repeated,
+      _codexDitherShaderMatrix(devicePixelRatio),
+    );
+    final oldShader = _shader;
+    _shader = shader;
+    _shaderTile = tile;
+    _shaderDevicePixelRatio = devicePixelRatio;
+    oldShader?.dispose();
+  }
+
+  void _disposeShader() {
+    _shader?.dispose();
+    _shader = null;
+    _shaderTile = null;
+    _shaderDevicePixelRatio = null;
+  }
+
+  @override
+  void dispose() {
+    _disposeShader();
+    _tile?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _CodexDitherPainter(shader: _shader),
+      child: widget.child,
+    );
+  }
+}
+
+Future<ui.Image> _createCodexDitherTile() async {
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  final blackPaint = ui.Paint()
+    ..color = const Color(0x02000000)
+    ..isAntiAlias = false;
+  final whitePaint = ui.Paint()
+    ..color = const Color(0x02FFFFFF)
+    ..isAntiAlias = false;
+
+  var noise = 0x6D2B79F5;
+  for (var y = 0; y < _codexDitherTileSize; y++) {
+    for (var x = 0; x < _codexDitherTileSize; x++) {
+      noise = (noise * 1664525 + 1013904223) & 0xFFFFFFFF;
+      canvas.drawRect(
+        ui.Rect.fromLTWH(x.toDouble(), y.toDouble(), 1, 1),
+        (noise & 0x80000000) == 0 ? blackPaint : whitePaint,
+      );
+    }
+  }
+
+  final picture = recorder.endRecording();
+  try {
+    return await picture.toImage(_codexDitherTileSize, _codexDitherTileSize);
+  } finally {
+    picture.dispose();
+  }
+}
+
+class _CodexDitherPainter extends CustomPainter {
+  _CodexDitherPainter({required this.shader});
+
+  final ui.ImageShader? shader;
+
+  @override
+  void paint(ui.Canvas canvas, Size size) {
+    final shader = this.shader;
+    if (shader == null || size.width <= 0 || size.height <= 0) {
+      return;
+    }
+    final paint = ui.Paint()
+      ..shader = shader
+      ..filterQuality = ui.FilterQuality.none;
+    canvas.drawRect(ui.Rect.fromLTWH(0, 0, size.width, size.height), paint);
+  }
+
+  @override
+  bool? hitTest(Offset position) => false;
+
+  @override
+  bool shouldRepaint(covariant _CodexDitherPainter oldDelegate) {
+    return !identical(shader, oldDelegate.shader);
+  }
+}
+
+Float64List _codexDitherShaderMatrix(double devicePixelRatio) {
+  // The local matrix maps tile coordinates into logical canvas coordinates.
+  // Shrink by the DPR so each tile texel occupies one physical pixel.
+  final scale = devicePixelRatio.isFinite && devicePixelRatio > 0
+      ? 1 / devicePixelRatio
+      : 1.0;
+  return Float64List.fromList([
+    scale,
+    0,
+    0,
+    0,
+    0,
+    scale,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+  ]);
 }
 
 class _PassiveTooltip extends StatefulWidget {
@@ -963,7 +1143,8 @@ class HomeScreen extends StatelessWidget {
               Duration(days: dayOffset, hours: hourOffset),
             );
             final previewIsFuture = preview.isAfter(DateTime.now());
-            final previewError = validationError ??
+            final previewError =
+                validationError ??
                 (previewIsFuture ? null : 'Choose a future reset time.');
 
             void submit() {
@@ -1038,9 +1219,7 @@ class HomeScreen extends StatelessWidget {
                         children: [
                           Text(
                             'Resulting reset',
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
+                            style: Theme.of(context).textTheme.labelSmall
                                 ?.copyWith(
                                   color: Theme.of(
                                     context,
@@ -1075,9 +1254,7 @@ class HomeScreen extends StatelessWidget {
                 ),
                 FilledButton(
                   onPressed: previewIsFuture ? submit : null,
-                  child: Text(
-                    configuredManualResetAt == null ? 'Set' : 'Save',
-                  ),
+                  child: Text(configuredManualResetAt == null ? 'Set' : 'Save'),
                 ),
               ],
             );
@@ -1282,10 +1459,7 @@ class HomeScreen extends StatelessWidget {
           .toInt(),
     );
     final dayOffset = clampedOffset.inDays;
-    return (
-      day: dayOffset,
-      hour: clampedOffset.inHours - dayOffset * 24,
-    );
+    return (day: dayOffset, hour: clampedOffset.inHours - dayOffset * 24);
   }
 
   Future<void> _addGroup(BuildContext context, AppState state) async {
@@ -1962,8 +2136,9 @@ class HomeScreen extends StatelessWidget {
   Widget _buildCodexAccountSection(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
     final providerColor = _providerColor(scheme, SessionProvider.codex);
-    final accountSectionSurfaceColor = scheme.surfaceContainerLowest
-        .withValues(alpha: 0.38);
+    final accountSectionSurfaceColor = scheme.surfaceContainerLowest.withValues(
+      alpha: 0.38,
+    );
     final neutralAccountOutlineColor = HSLColor.fromColor(
       scheme.outlineVariant,
     ).withSaturation(0).toColor();
@@ -2052,9 +2227,7 @@ class HomeScreen extends StatelessWidget {
                   child: IconButton(
                     onPressed: state.busy || accountBusy || apiResetAt == null
                         ? null
-                        : () => unawaited(
-                            _setCodexManualReset(context, state),
-                          ),
+                        : () => unawaited(_setCodexManualReset(context, state)),
                     icon: Icon(
                       hasConfiguredManualReset
                           ? Icons.edit_calendar_outlined
@@ -2137,9 +2310,8 @@ class HomeScreen extends StatelessWidget {
                         child: LinearProgressIndicator(
                           minHeight: 2,
                           color: neutralAccountOutlineColor,
-                          backgroundColor: neutralAccountOutlineColor.withValues(
-                            alpha: 0.12,
-                          ),
+                          backgroundColor: neutralAccountOutlineColor
+                              .withValues(alpha: 0.12),
                         ),
                       ),
                     )
@@ -2191,11 +2363,7 @@ class HomeScreen extends StatelessWidget {
     final selected = activeSlot?.trim().toLowerCase() == account.identityKey;
     final enabled = !state.busy && !state.codexAccountBusy;
     final switchEnabled = enabled && activeSlot?.isNotEmpty == true;
-    final usage = _weeklyUsageFor(
-      account,
-      now,
-      manualResetAt: manualResetAt,
-    );
+    final usage = _weeklyUsageFor(account, now, manualResetAt: manualResetAt);
     final underTargetColor = scheme.brightness == Brightness.dark
         ? const Color(0xFF6AD697)
         : const Color(0xFF138A4B);
@@ -2211,13 +2379,13 @@ class HomeScreen extends StatelessWidget {
     final quotaTooltipMessage = usage == null
         ? ''
         : 'Spent ${_formatCodexPercent(usage.actualPercent)}% last recorded.\n'
-              'Fair target by now: ${_formatCodexPercent(usage.expectedPercent)}% used '
+              'Fair target by now: ${_formatExpectedCodexPercent(usage.expectedPercent)}% used '
               '(${_formatCodexPercent(usage.targetLeftPercent)}% target left).';
     final quotaSemanticsLabel = usage == null
         ? null
         : 'Weekly usage ${_formatCodexPercent(usage.actualPercent)} percent used, '
               'last recorded.\n'
-              'Fair target by now ${_formatCodexPercent(usage.expectedPercent)} percent '
+              'Fair target by now ${_formatExpectedCodexPercent(usage.expectedPercent)} percent '
               'used, or ${_formatCodexPercent(usage.targetLeftPercent)} percent target left.';
 
     return Container(
@@ -2250,16 +2418,15 @@ class HomeScreen extends StatelessWidget {
                           actualPercent: usage.actualPercent,
                           expectedPercent: usage.expectedPercent,
                           usedColor: underTargetColor.withValues(alpha: 0.32),
-                          underTargetColor: underTargetColor.withValues(
-                            alpha: 0.20,
-                          ),
                           overTargetColor: overTargetColor.withValues(
                             alpha: 0.17,
                           ),
                           remainingColor: accountCardSurfaceColor,
-                          targetMarkerColor: scheme.onSurface.withValues(
-                            alpha: 0.23,
-                          ),
+                          targetMarkerColor:
+                              usage.paceDeltaPercent <
+                                  -_codexPaceTolerancePercent
+                              ? underTargetColor.withValues(alpha: 0.55)
+                              : scheme.onSurface.withValues(alpha: 0.23),
                           actualEdgeColor: scheme.onSurface.withValues(
                             alpha: 0.16,
                           ),
@@ -2277,11 +2444,7 @@ class HomeScreen extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8.2),
                     onTap: switchEnabled && !selected
                         ? () => unawaited(
-                            _switchCodexAccount(
-                              context,
-                              state,
-                              account.slot,
-                            ),
+                            _switchCodexAccount(context, state, account.slot),
                           )
                         : null,
                     child: Padding(
@@ -2369,10 +2532,7 @@ class HomeScreen extends StatelessWidget {
                             )
                           : null,
                       tooltip: 'Delete saved account',
-                      icon: const Icon(
-                        Icons.delete_outline_rounded,
-                        size: 16,
-                      ),
+                      icon: const Icon(Icons.delete_outline_rounded, size: 16),
                       color: scheme.error,
                       visualDensity: VisualDensity.compact,
                       padding: EdgeInsets.zero,
@@ -2427,13 +2587,15 @@ class HomeScreen extends StatelessWidget {
     }
 
     final delta = usage.paceDeltaPercent;
-    final underPace = delta < -1;
-    final overPace = delta > 1;
+    final underPace = delta < -_codexPaceTolerancePercent;
+    final overPace = delta > _codexPaceTolerancePercent;
     final paceText = underPace
         ? '${_formatPaceDifference(delta.abs(), usage.effectivePaceWindowSeconds)} too slow'
         : overPace
         ? '${_formatPaceDifference(delta.abs(), usage.effectivePaceWindowSeconds)} too fast'
         : 'on pace';
+    final expectedText =
+        '${_formatExpectedCodexPercent(usage.expectedPercent)}% used';
     final paceColor = underPace
         ? (scheme.brightness == Brightness.dark
               ? const Color(0xFF65C18C)
@@ -2476,7 +2638,7 @@ class HomeScreen extends StatelessWidget {
                 const SizedBox(width: 5),
                 Flexible(
                   child: Text(
-                    'Pace: $paceText',
+                    'Pace: $paceText · should be $expectedText',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -2523,9 +2685,7 @@ class HomeScreen extends StatelessWidget {
         ? null
         : DateTime.fromMillisecondsSinceEpoch(account.weeklyResetAt!);
     final usesManualReset = manualResetAt?.isAfter(now) == true;
-    final resetAt = usesManualReset
-        ? manualResetAt
-        : apiResetAt;
+    final resetAt = usesManualReset ? manualResetAt : apiResetAt;
     if (resetAt == null) {
       return null;
     }
@@ -2541,8 +2701,8 @@ class HomeScreen extends StatelessWidget {
     final elapsedMilliseconds = now.difference(cycleStart).inMilliseconds;
     final expectedPercent =
         (elapsedMilliseconds / effectivePaceWindow.inMilliseconds * 100)
-        .clamp(0, 100)
-        .toDouble();
+            .clamp(0, 100)
+            .toDouble();
     final actualPercent = account.weeklyUsedPercent!.clamp(0, 100).toDouble();
 
     return _CodexWeeklyUsage(
@@ -2571,16 +2731,20 @@ class HomeScreen extends StatelessWidget {
   String _formatCodexPercent(double value) =>
       value.round().clamp(0, 100).toString();
 
+  String _formatExpectedCodexPercent(double value) {
+    final clamped = value.clamp(0, 100).toDouble();
+    if (clamped == 0) {
+      return '0';
+    }
+    if (clamped < 1) {
+      final formatted = clamped.toStringAsFixed(1);
+      return formatted == '0.0' ? '<0.1' : formatted;
+    }
+    return clamped.round().toString();
+  }
+
   String _formatCodexResetLabel(DateTime value) {
-    const weekdays = <String>[
-      'Mon',
-      'Tue',
-      'Wed',
-      'Thu',
-      'Fri',
-      'Sat',
-      'Sun',
-    ];
+    const weekdays = <String>['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const months = <String>[
       'Jan',
       'Feb',
@@ -2602,15 +2766,7 @@ class HomeScreen extends StatelessWidget {
   }
 
   String _formatCodexResetPreview(DateTime value) {
-    const weekdays = <String>[
-      'Mon',
-      'Tue',
-      'Wed',
-      'Thu',
-      'Fri',
-      'Sat',
-      'Sun',
-    ];
+    const weekdays = <String>['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const months = <String>[
       'Jan',
       'Feb',
@@ -2738,217 +2894,222 @@ class HomeScreen extends StatelessWidget {
           width: 0.7,
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
-            child: Container(
-              padding: const EdgeInsets.all(3),
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
-                borderRadius: BorderRadius.circular(11),
-              ),
-              child: Row(
-                children: [
-                  _buildRecentProviderTab(
-                    context,
-                    state,
-                    SessionProvider.codex,
-                    state.recentCodex.length,
-                  ),
-                  _buildRecentProviderTab(
-                    context,
-                    state,
-                    SessionProvider.kimi,
-                    state.recentKimi.length,
-                  ),
-                  _buildRecentProviderTab(
-                    context,
-                    state,
-                    SessionProvider.opencode,
-                    state.recentOpencode.length,
-                  ),
-                  _buildRecentProviderTab(
-                    context,
-                    state,
-                    SessionProvider.qwen,
-                    state.recentQwen.length,
-                  ),
-                ],
+      child: _CodexDither(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: Row(
+                  children: [
+                    _buildRecentProviderTab(
+                      context,
+                      state,
+                      SessionProvider.codex,
+                      state.recentCodex.length,
+                    ),
+                    _buildRecentProviderTab(
+                      context,
+                      state,
+                      SessionProvider.kimi,
+                      state.recentKimi.length,
+                    ),
+                    _buildRecentProviderTab(
+                      context,
+                      state,
+                      SessionProvider.opencode,
+                      state.recentOpencode.length,
+                    ),
+                    _buildRecentProviderTab(
+                      context,
+                      state,
+                      SessionProvider.qwen,
+                      state.recentQwen.length,
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          if (state.recentProvider == SessionProvider.codex)
-            _buildCodexAccountSection(context, state),
-          _buildRecentSectionHeader(context, state),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
-            child: recent.isEmpty
-                ? Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 14,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerLowest.withValues(
-                        alpha: 0.42,
+            if (state.recentProvider == SessionProvider.codex)
+              _buildCodexAccountSection(context, state),
+            _buildRecentSectionHeader(context, state),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
+              child: recent.isEmpty
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 14,
                       ),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      state.recentBusy
-                          ? 'Reading recent sessions...'
-                          : 'No recent sessions found.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
+                      decoration: BoxDecoration(
+                        color: scheme.surfaceContainerLowest.withValues(
+                          alpha: 0.42,
+                        ),
+                        borderRadius: BorderRadius.circular(10),
                       ),
-                    ),
-                  )
-                : Column(
-                    children: recent
-                        .map((item) {
-                          final alreadySaved = state.hasSession(
-                            item.provider,
-                            item.id,
-                          );
-                          final displayTitle = _configuredSessionTitle(
-                            state,
-                            item.provider,
-                            item.id,
-                            item.displayTitle,
-                          );
-                          final itemColor = _providerColor(
-                            scheme,
-                            item.provider,
-                          );
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            padding: const EdgeInsets.fromLTRB(9, 7, 6, 7),
-                            decoration: BoxDecoration(
-                              color: scheme.surfaceContainerLowest.withValues(
-                                alpha: 0.62,
+                      child: Text(
+                        state.recentBusy
+                            ? 'Reading recent sessions...'
+                            : 'No recent sessions found.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : Column(
+                      children: recent
+                          .map((item) {
+                            final alreadySaved = state.hasSession(
+                              item.provider,
+                              item.id,
+                            );
+                            final displayTitle = _configuredSessionTitle(
+                              state,
+                              item.provider,
+                              item.id,
+                              item.displayTitle,
+                            );
+                            final itemColor = _providerColor(
+                              scheme,
+                              item.provider,
+                            );
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 6),
+                              padding: const EdgeInsets.fromLTRB(9, 7, 6, 7),
+                              decoration: BoxDecoration(
+                                color: scheme.surfaceContainerLowest.withValues(
+                                  alpha: 0.62,
+                                ),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: scheme.outlineVariant.withValues(
+                                    alpha: 0.8,
+                                  ),
+                                  width: 0.55,
+                                ),
                               ),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: scheme.outlineVariant.withValues(
-                                  alpha: 0.8,
-                                ),
-                                width: 0.55,
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  constraints: const BoxConstraints(
-                                    minWidth: 72,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 5,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: itemColor.withValues(alpha: 0.14),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    item.shortId,
-                                    textAlign: TextAlign.center,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .labelSmall
-                                        ?.copyWith(
-                                          color: scheme.onSurface,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                  ),
-                                ),
-                                const SizedBox(width: 9),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Flexible(
-                                            child: Text(
-                                              displayTitle,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .bodyMedium
-                                                  ?.copyWith(
-                                                    fontWeight: FontWeight.w500,
-                                                  ),
-                                            ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    constraints: const BoxConstraints(
+                                      minWidth: 72,
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 5,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: itemColor.withValues(alpha: 0.14),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text(
+                                      item.shortId,
+                                      textAlign: TextAlign.center,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: scheme.onSurface,
+                                            fontWeight: FontWeight.w600,
                                           ),
-                                          if (item.isForked) ...[
-                                            const SizedBox(width: 5),
-                                            _tooltip(
-                                              'Forked session',
-                                              Icon(
-                                                Icons.call_split_rounded,
-                                                size: 13,
-                                                color: itemColor,
-                                              ),
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                      Text(
-                                        [
-                                          _formatRecentAge(item.updatedAt),
-                                          if (item.workDir?.trim().isNotEmpty ==
-                                              true)
-                                            item.workDir!.trim(),
-                                        ].join('  ·  '),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall
-                                            ?.copyWith(
-                                              color: scheme.onSurfaceVariant,
-                                              fontSize: 10.5,
-                                            ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(width: 7),
-                                _tooltip(
-                                  alreadySaved
-                                      ? 'Already saved'
-                                      : 'Add to Context',
-                                  IconButton.filledTonal(
-                                    visualDensity: VisualDensity.compact,
-                                    onPressed: alreadySaved || state.busy
-                                        ? null
-                                        : () => _saveRecentContext(
-                                            context,
-                                            state,
-                                            item,
-                                          ),
-                                    icon: Icon(
-                                      alreadySaved
-                                          ? Icons.check_rounded
-                                          : Icons.add_rounded,
-                                      size: 17,
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
-                          );
-                        })
-                        .toList(growable: false),
-                  ),
-          ),
-        ],
+                                  const SizedBox(width: 9),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Flexible(
+                                              child: Text(
+                                                displayTitle,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .bodyMedium
+                                                    ?.copyWith(
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                    ),
+                                              ),
+                                            ),
+                                            if (item.isForked) ...[
+                                              const SizedBox(width: 5),
+                                              _tooltip(
+                                                'Forked session',
+                                                Icon(
+                                                  Icons.call_split_rounded,
+                                                  size: 13,
+                                                  color: itemColor,
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                        Text(
+                                          [
+                                            _formatRecentAge(item.updatedAt),
+                                            if (item.workDir
+                                                    ?.trim()
+                                                    .isNotEmpty ==
+                                                true)
+                                              item.workDir!.trim(),
+                                          ].join('  ·  '),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .bodySmall
+                                              ?.copyWith(
+                                                color: scheme.onSurfaceVariant,
+                                                fontSize: 10.5,
+                                              ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 7),
+                                  _tooltip(
+                                    alreadySaved
+                                        ? 'Already saved'
+                                        : 'Add to Context',
+                                    IconButton.filledTonal(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: alreadySaved || state.busy
+                                          ? null
+                                          : () => _saveRecentContext(
+                                              context,
+                                              state,
+                                              item,
+                                            ),
+                                      icon: Icon(
+                                        alreadySaved
+                                            ? Icons.check_rounded
+                                            : Icons.add_rounded,
+                                        size: 17,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          })
+                          .toList(growable: false),
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3508,12 +3669,14 @@ class HomeScreen extends StatelessWidget {
             end: Alignment.bottomRight,
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _buildWarnings(context, state),
-            Expanded(child: _buildContextPanel(context, state)),
-          ],
+        child: _CodexDither(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildWarnings(context, state),
+              Expanded(child: _buildContextPanel(context, state)),
+            ],
+          ),
         ),
       ),
     );
