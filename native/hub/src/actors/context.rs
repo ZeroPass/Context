@@ -28,6 +28,7 @@ const PROVIDER_KIMI: &str = "kimi";
 const PROVIDER_OPENCODE: &str = "opencode";
 const PROVIDER_QWEN: &str = "qwen";
 const RECENT_LIMIT: usize = 3;
+const RECENT_CANDIDATE_LIMIT: usize = RECENT_LIMIT * 4;
 const CODEX_ACCOUNTS_DIR: &str = "context-accounts";
 const CODEX_AUTH_FILE: &str = "auth.json";
 const CODEX_ACCOUNT_METADATA_FILE: &str = "metadata.json";
@@ -1364,7 +1365,7 @@ fn load_recent_opencode_contexts(markdown_path: &str) -> Result<Vec<RecentContex
         "session".to_owned(),
         "list".to_owned(),
         "--max-count".to_owned(),
-        RECENT_LIMIT.to_string(),
+        RECENT_CANDIDATE_LIMIT.to_string(),
         "--format".to_owned(),
         "json".to_owned(),
     ];
@@ -1412,9 +1413,10 @@ fn query_recent_opencode_contexts(db_path: &PathBuf) -> rusqlite::Result<Vec<Rec
         "SELECT id, title, parent_id, time_updated, directory
          FROM session
          WHERE time_archived IS NULL
+           AND TRIM(COALESCE(parent_id, '')) = ''
          ORDER BY time_updated DESC
          LIMIT {}",
-        RECENT_LIMIT * 4
+        RECENT_CANDIDATE_LIMIT
     );
     let mut statement = connection.prepare(&query)?;
 
@@ -1596,6 +1598,9 @@ fn parse_opencode_session_list(text: &str) -> Result<Vec<RecentContext>> {
         let Some(item) = parse_opencode_session(session) else {
             continue;
         };
+        if item.forked_from_id.is_some() {
+            continue;
+        }
         recent.push(item);
     }
 
@@ -3803,9 +3808,10 @@ mod tests {
         codex_usage_error_for_http_status,
         delete_codex_account_file, deserialize_items, list_codex_account_metadata,
         load_recent_kimi_contexts, load_recent_qwen_contexts, parse_iso8601_utc_ms,
-        parse_markdown_items, parse_opencode_session_list, parse_session_command,
+        load_recent_opencode_contexts, parse_markdown_items, parse_opencode_session_list,
+        parse_session_command,
         parse_weekly_usage_response, process_listing_has_codex, query_recent_codex_contexts,
-        prefer_live_codex_auth, query_recent_opencode_contexts, read_codex_account_labels,
+        prefer_live_codex_auth, read_codex_account_labels,
         remove_codex_account_label, rename_codex_account_file, render_markdown_items,
         is_codex_sliding_unused_weekly_window, replace_file_from_temp,
         replace_live_auth_with_rollback, resolve_codex_active_account_slot,
@@ -4906,9 +4912,15 @@ mod tests {
                         "id": "ses_new",
                         "title": "New",
                         "updatedAt": "2026-07-26T20:00:01.250Z",
-                        "parentID": "ses_parent",
                         "directory": "/work/new",
                         "provider": "codex"
+                    },
+                    {
+                        "id": "ses_child",
+                        "title": "Subagent",
+                        "updatedAt": "2026-07-26T20:00:02.250Z",
+                        "parentID": "ses_new",
+                        "directory": "/work/new"
                     },
                     {
                         "id": "ses_fallback",
@@ -4924,9 +4936,10 @@ mod tests {
         assert_eq!(recent[0].id, "ses_new");
         assert_eq!(recent[0].title, "New");
         assert_eq!(recent[0].updated_at, 1_785_096_001_250);
-        assert_eq!(recent[0].forked_from_id.as_deref(), Some("ses_parent"));
+        assert_eq!(recent[0].forked_from_id, None);
         assert_eq!(recent[0].work_dir.as_deref(), Some("/work/new"));
         assert_eq!(recent[2].title, "back");
+        assert!(!recent.iter().any(|item| item.id == "ses_child"));
         assert!(!recent.iter().any(|item| item.id == "ses_invalid"));
         Ok(())
     }
@@ -4938,14 +4951,20 @@ mod tests {
     }
 
     #[test]
-    fn loads_opencode_child_sessions_from_database() -> anyhow::Result<()> {
+    fn loads_only_top_level_opencode_sessions_from_database() -> anyhow::Result<()> {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!(
             "context-opencode-test-{}-{stamp}",
             std::process::id()
         ));
-        fs::create_dir_all(&root)?;
-        let db_path = root.join("opencode.db");
+        let home = root.join("home").join("tester");
+        let markdown_path = home.join("codex-out").join("codex sessions.md");
+        let db_path = home
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db");
+        fs::create_dir_all(db_path.parent().expect("database parent"))?;
         let connection = Connection::open(&db_path)?;
         connection.execute_batch(
             "CREATE TABLE session (
@@ -4960,21 +4979,25 @@ mod tests {
             INSERT INTO session
                 (id, title, parent_id, directory, time_created, time_updated, time_archived)
             VALUES
-                ('ses_child', 'Child session', 'ses_parent', '/home/tester', 1000, 2000, NULL),
+                ('ses_child', 'Subagent session', 'ses_parent', '/home/tester', 1000, 3000, NULL),
+                ('ses_latest', 'Latest root session', NULL, '/home/tester', 950, 2000, NULL),
                 ('ses_parent', 'Parent session', NULL, '/home/tester', 900, 1900, NULL),
-                ('ses_archived', 'Archived session', NULL, '/home/tester', 800, 3000, 1);",
+                ('ses_archived', 'Archived session', NULL, '/home/tester', 800, 4000, 1);",
         )?;
         drop(connection);
 
-        let recent = query_recent_opencode_contexts(&db_path)?;
+        let markdown_path = markdown_path.to_string_lossy().into_owned();
+        let recent = load_recent_opencode_contexts(&markdown_path)?;
         assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].id, "ses_child");
-        assert_eq!(recent[0].title, "Child session");
+        assert_eq!(recent[0].id, "ses_latest");
+        assert_eq!(recent[0].title, "Latest root session");
         assert_eq!(recent[0].provider, PROVIDER_OPENCODE);
-        assert_eq!(recent[0].forked_from_id.as_deref(), Some("ses_parent"));
+        assert_eq!(recent[0].forked_from_id, None);
         assert_eq!(recent[0].work_dir.as_deref(), Some("/home/tester"));
         assert_eq!(recent[0].updated_at, 2_000_000);
         assert_eq!(recent[1].id, "ses_parent");
+        assert_eq!(recent[1].provider, PROVIDER_OPENCODE);
+        assert!(!recent.iter().any(|item| item.id == "ses_child"));
 
         fs::remove_dir_all(root)?;
         Ok(())

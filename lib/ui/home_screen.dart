@@ -2056,6 +2056,15 @@ class HomeScreen extends StatelessWidget {
     return '${updated.day}.${updated.month}.';
   }
 
+  String _recentResumeCommand(RecentContext item) {
+    return switch (item.provider) {
+      SessionProvider.codex => 'codex resume ${item.id}',
+      SessionProvider.kimi => 'kimi --session ${item.id}',
+      SessionProvider.opencode => 'opencode --session ${item.id}',
+      SessionProvider.qwen => 'qwen --resume ${item.id}',
+    };
+  }
+
   Widget _buildRecentProviderTab(
     BuildContext context,
     AppState state,
@@ -2996,87 +3005,128 @@ class HomeScreen extends StatelessWidget {
                               ),
                               child: Row(
                                 children: [
-                                  Container(
-                                    constraints: const BoxConstraints(
-                                      minWidth: 72,
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 5,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: itemColor.withValues(alpha: 0.14),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Text(
-                                      item.shortId,
-                                      textAlign: TextAlign.center,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .labelSmall
-                                          ?.copyWith(
-                                            color: scheme.onSurface,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 9),
                                   Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Flexible(
-                                              child: Text(
-                                                displayTitle,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: Theme.of(context)
-                                                    .textTheme
-                                                    .bodyMedium
-                                                    ?.copyWith(
-                                                      fontWeight:
-                                                          FontWeight.w500,
+                                    child: _tooltip(
+                                      'Click card to copy resume command',
+                                      Material(
+                                        color: Colors.transparent,
+                                        child: InkWell(
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                          onTap: () {
+                                            _copyCommand(
+                                              context,
+                                              _recentResumeCommand(item),
+                                              'Resume',
+                                            );
+                                          },
+                                          child: Row(
+                                            children: [
+                                              Container(
+                                                constraints:
+                                                    const BoxConstraints(
+                                                      minWidth: 72,
                                                     ),
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 8,
+                                                      vertical: 5,
+                                                    ),
+                                                decoration: BoxDecoration(
+                                                  color: itemColor.withValues(
+                                                    alpha: 0.14,
+                                                  ),
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                ),
+                                                child: Text(
+                                                  item.shortId,
+                                                  textAlign: TextAlign.center,
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: Theme.of(context)
+                                                      .textTheme
+                                                      .labelSmall
+                                                      ?.copyWith(
+                                                        color: scheme.onSurface,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                ),
                                               ),
-                                            ),
-                                            if (item.isForked) ...[
-                                              const SizedBox(width: 5),
-                                              _tooltip(
-                                                'Forked session',
-                                                Icon(
-                                                  Icons.call_split_rounded,
-                                                  size: 13,
-                                                  color: itemColor,
+                                              const SizedBox(width: 9),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Row(
+                                                      children: [
+                                                        Flexible(
+                                                          child: Text(
+                                                            displayTitle,
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                            style: Theme.of(context)
+                                                                .textTheme
+                                                                .bodyMedium
+                                                                ?.copyWith(
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w500,
+                                                                ),
+                                                          ),
+                                                        ),
+                                                        if (item.isForked) ...[
+                                                          const SizedBox(
+                                                            width: 5,
+                                                          ),
+                                                          _tooltip(
+                                                            'Forked session',
+                                                            Icon(
+                                                              Icons
+                                                                  .call_split_rounded,
+                                                              size: 13,
+                                                              color: itemColor,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ],
+                                                    ),
+                                                    Text(
+                                                      [
+                                                        _formatRecentAge(
+                                                          item.updatedAt,
+                                                        ),
+                                                        if (item.workDir
+                                                                ?.trim()
+                                                                .isNotEmpty ==
+                                                            true)
+                                                          item.workDir!.trim(),
+                                                      ].join('  ·  '),
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: Theme.of(context)
+                                                          .textTheme
+                                                          .bodySmall
+                                                          ?.copyWith(
+                                                            color: scheme
+                                                                .onSurfaceVariant,
+                                                            fontSize: 10.5,
+                                                          ),
+                                                    ),
+                                                  ],
                                                 ),
                                               ),
                                             ],
-                                          ],
+                                          ),
                                         ),
-                                        Text(
-                                          [
-                                            _formatRecentAge(item.updatedAt),
-                                            if (item.workDir
-                                                    ?.trim()
-                                                    .isNotEmpty ==
-                                                true)
-                                              item.workDir!.trim(),
-                                          ].join('  ·  '),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .bodySmall
-                                              ?.copyWith(
-                                                color: scheme.onSurfaceVariant,
-                                                fontSize: 10.5,
-                                              ),
-                                        ),
-                                      ],
+                                      ),
                                     ),
                                   ),
                                   const SizedBox(width: 7),
