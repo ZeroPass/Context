@@ -42,6 +42,13 @@ const CODEX_USAGE_TIMEOUT_SECONDS: u64 = 12;
 const CODEX_WEEKLY_WINDOW_MIN_SECONDS: i64 = 6 * 24 * 60 * 60;
 const CODEX_USAGE_CLOCK_SKEW_ALLOWANCE_SECONDS: i64 = 2;
 const CODEX_USAGE_RESET_AFTER_ROUNDING_TOLERANCE_SECONDS: u64 = 2;
+const CODEX_WEEKLY_RESET_CLUSTER_TOLERANCE_MS: i64 = 60 * 60 * 1_000;
+// Persisted account fingerprints are FNV-1a over the UTF-8 account ID. The versioned prefix
+// makes algorithm changes fail closed instead of reusing history under an incompatible key.
+const CODEX_ACCOUNT_KEY_PREFIX: &str = "fnv1a64-v1:";
+const CODEX_ACCOUNT_KEY_PAYLOAD_LEN: usize = 16;
+const FNV1A_64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_64_PRIME: u64 = 0x0000_0100_0000_01b3;
 const MAX_CODEX_ACCOUNT_DISPLAY_NAME_CHARS: usize = 256;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -97,8 +104,21 @@ struct CodexAccountLabels {
     labels: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manual_reset_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    weekly_cycle_reset_at: Option<i64>,
+    // Read the former per-slot pins so old metadata remains valid, but never write or use them.
+    #[serde(default, rename = "weekly_reset_at", skip_serializing)]
+    legacy_weekly_reset_at: Option<std::collections::BTreeMap<String, i64>>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    weekly_reset_at: std::collections::BTreeMap<String, i64>,
+    weekly_usage_state: std::collections::BTreeMap<String, CodexWeeklyUsageState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+struct CodexWeeklyUsageState {
+    account_key: String,
+    used_percent: f64,
+    reset_at: i64,
+    window_seconds: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -119,6 +139,13 @@ struct CodexUsageRequestTiming {
 struct CodexUsageQuery {
     usage: WeeklyUsage,
     timing: CodexUsageRequestTiming,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CodexWeeklyResetInput<'a> {
+    usage: &'a WeeklyUsage,
+    timing: CodexUsageRequestTiming,
+    snapshot_updated_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,10 +378,9 @@ impl ContextActor {
 
         let path = self.sessions_markdown_path.clone();
         let current_slot_hint = self.codex_active_account.clone().unwrap_or_default();
-        let result = spawn_blocking(move || {
-            load_codex_accounts_for_markdown(&path, &current_slot_hint)
-        })
-        .await;
+        let result =
+            spawn_blocking(move || load_codex_accounts_for_markdown(&path, &current_slot_hint))
+                .await;
         let outcome = match result {
             Ok(Ok(loaded)) => {
                 self.codex_accounts = loaded.accounts;
@@ -405,8 +431,8 @@ impl ContextActor {
         self.emit_state();
 
         let path = self.sessions_markdown_path.clone();
-        let result = spawn_blocking(move || set_codex_manual_reset_file(&path, manual_reset_at))
-            .await;
+        let result =
+            spawn_blocking(move || set_codex_manual_reset_file(&path, manual_reset_at)).await;
         let outcome = match result {
             Ok(Ok(accounts)) => {
                 self.codex_accounts = accounts;
@@ -2321,8 +2347,7 @@ fn infer_codex_live_auth_path(accounts_dir: &Path) -> Option<PathBuf> {
         .map(|codex_dir| codex_dir.join(CODEX_AUTH_FILE))
 }
 
-const CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR: &str =
-    "Save current Codex credentials once because the live account's saved-slot ownership cannot be determined uniquely.";
+const CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR: &str = "Save current Codex credentials once because the live account's saved-slot ownership cannot be determined uniquely.";
 
 fn codex_active_account_ownership_error() -> anyhow::Error {
     anyhow!(CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR)
@@ -2409,11 +2434,14 @@ fn is_codex_sliding_unused_weekly_window(
     if usage.used_percent != 0.0 || usage.window_seconds < CODEX_WEEKLY_WINDOW_MIN_SECONDS {
         return false;
     }
-    if usage.reset_after_seconds.is_some_and(|reset_after_seconds| {
-        reset_after_seconds >= 0
-            && reset_after_seconds.abs_diff(usage.window_seconds)
-                <= CODEX_USAGE_RESET_AFTER_ROUNDING_TOLERANCE_SECONDS
-    }) {
+    if usage
+        .reset_after_seconds
+        .is_some_and(|reset_after_seconds| {
+            reset_after_seconds >= 0
+                && reset_after_seconds.abs_diff(usage.window_seconds)
+                    <= CODEX_USAGE_RESET_AFTER_ROUNDING_TOLERANCE_SECONDS
+        })
+    {
         return true;
     }
     if timing.response_received_at_ms < timing.request_started_at_ms {
@@ -2433,8 +2461,7 @@ fn is_codex_sliding_unused_weekly_window(
     else {
         return false;
     };
-    let Some(clock_skew_ms) = CODEX_USAGE_CLOCK_SKEW_ALLOWANCE_SECONDS.checked_mul(1_000)
-    else {
+    let Some(clock_skew_ms) = CODEX_USAGE_CLOCK_SKEW_ALLOWANCE_SECONDS.checked_mul(1_000) else {
         return false;
     };
     let Some(earliest_reset_at_ms) = request_start_reset_at_ms.checked_sub(clock_skew_ms) else {
@@ -2446,38 +2473,105 @@ fn is_codex_sliding_unused_weekly_window(
     (earliest_reset_at_ms..=latest_reset_at_ms).contains(&reset_at_ms)
 }
 
-fn resolve_codex_weekly_reset_at(
-    slot: &str,
-    usage: &WeeklyUsage,
-    timing: CodexUsageRequestTiming,
-    snapshot_updated_at: Option<i64>,
-    pinned_resets: &mut std::collections::BTreeMap<String, i64>,
-) -> (Option<i64>, bool) {
-    let Some(api_reset_at) = usage.reset_at_ms else {
-        return (None, false);
-    };
-    if !is_codex_sliding_unused_weekly_window(usage, timing) {
-        let changed = pinned_resets.remove(slot).is_some();
-        return (Some(api_reset_at), changed);
-    }
-
-    if let Some(previous_pin) = pinned_resets.get(slot).copied() {
-        if previous_pin > timing.response_received_at_ms {
-            return (Some(previous_pin), false);
+fn resolve_codex_weekly_cycle_reset_at(
+    inputs: &[CodexWeeklyResetInput<'_>],
+    persisted_reset_at: Option<i64>,
+    now_ms: i64,
+) -> Option<i64> {
+    let mut authoritative_resets = inputs
+        .iter()
+        .filter(|input| !is_codex_sliding_unused_weekly_window(input.usage, input.timing))
+        .filter_map(|input| input.usage.reset_at_ms)
+        .collect::<Vec<_>>();
+    if !authoritative_resets.is_empty() {
+        authoritative_resets.sort_unstable();
+        let earliest = authoritative_resets[0];
+        let latest = *authoritative_resets.last()?;
+        if latest.saturating_sub(earliest) <= CODEX_WEEKLY_RESET_CLUSTER_TOLERANCE_MS {
+            return Some(latest);
         }
+        // Divergent fixed windows can straddle a cycle boundary. The later fixed reset is the
+        // newer authoritative cycle and must not be displaced by persisted or legacy state.
+        return Some(latest);
     }
 
-    let stable_reset_at = snapshot_updated_at
-        .and_then(|updated_at| {
-            usage
-                .window_seconds
-                .checked_mul(1_000)
-                .and_then(|window_ms| updated_at.checked_add(window_ms))
+    if let Some(persisted_reset_at) = persisted_reset_at.filter(|reset_at| *reset_at > now_ms) {
+        return Some(persisted_reset_at);
+    }
+
+    inputs
+        .iter()
+        .filter(|input| is_codex_sliding_unused_weekly_window(input.usage, input.timing))
+        .filter_map(|input| {
+            input
+                .snapshot_updated_at
+                .and_then(|updated_at| {
+                    input
+                        .usage
+                        .window_seconds
+                        .checked_mul(1_000)
+                        .and_then(|window_ms| updated_at.checked_add(window_ms))
+                })
+                .filter(|reset_at| *reset_at > input.timing.response_received_at_ms)
+                .or_else(|| {
+                    input
+                        .usage
+                        .reset_at_ms
+                        .filter(|reset_at| *reset_at > input.timing.response_received_at_ms)
+                })
         })
-        .filter(|reset_at| *reset_at > timing.response_received_at_ms)
-        .unwrap_or(api_reset_at);
-    let changed = pinned_resets.insert(slot.to_owned(), stable_reset_at) != Some(stable_reset_at);
-    (Some(stable_reset_at), changed)
+        .max()
+}
+
+fn apply_codex_weekly_usage_history(
+    slot: &str,
+    account_key: Option<&str>,
+    mut usage: WeeklyUsage,
+    weekly_cycle_reset_at: Option<i64>,
+    states: &mut std::collections::BTreeMap<String, CodexWeeklyUsageState>,
+) -> (WeeklyUsage, bool) {
+    usage.reset_at_ms = weekly_cycle_reset_at;
+    usage.reset_after_seconds = None;
+    let Some(account_key) = account_key.filter(|key| is_valid_codex_account_key(key)) else {
+        return (usage, states.remove(slot).is_some());
+    };
+    let Some(previous) = states.get(slot) else {
+        return (usage, false);
+    };
+    if previous.account_key != account_key {
+        return (usage, states.remove(slot).is_some());
+    }
+    if usage.used_percent == 0.0
+        && previous.used_percent > 0.0
+        && Some(previous.reset_at) == weekly_cycle_reset_at
+    {
+        usage.used_percent = previous.used_percent;
+        usage.window_seconds = previous.window_seconds;
+    }
+    (usage, false)
+}
+
+fn remember_codex_weekly_usage(
+    slot: &str,
+    account_key: Option<&str>,
+    usage: &WeeklyUsage,
+    reset_at: Option<i64>,
+    response_received_at_ms: i64,
+    states: &mut std::collections::BTreeMap<String, CodexWeeklyUsageState>,
+) -> bool {
+    let Some(account_key) = account_key.filter(|key| is_valid_codex_account_key(key)) else {
+        return states.remove(slot).is_some();
+    };
+    let Some(reset_at) = reset_at.filter(|reset_at| *reset_at > response_received_at_ms) else {
+        return states.remove(slot).is_some();
+    };
+    let state = CodexWeeklyUsageState {
+        account_key: account_key.to_owned(),
+        used_percent: usage.used_percent,
+        reset_at,
+        window_seconds: usage.window_seconds,
+    };
+    states.insert(slot.to_owned(), state.clone()).as_ref() != Some(&state)
 }
 
 fn load_codex_accounts_for_markdown(
@@ -2543,10 +2637,11 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
     }
 
     let mut labels = read_codex_account_labels(accounts_dir)?;
+    let mut labels_changed = labels.legacy_weekly_reset_at.take().is_some();
     let manual_reset_at = effective_codex_manual_reset_at(accounts_dir, &mut labels)?;
     let live_auth_bytes =
         infer_codex_live_auth_path(accounts_dir).and_then(|path| fs::read(path).ok());
-    let mut accounts = Vec::new();
+    let mut fetched_accounts = Vec::new();
     for (slot, path) in list_codex_account_snapshot_paths(accounts_dir)? {
         let updated_at = fs::metadata(&path)
             .ok()
@@ -2558,30 +2653,70 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
             .get(&slot)
             .and_then(|label| normalize_codex_account_display_name(label).ok())
             .unwrap_or_else(|| slot.clone());
-        let usage = match read_codex_snapshot_bytes_for_usage(&path) {
-            Ok(snapshot_bytes) => fetch_codex_weekly_usage(prefer_live_codex_auth(
-                &snapshot_bytes,
-                live_auth_bytes.as_deref(),
-            )),
-            Err(()) => Err(CodexUsageError::Unavailable),
+        let (usage, account_key) = match read_codex_snapshot_bytes_for_usage(&path) {
+            Ok(snapshot_bytes) => {
+                let auth_bytes =
+                    prefer_live_codex_auth(&snapshot_bytes, live_auth_bytes.as_deref());
+                (
+                    fetch_codex_weekly_usage(auth_bytes),
+                    codex_auth_account_key(auth_bytes),
+                )
+            }
+            Err(()) => (Err(CodexUsageError::Unavailable), None),
         };
+        fetched_accounts.push((slot, name, updated_at, account_key, usage));
+    }
+
+    let reset_inputs = fetched_accounts
+        .iter()
+        .filter_map(|(_, _, updated_at, _, usage)| {
+            usage.as_ref().ok().map(|query| CodexWeeklyResetInput {
+                usage: &query.usage,
+                timing: query.timing,
+                snapshot_updated_at: *updated_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let now_ms = match reset_inputs
+        .iter()
+        .map(|input| input.timing.response_received_at_ms)
+        .max()
+    {
+        Some(now_ms) => now_ms,
+        None => unix_epoch_millis()?,
+    };
+    let weekly_cycle_reset_at =
+        resolve_codex_weekly_cycle_reset_at(&reset_inputs, labels.weekly_cycle_reset_at, now_ms);
+    if labels.weekly_cycle_reset_at != weekly_cycle_reset_at {
+        labels.weekly_cycle_reset_at = weekly_cycle_reset_at;
+        labels_changed = true;
+    }
+
+    let mut accounts = Vec::with_capacity(fetched_accounts.len());
+    for (slot, name, updated_at, account_key, usage) in fetched_accounts {
         let (weekly_used_percent, weekly_reset_at, weekly_window_seconds, weekly_error) =
             match usage {
                 Ok(query) => {
-                    let usage = query.usage;
-                    let (weekly_reset_at, changed) = resolve_codex_weekly_reset_at(
+                    let timing = query.timing;
+                    let (usage, history_changed) = apply_codex_weekly_usage_history(
                         &slot,
-                        &usage,
-                        query.timing,
-                        updated_at,
-                        &mut labels.weekly_reset_at,
+                        account_key.as_deref(),
+                        query.usage,
+                        weekly_cycle_reset_at,
+                        &mut labels.weekly_usage_state,
                     );
-                    if changed {
-                        write_codex_account_labels(accounts_dir, &labels)?;
-                    }
+                    let usage_changed = remember_codex_weekly_usage(
+                        &slot,
+                        account_key.as_deref(),
+                        &usage,
+                        weekly_cycle_reset_at,
+                        timing.response_received_at_ms,
+                        &mut labels.weekly_usage_state,
+                    );
+                    labels_changed |= history_changed || usage_changed;
                     (
                         Some(usage.used_percent),
-                        weekly_reset_at,
+                        weekly_cycle_reset_at,
                         Some(usage.window_seconds),
                         None,
                     )
@@ -2598,6 +2733,9 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
             weekly_window_seconds,
             weekly_error,
         });
+    }
+    if labels_changed {
+        write_codex_account_labels(accounts_dir, &labels)?;
     }
     Ok(accounts)
 }
@@ -2628,18 +2766,29 @@ fn read_codex_account_labels(accounts_dir: &Path) -> Result<CodexAccountLabels> 
             Some((slot, label))
         })
         .collect();
-    let weekly_reset_at: std::collections::BTreeMap<String, i64> = stored
-        .weekly_reset_at
+    let weekly_cycle_reset_at = stored
+        .weekly_cycle_reset_at
+        .filter(|reset_at| *reset_at > 0);
+    let weekly_usage_state = stored
+        .weekly_usage_state
         .into_iter()
-        .filter_map(|(slot, reset_at)| {
+        .filter_map(|(slot, state)| {
             let slot = validate_codex_account_slot(&slot).ok()?;
-            (reset_at > 0).then_some((slot, reset_at))
+            let valid_account_key = is_valid_codex_account_key(&state.account_key);
+            (valid_account_key
+                && state.used_percent.is_finite()
+                && (0.0..=100.0).contains(&state.used_percent)
+                && state.reset_at > 0
+                && state.window_seconds >= CODEX_WEEKLY_WINDOW_MIN_SECONDS)
+                .then_some((slot, state))
         })
         .collect();
     Ok(CodexAccountLabels {
         labels,
         manual_reset_at: stored.manual_reset_at,
-        weekly_reset_at,
+        weekly_cycle_reset_at,
+        legacy_weekly_reset_at: stored.legacy_weekly_reset_at,
+        weekly_usage_state,
     })
 }
 
@@ -2648,7 +2797,8 @@ fn write_codex_account_labels(accounts_dir: &Path, labels: &CodexAccountLabels) 
     let path = account_metadata_path(accounts_dir);
     if labels.labels.is_empty()
         && labels.manual_reset_at.is_none()
-        && labels.weekly_reset_at.is_empty()
+        && labels.weekly_cycle_reset_at.is_none()
+        && labels.weekly_usage_state.is_empty()
     {
         if path.is_file() {
             fs::remove_file(path)
@@ -2697,7 +2847,7 @@ fn remove_codex_account_label(accounts_dir: &Path, slot: &str) -> Result<()> {
     let slot = validate_codex_account_slot(slot)?;
     let mut labels = read_codex_account_labels(accounts_dir)?;
     labels.labels.remove(&slot);
-    labels.weekly_reset_at.remove(&slot);
+    labels.weekly_usage_state.remove(&slot);
     write_codex_account_labels(accounts_dir, &labels)
 }
 
@@ -2735,6 +2885,28 @@ fn codex_auth_account_id(auth_bytes: &[u8]) -> Option<String> {
                     .any(|character| character == '\0' || character == '\r' || character == '\n')
         })?;
     Some(account_id.to_owned())
+}
+
+fn codex_auth_account_key(auth_bytes: &[u8]) -> Option<String> {
+    let account_id = codex_auth_account_id(auth_bytes)?;
+    let mut fingerprint = FNV1A_64_OFFSET_BASIS;
+    for byte in account_id.as_bytes() {
+        fingerprint ^= u64::from(*byte);
+        fingerprint = fingerprint.wrapping_mul(FNV1A_64_PRIME);
+    }
+    // The prefix is part of the persisted format. Any future algorithm change must use a new
+    // version so history produced by a different fingerprint cannot be attributed to an account.
+    Some(format!("{CODEX_ACCOUNT_KEY_PREFIX}{fingerprint:016x}"))
+}
+
+fn is_valid_codex_account_key(account_key: &str) -> bool {
+    let Some(payload) = account_key.strip_prefix(CODEX_ACCOUNT_KEY_PREFIX) else {
+        return false;
+    };
+    payload.len() == CODEX_ACCOUNT_KEY_PAYLOAD_LEN
+        && payload
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn prefer_live_codex_auth<'a>(
@@ -2816,9 +2988,9 @@ fn fetch_codex_weekly_usage(
     let access_token =
         escape_curl_config_value(&access_token).ok_or(CodexUsageError::Unavailable)?;
     let account_id = match account_id.as_deref() {
-        Some(account_id) => Some(
-            escape_curl_config_value(account_id).ok_or(CodexUsageError::Unavailable)?,
-        ),
+        Some(account_id) => {
+            Some(escape_curl_config_value(account_id).ok_or(CodexUsageError::Unavailable)?)
+        }
         None => None,
     };
     let mut curl_config = format!(
@@ -2871,8 +3043,7 @@ fn fetch_codex_weekly_usage(
     let output = child
         .wait_with_output()
         .map_err(|_| CodexUsageError::Unavailable)?;
-    let response_received_at_ms =
-        unix_epoch_millis().map_err(|_| CodexUsageError::Unavailable)?;
+    let response_received_at_ms = unix_epoch_millis().map_err(|_| CodexUsageError::Unavailable)?;
     if !output.status.success() {
         return Err(CodexUsageError::Unavailable);
     }
@@ -2966,41 +3137,15 @@ fn parse_weekly_usage_response(body: &[u8], now_ms: i64) -> std::result::Result<
         return Ok(primary.clone());
     }
 
-    let mut weekly_candidates = Vec::new();
     if let Some(secondary) = rate_limit
         .get("secondary_window")
         .and_then(|value| parse_usage_window(value, now_ms))
         .filter(|window| window.window_seconds >= CODEX_WEEKLY_WINDOW_MIN_SECONDS)
     {
-        weekly_candidates.push(secondary);
+        return Ok(secondary);
     }
-    if let Some(additional_rate_limits) = value
-        .get("additional_rate_limits")
-        .and_then(serde_json::Value::as_array)
-    {
-        for additional in additional_rate_limits {
-            let additional_rate_limit = additional
-                .get("rate_limit")
-                .and_then(serde_json::Value::as_object)
-                .or_else(|| additional.as_object());
-            let Some(additional_rate_limit) = additional_rate_limit else {
-                continue;
-            };
-            for window_name in ["primary_window", "secondary_window"] {
-                if let Some(window) = additional_rate_limit
-                    .get(window_name)
-                    .and_then(|value| parse_usage_window(value, now_ms))
-                    .filter(|window| window.window_seconds >= CODEX_WEEKLY_WINDOW_MIN_SECONDS)
-                {
-                    weekly_candidates.push(window);
-                }
-            }
-        }
-    }
-    weekly_candidates
-        .into_iter()
-        .max_by_key(|window| window.window_seconds)
-        .ok_or(())
+
+    Err(())
 }
 
 fn read_json_object_bytes(
@@ -3137,13 +3282,13 @@ fn save_codex_account_file(
         "Current Codex credentials are invalid.",
     )?;
     let snapshot_path = account_snapshot_path(&paths.accounts_dir, &slot)?;
-    let preserve_weekly_reset = fs::read(snapshot_path)
+    let preserve_weekly_usage = fs::read(snapshot_path)
         .ok()
         .is_some_and(|existing_bytes| codex_snapshot_identity_matches(&existing_bytes, &bytes));
     save_snapshot_bytes(&paths.accounts_dir, &slot, &bytes)?;
     let mut labels = read_codex_account_labels(&paths.accounts_dir)?;
-    if !preserve_weekly_reset {
-        labels.weekly_reset_at.remove(&slot);
+    if !preserve_weekly_usage {
+        labels.weekly_usage_state.remove(&slot);
     }
     labels.labels.insert(slot, display_name);
     write_codex_account_labels(&paths.accounts_dir, &labels)?;
@@ -3802,28 +3947,24 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        ConfigItem, CodexAccountPaths, CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR, PROVIDER_CODEX,
-        PROVIDER_KIMI, PROVIDER_OPENCODE, PROVIDER_QWEN, CodexUsageError,
-        CodexUsageRequestTiming, WeeklyUsage,
-        codex_usage_error_for_http_status,
-        delete_codex_account_file, deserialize_items, list_codex_account_metadata,
-        load_recent_kimi_contexts, load_recent_qwen_contexts, parse_iso8601_utc_ms,
-        load_recent_opencode_contexts, parse_markdown_items, parse_opencode_session_list,
-        parse_session_command,
-        parse_weekly_usage_response, process_listing_has_codex, query_recent_codex_contexts,
-        prefer_live_codex_auth, read_codex_account_labels,
+        CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR, CodexAccountLabels, CodexAccountPaths,
+        CodexUsageError, CodexUsageRequestTiming, CodexWeeklyResetInput, CodexWeeklyUsageState,
+        ConfigItem, PROVIDER_CODEX, PROVIDER_KIMI, PROVIDER_OPENCODE, PROVIDER_QWEN, WeeklyUsage,
+        apply_codex_weekly_usage_history, codex_auth_account_key,
+        codex_usage_error_for_http_status, delete_codex_account_file, deserialize_items,
+        is_valid_codex_account_key, list_codex_account_metadata, load_recent_kimi_contexts,
+        load_recent_opencode_contexts, load_recent_qwen_contexts, parse_iso8601_utc_ms,
+        parse_markdown_items, parse_opencode_session_list, parse_session_command,
+        parse_weekly_usage_response, prefer_live_codex_auth, process_listing_has_codex,
+        query_recent_codex_contexts, read_codex_account_labels, remember_codex_weekly_usage,
         remove_codex_account_label, rename_codex_account_file, render_markdown_items,
-        is_codex_sliding_unused_weekly_window, replace_file_from_temp,
-        replace_live_auth_with_rollback, resolve_codex_active_account_slot,
-        resolve_codex_weekly_reset_at,
-        save_codex_account_file, save_snapshot_bytes, set_codex_account_label,
-        set_codex_manual_reset_at, validate_codex_account_slot, write_codex_account_labels,
+        replace_file_from_temp, replace_live_auth_with_rollback, resolve_codex_active_account_slot,
+        resolve_codex_weekly_cycle_reset_at, save_codex_account_file, save_snapshot_bytes,
+        set_codex_account_label, set_codex_manual_reset_at, validate_codex_account_slot,
+        write_codex_account_labels,
     };
 
-    fn request_timing(
-        started_at_ms: i64,
-        response_received_at_ms: i64,
-    ) -> CodexUsageRequestTiming {
+    fn request_timing(started_at_ms: i64, response_received_at_ms: i64) -> CodexUsageRequestTiming {
         CodexUsageRequestTiming {
             request_started_at_ms: started_at_ms,
             response_received_at_ms,
@@ -3878,6 +4019,81 @@ mod tests {
     }
 
     #[test]
+    fn codex_account_key_has_a_pinned_stable_fingerprint() {
+        let auth = br#"{"tokens":{"account_id":"fixture-account-id"}}"#;
+
+        assert_eq!(
+            codex_auth_account_key(auth).as_deref(),
+            Some("fnv1a64-v1:43598759838d7e36")
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_unversioned_and_malformed_persisted_account_keys() -> anyhow::Result<()> {
+        let valid_key = "fnv1a64-v1:0123456789abcdef";
+        for invalid_key in [
+            "0123456789abcdef",
+            "fnv1a64-v0:0123456789abcdef",
+            "fnv1a64-v1:0123456789abcde",
+            "fnv1a64-v1:0123456789abcdef0",
+            "fnv1a64-v1:0123456789abcdeg",
+            "fnv1a64-v1:0123456789abcdeF",
+        ] {
+            assert!(!is_valid_codex_account_key(invalid_key));
+        }
+        assert!(is_valid_codex_account_key(valid_key));
+
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-key-migration-test-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        let state = |account_key: &str| {
+            serde_json::json!({
+                "account_key": account_key,
+                "used_percent": 75.0,
+                "reset_at": 1_700_604_800_000_i64,
+                "window_seconds": 604_800,
+            })
+        };
+        fs::write(
+            root.join("metadata.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "weekly_usage_state": {
+                    "1": state("0123456789abcdef"),
+                    "2": state("fnv1a64-v1:0123456789abcdeg"),
+                    "3": state(valid_key),
+                }
+            }))?,
+        )?;
+
+        let labels = read_codex_account_labels(&root)?;
+        assert_eq!(
+            labels
+                .weekly_usage_state
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["3"]
+        );
+        write_codex_account_labels(&root, &labels)?;
+        let persisted =
+            serde_json::from_slice::<serde_json::Value>(&fs::read(root.join("metadata.json"))?)?;
+        let persisted_states = persisted
+            .get("weekly_usage_state")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| anyhow::anyhow!("missing weekly usage state"))?;
+        assert_eq!(persisted_states.len(), 1);
+        assert!(persisted_states.contains_key("3"));
+        let round_tripped = read_codex_account_labels(&root)?;
+        assert_eq!(round_tripped.weekly_usage_state, labels.weekly_usage_state);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn lists_only_numeric_codex_account_metadata() -> anyhow::Result<()> {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!(
@@ -3926,14 +4142,16 @@ mod tests {
         set_codex_account_label(&root, "1", "one")?;
 
         assert!(set_codex_manual_reset_at(&root, 0).is_err());
-        let future = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?
-            + 60_000;
+        let future =
+            i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())? + 60_000;
         set_codex_manual_reset_at(&root, future)?;
         let accounts = list_codex_account_metadata(&root)?;
         assert_eq!(accounts.len(), 2);
-        assert!(accounts
-            .iter()
-            .all(|account| account.manual_reset_at == Some(future)));
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.manual_reset_at == Some(future))
+        );
         assert_eq!(read_codex_account_labels(&root)?.labels["1"], "one");
 
         fs::write(
@@ -3941,9 +4159,11 @@ mod tests {
             br#"{"1":"one","manual_reset_at":0}"#,
         )?;
         let accounts = list_codex_account_metadata(&root)?;
-        assert!(accounts
-            .iter()
-            .all(|account| account.manual_reset_at.is_none()));
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.manual_reset_at.is_none())
+        );
         let labels = read_codex_account_labels(&root)?;
         assert_eq!(labels.labels.get("1").map(String::as_str), Some("one"));
         assert!(labels.manual_reset_at.is_none());
@@ -3984,353 +4204,224 @@ mod tests {
     }
 
     #[test]
-    fn migrates_unused_weekly_reset_immediately_from_day_old_snapshot() -> anyhow::Result<()> {
-        let now_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let snapshot_updated_at = now_ms - 24 * 60 * 60 * 1_000;
-        let usage = WeeklyUsage {
-            used_percent: 0.0,
-            reset_at_ms: Some(now_ms + window_ms),
-            reset_after_seconds: Some(604_800),
-            window_seconds: 604_800,
-        };
-        let mut pinned_resets = std::collections::BTreeMap::new();
-
-        let (reset_at, changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &usage,
-            request_timing(now_ms, now_ms),
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
-        let reset_at = reset_at.ok_or_else(|| anyhow::anyhow!("missing reset"))?;
-
-        assert!(changed);
-        assert_eq!(reset_at, snapshot_updated_at + window_ms);
-        assert_eq!(pinned_resets.get("1"), Some(&(snapshot_updated_at + window_ms)));
-        Ok(())
-    }
-
-    #[test]
-    fn classifies_unused_weekly_reset_across_request_latency() {
-        let request_started_at_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let usage = WeeklyUsage {
-            used_percent: 0.0,
-            reset_at_ms: Some(request_started_at_ms + window_ms),
-            reset_after_seconds: Some(604_800),
-            window_seconds: 604_800,
-        };
-        let timing = request_timing(request_started_at_ms, request_started_at_ms + 3_000);
-
-        assert!(is_codex_sliding_unused_weekly_window(&usage, timing));
-    }
-
-    #[test]
-    fn resolves_exact_zero_use_weekly_response_from_old_snapshot() -> anyhow::Result<()> {
-        let now_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let body = br#"{
-            "rate_limit": {
-                "primary_window": {
-                    "used_percent": 0,
-                    "limit_window_seconds": 18000,
-                    "reset_at": 1700018000,
-                    "reset_after_seconds": 18000
-                },
-                "secondary_window": {
-                    "used_percent": 0,
-                    "limit_window_seconds": 604800,
-                    "reset_at": 1700604800,
-                    "reset_after_seconds": 604800
-                }
-            }
-        }"#;
-        let usage = parse_weekly_usage_response(body, now_ms)
-            .map_err(|_| anyhow::anyhow!("weekly usage did not parse"))?;
-        assert_eq!(usage.used_percent, 0.0);
-        assert_eq!(usage.window_seconds, 604_800);
-        assert_eq!(usage.reset_at_ms, Some(now_ms + window_ms));
-        assert_eq!(usage.reset_after_seconds, Some(604_800));
-
-        let timing = request_timing(now_ms - 1_000, now_ms);
-        assert!(is_codex_sliding_unused_weekly_window(&usage, timing));
-
-        let snapshot_updated_at = now_ms - 24 * 60 * 60 * 1_000;
-        let mut pinned_resets = std::collections::BTreeMap::new();
-        let (reset_at, changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &usage,
-            timing,
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
-
-        assert!(changed);
-        assert_eq!(reset_at, Some(snapshot_updated_at + window_ms));
-        assert_ne!(reset_at, Some(now_ms + window_ms));
-        assert_eq!(
-            pinned_resets.get("1"),
-            Some(&(snapshot_updated_at + window_ms))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn reset_after_window_evidence_wins_outside_absolute_reset_bracket() {
-        let now_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let timing = request_timing(now_ms, now_ms + 1_000);
-        let usage = WeeklyUsage {
-            used_percent: 0.0,
-            reset_at_ms: Some(now_ms + window_ms + 60_000),
-            reset_after_seconds: Some(604_800),
-            window_seconds: 604_800,
-        };
-        let without_duration = WeeklyUsage {
-            reset_after_seconds: None,
-            ..usage.clone()
-        };
-
-        assert!(!is_codex_sliding_unused_weekly_window(
-            &without_duration,
-            timing
-        ));
-        assert!(is_codex_sliding_unused_weekly_window(&usage, timing));
-
-        let snapshot_updated_at = now_ms - 24 * 60 * 60 * 1_000;
-        let mut pinned_resets = std::collections::BTreeMap::new();
-        let (reset_at, changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &usage,
-            timing,
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
-        assert!(changed);
-        assert_eq!(reset_at, Some(snapshot_updated_at + window_ms));
-    }
-
-    #[test]
-    fn keeps_unused_weekly_reset_stable_across_refresh_and_snapshot_mtime_changes(
-    ) -> anyhow::Result<()> {
-        let now_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let snapshot_updated_at = now_ms - 24 * 60 * 60 * 1_000;
-        let first_usage = WeeklyUsage {
-            used_percent: 0.0,
-            reset_at_ms: Some(now_ms + window_ms),
-            reset_after_seconds: Some(604_800),
-            window_seconds: 604_800,
-        };
-        let refreshed_now_ms = now_ms + 30_000;
-        let refreshed_usage = WeeklyUsage {
-            reset_at_ms: Some(refreshed_now_ms + window_ms),
-            ..first_usage.clone()
-        };
-        let mut pinned_resets = std::collections::BTreeMap::new();
-
-        let (first_reset_at, first_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &first_usage,
-            request_timing(now_ms, now_ms),
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
-        let (refreshed_reset_at, refreshed_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &refreshed_usage,
-            request_timing(refreshed_now_ms, refreshed_now_ms),
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
-        let (advanced_reset_at, advanced_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &WeeklyUsage {
-                reset_at_ms: Some(now_ms + 60_000 + window_ms),
-                ..first_usage.clone()
+    fn measured_three_account_case_uses_slot_three_reset_globally() {
+        let now_ms = 1_787_600_000_000_i64;
+        let usages = [
+            WeeklyUsage {
+                used_percent: 8.0,
+                reset_at_ms: Some(1_788_136_886_000),
+                reset_after_seconds: Some(536_886),
+                window_seconds: 604_800,
             },
-            request_timing(now_ms + 60_000, now_ms + 60_000),
-            Some(snapshot_updated_at + 60 * 60 * 1_000),
-            &mut pinned_resets,
-        );
-        let (stable_reset_at, stable_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &WeeklyUsage {
-                reset_at_ms: Some(now_ms + 90_000 + window_ms),
-                ..first_usage.clone()
-            },
-            request_timing(now_ms + 90_000, now_ms + 90_000),
-            Some(snapshot_updated_at + 60 * 60 * 1_000),
-            &mut pinned_resets,
-        );
-
-        assert!(first_changed);
-        assert_eq!(first_reset_at, Some(snapshot_updated_at + window_ms));
-        assert!(!refreshed_changed);
-        assert_eq!(refreshed_reset_at, first_reset_at);
-        assert_eq!(
-            pinned_resets.get("1"),
-            Some(&(snapshot_updated_at + window_ms))
-        );
-        assert!(!advanced_changed);
-        assert_eq!(advanced_reset_at, refreshed_reset_at);
-        assert!(!stable_changed);
-        assert_eq!(stable_reset_at, refreshed_reset_at);
-        assert_eq!(pinned_resets.get("1"), Some(&(snapshot_updated_at + window_ms)));
-        Ok(())
-    }
-
-    #[test]
-    fn clears_real_cycle_pins_before_sliding_refresh() -> anyhow::Result<()> {
-        let now_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let nonzero_reset_at = now_ms + window_ms;
-        let fixed_reset_at = now_ms + 3 * 24 * 60 * 60 * 1_000;
-        let nonzero_usage = WeeklyUsage {
-            used_percent: 25.0,
-            reset_at_ms: Some(nonzero_reset_at),
-            reset_after_seconds: Some(604_800),
-            window_seconds: 604_800,
-        };
-        let fixed_usage = WeeklyUsage {
-            used_percent: 0.0,
-            reset_at_ms: Some(fixed_reset_at),
-            reset_after_seconds: Some(3 * 24 * 60 * 60),
-            window_seconds: 604_800,
-        };
-        let mut pinned_resets = std::collections::BTreeMap::new();
-        let existing_pin = now_ms + window_ms + 30_000;
-        pinned_resets.insert("1".to_owned(), existing_pin);
-
-        let (nonzero_result, nonzero_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &nonzero_usage,
-            request_timing(now_ms, now_ms),
-            None,
-            &mut pinned_resets,
-        );
-        assert_eq!(nonzero_result, Some(nonzero_reset_at));
-        assert!(nonzero_changed);
-        assert!(!pinned_resets.contains_key("1"));
-
-        let fixed_pin = now_ms + window_ms + 20_000;
-        pinned_resets.insert("1".to_owned(), fixed_pin);
-        let (fixed_result, fixed_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &fixed_usage,
-            request_timing(now_ms, now_ms),
-            None,
-            &mut pinned_resets,
-        );
-
-        assert_eq!(fixed_result, Some(fixed_reset_at));
-        assert!(fixed_changed);
-        assert!(!pinned_resets.contains_key("1"));
-
-        let later_now_ms = now_ms + 1_000;
-        let later_reset_at = later_now_ms + window_ms;
-        let (sliding_result, sliding_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &WeeklyUsage {
+            WeeklyUsage {
                 used_percent: 0.0,
-                reset_at_ms: Some(later_reset_at),
+                reset_at_ms: Some(1_788_212_374_000),
                 reset_after_seconds: Some(604_800),
                 window_seconds: 604_800,
             },
-            request_timing(later_now_ms, later_now_ms),
-            None,
-            &mut pinned_resets,
-        );
-        assert_eq!(sliding_result, Some(later_reset_at));
-        assert!(sliding_changed);
-        assert_eq!(pinned_resets.get("1"), Some(&later_reset_at));
-        assert_ne!(sliding_result, Some(fixed_pin));
-        assert_ne!(sliding_result, Some(existing_pin));
-        Ok(())
+            WeeklyUsage {
+                used_percent: 17.0,
+                reset_at_ms: Some(1_788_138_792_000),
+                reset_after_seconds: Some(538_792),
+                window_seconds: 604_800,
+            },
+        ];
+        let inputs = [
+            CodexWeeklyResetInput {
+                usage: &usages[0],
+                timing: request_timing(now_ms, now_ms),
+                snapshot_updated_at: Some(now_ms - 86_400_000),
+            },
+            CodexWeeklyResetInput {
+                usage: &usages[1],
+                timing: request_timing(
+                    1_788_212_374_000 - 604_800_000,
+                    1_788_212_374_000 - 604_800_000,
+                ),
+                snapshot_updated_at: Some(1_787_013_618_922),
+            },
+            CodexWeeklyResetInput {
+                usage: &usages[2],
+                timing: request_timing(now_ms, now_ms),
+                snapshot_updated_at: Some(now_ms - 43_200_000),
+            },
+        ];
+
+        let anchor = resolve_codex_weekly_cycle_reset_at(&inputs, None, now_ms);
+        assert_eq!(anchor, Some(1_788_138_792_000));
+
+        let mut states = std::collections::BTreeMap::new();
+        let row_resets = usages
+            .into_iter()
+            .enumerate()
+            .map(|(index, usage)| {
+                apply_codex_weekly_usage_history(
+                    &(index + 1).to_string(),
+                    None,
+                    usage,
+                    anchor,
+                    &mut states,
+                )
+                .0
+                .reset_at_ms
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(row_resets, vec![anchor, anchor, anchor]);
     }
 
     #[test]
-    fn replaces_expired_migrated_weekly_reset_pin() -> anyhow::Result<()> {
+    fn stale_legacy_slot_pin_cannot_override_authoritative_cycle() {
+        let stale_pin = 1_787_618_418_922_i64;
+        let labels: CodexAccountLabels = serde_json::from_value(serde_json::json!({
+            "weekly_reset_at": {"2": stale_pin}
+        }))
+        .expect("legacy metadata should deserialize");
+        let usage = WeeklyUsage {
+            used_percent: 17.0,
+            reset_at_ms: Some(1_788_138_792_000),
+            reset_after_seconds: Some(538_792),
+            window_seconds: 604_800,
+        };
+        let inputs = [CodexWeeklyResetInput {
+            usage: &usage,
+            timing: request_timing(1_787_600_000_000, 1_787_600_000_000),
+            snapshot_updated_at: None,
+        }];
+
+        assert_eq!(
+            labels
+                .legacy_weekly_reset_at
+                .as_ref()
+                .and_then(|pins| pins.get("2")),
+            Some(&stale_pin)
+        );
+        assert_eq!(
+            resolve_codex_weekly_cycle_reset_at(
+                &inputs,
+                labels.weekly_cycle_reset_at,
+                1_787_600_000_000,
+            ),
+            Some(1_788_138_792_000)
+        );
+    }
+
+    #[test]
+    fn fixed_resets_within_one_hour_choose_latest_anchor() {
+        let earlier = WeeklyUsage {
+            used_percent: 8.0,
+            reset_at_ms: Some(1_788_136_886_000),
+            reset_after_seconds: None,
+            window_seconds: 604_800,
+        };
+        let later = WeeklyUsage {
+            used_percent: 17.0,
+            reset_at_ms: Some(1_788_138_792_000),
+            reset_after_seconds: None,
+            window_seconds: 604_800,
+        };
+        let timing = request_timing(1_787_600_000_000, 1_787_600_000_000);
+        let inputs = [
+            CodexWeeklyResetInput {
+                usage: &later,
+                timing,
+                snapshot_updated_at: None,
+            },
+            CodexWeeklyResetInput {
+                usage: &earlier,
+                timing,
+                snapshot_updated_at: None,
+            },
+        ];
+
+        assert!(1_788_138_792_000_i64 - 1_788_136_886_000 <= 60 * 60 * 1_000);
+        assert_eq!(
+            resolve_codex_weekly_cycle_reset_at(&inputs, None, timing.response_received_at_ms),
+            Some(1_788_138_792_000)
+        );
+    }
+
+    #[test]
+    fn all_zero_windows_derive_and_reuse_one_global_anchor() {
         let now_ms = 1_700_000_000_000_i64;
-        let window_ms = 604_800_000_i64;
-        let snapshot_updated_at = now_ms - 12 * 60 * 60 * 1_000;
-        let first_usage = WeeklyUsage {
+        let first = WeeklyUsage {
             used_percent: 0.0,
-            reset_at_ms: Some(now_ms + window_ms),
+            reset_at_ms: Some(now_ms + 604_800_000),
             reset_after_seconds: Some(604_800),
             window_seconds: 604_800,
         };
-        let mut pinned_resets = std::collections::BTreeMap::new();
-        let (initial_reset_at, initial_changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &first_usage,
-            request_timing(now_ms, now_ms),
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
-        let migrated_reset_at = snapshot_updated_at + window_ms;
-        assert_eq!(initial_reset_at, Some(migrated_reset_at));
-        assert!(initial_changed);
-        assert_eq!(pinned_resets.get("1"), Some(&migrated_reset_at));
-
-        let expired_now_ms = migrated_reset_at + 1;
-        let api_reset_at = expired_now_ms + window_ms;
-
-        let (reset_at, changed) = resolve_codex_weekly_reset_at(
-            "1",
-            &WeeklyUsage {
-                reset_at_ms: Some(api_reset_at),
-                ..first_usage
+        let second = first.clone();
+        let inputs = [
+            CodexWeeklyResetInput {
+                usage: &first,
+                timing: request_timing(now_ms, now_ms),
+                snapshot_updated_at: Some(now_ms - 86_400_000),
             },
-            request_timing(expired_now_ms, expired_now_ms),
-            Some(snapshot_updated_at),
-            &mut pinned_resets,
-        );
+            CodexWeeklyResetInput {
+                usage: &second,
+                timing: request_timing(now_ms, now_ms),
+                snapshot_updated_at: Some(now_ms - 7_200_000),
+            },
+        ];
+        let expected = now_ms - 7_200_000 + 604_800_000;
 
-        assert_eq!(reset_at, Some(api_reset_at));
-        assert!(changed);
-        assert_eq!(pinned_resets.get("1"), Some(&api_reset_at));
-        Ok(())
+        let anchor = resolve_codex_weekly_cycle_reset_at(&inputs, None, now_ms);
+        assert_eq!(anchor, Some(expected));
+
+        let moving = WeeklyUsage {
+            reset_at_ms: Some(now_ms + 60_000 + 604_800_000),
+            ..first
+        };
+        let refreshed = [CodexWeeklyResetInput {
+            usage: &moving,
+            timing: request_timing(now_ms + 60_000, now_ms + 60_000),
+            snapshot_updated_at: Some(now_ms),
+        }];
+        assert_eq!(
+            resolve_codex_weekly_cycle_reset_at(&refreshed, anchor, now_ms + 60_000),
+            anchor
+        );
     }
 
     #[test]
-    fn round_trips_pins_without_changing_flattened_metadata_compatibility() -> anyhow::Result<()> {
+    fn metadata_migration_removes_slot_pins_and_preserves_other_fields() -> anyhow::Result<()> {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "context-codex-account-reset-metadata-test-{}-{stamp}",
+            "context-codex-global-reset-metadata-test-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&root)?;
         fs::write(
             root.join("metadata.json"),
-            br#"{"1":"one","manual_reset_at":1700000000000,"weekly_reset_at":{"1":1700604800000},"weekly_reset_at_confirmed":{"1":true}}"#,
+            br#"{"1":"one","manual_reset_at":1700000000000,"weekly_cycle_reset_at":1700606706000,"weekly_reset_at":{"1":1700604800000},"weekly_reset_at_confirmed":{"1":true}}"#,
         )?;
 
         let labels = read_codex_account_labels(&root)?;
         assert_eq!(labels.labels.get("1").map(String::as_str), Some("one"));
         assert_eq!(labels.manual_reset_at, Some(1_700_000_000_000));
-        assert_eq!(labels.weekly_reset_at.get("1"), Some(&1_700_604_800_000));
-        write_codex_account_labels(&root, &labels)?;
+        assert_eq!(labels.weekly_cycle_reset_at, Some(1_700_606_706_000));
+        assert!(labels.legacy_weekly_reset_at.is_some());
 
-        let stored = serde_json::from_slice::<serde_json::Value>(&fs::read(
-            root.join("metadata.json"),
-        )?)?;
-        assert_eq!(stored.get("1").and_then(serde_json::Value::as_str), Some("one"));
+        write_codex_account_labels(&root, &labels)?;
+        let stored =
+            serde_json::from_slice::<serde_json::Value>(&fs::read(root.join("metadata.json"))?)?;
         assert_eq!(
-            stored.get("manual_reset_at").and_then(serde_json::Value::as_i64),
+            stored.get("1").and_then(serde_json::Value::as_str),
+            Some("one")
+        );
+        assert_eq!(
+            stored
+                .get("manual_reset_at")
+                .and_then(serde_json::Value::as_i64),
             Some(1_700_000_000_000)
         );
         assert_eq!(
             stored
-                .get("weekly_reset_at")
-                .and_then(|value| value.get("1"))
+                .get("weekly_cycle_reset_at")
                 .and_then(serde_json::Value::as_i64),
-            Some(1_700_604_800_000)
+            Some(1_700_606_706_000)
         );
+        assert!(stored.get("weekly_reset_at").is_none());
         assert!(stored.get("weekly_reset_at_confirmed").is_none());
-        let round_tripped = read_codex_account_labels(&root)?;
-        assert_eq!(round_tripped.weekly_reset_at.get("1"), Some(&1_700_604_800_000));
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -4360,8 +4451,19 @@ mod tests {
         let accounts_dir = codex_dir.join("context-accounts");
         save_snapshot_bytes(&accounts_dir, "2", br#"{"saved":"second"}"#)?;
         set_codex_account_label(&accounts_dir, "2", "second")?;
+        let anchor =
+            i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())? + 604_800_000;
         let mut labels = read_codex_account_labels(&accounts_dir)?;
-        labels.weekly_reset_at.insert("1".to_owned(), 1_700_604_800_000);
+        labels.weekly_cycle_reset_at = Some(anchor);
+        labels.weekly_usage_state.insert(
+            "1".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: "fnv1a64-v1:0123456789abcdef".to_owned(),
+                used_percent: 75.0,
+                reset_at: anchor,
+                window_seconds: 604_800,
+            },
+        );
         write_codex_account_labels(&accounts_dir, &labels)?;
 
         rename_codex_account_file(&markdown_text, "1", "renamed")?;
@@ -4374,7 +4476,8 @@ mod tests {
         assert_eq!(fs::read(codex_dir.join("auth.json"))?, live_auth);
         let labels = read_codex_account_labels(&accounts_dir)?;
         assert!(!labels.labels.contains_key("1"));
-        assert!(!labels.weekly_reset_at.contains_key("1"));
+        assert_eq!(labels.weekly_cycle_reset_at, Some(anchor));
+        assert!(!labels.weekly_usage_state.contains_key("1"));
         assert!(labels.labels.contains_key("2"));
 
         fs::remove_dir_all(root)?;
@@ -4382,7 +4485,51 @@ mod tests {
     }
 
     #[test]
-    fn parses_weekly_codex_usage_and_reset_pacing_inputs() -> anyhow::Result<()> {
+    fn deleting_account_without_identity_clears_weekly_usage_history() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-delete-history-test-{}-{stamp}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let markdown = home.join("codex-out").join("codex sessions.md");
+        let codex_dir = home.join(".codex");
+        let accounts_dir = codex_dir.join("context-accounts");
+        fs::create_dir_all(
+            markdown
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("missing parent"))?,
+        )?;
+        fs::create_dir_all(&codex_dir)?;
+        fs::write(codex_dir.join("auth.json"), br#"{"tokens":{}}"#)?;
+
+        let markdown_text = markdown.to_string_lossy();
+        save_codex_account_file(&markdown_text, "1", "missing-identity")?;
+        let mut labels = read_codex_account_labels(&accounts_dir)?;
+        labels.weekly_usage_state.insert(
+            "1".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: "fnv1a64-v1:0123456789abcdef".to_owned(),
+                used_percent: 75.0,
+                reset_at: 1_700_604_800_000,
+                window_seconds: 604_800,
+            },
+        );
+        write_codex_account_labels(&accounts_dir, &labels)?;
+
+        delete_codex_account_file(&markdown_text, "1")?;
+        assert!(
+            !read_codex_account_labels(&accounts_dir)?
+                .weekly_usage_state
+                .contains_key("1")
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn weekly_parser_uses_only_root_primary_then_root_secondary() -> anyhow::Result<()> {
         let body = br#"{
             "rate_limit": {
                 "primary_window": {
@@ -4390,13 +4537,17 @@ mod tests {
                     "limit_window_seconds": 3600,
                     "reset_after_seconds": 900
                 },
-                "secondary_window": null
+                "secondary_window": {
+                    "used_percent": 63,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 654
+                }
             },
             "additional_rate_limits": [
                 {
                     "rate_limit": {
                         "primary_window": {
-                            "used_percent": 77,
+                            "used_percent": 99,
                             "limit_window_seconds": 604800,
                             "reset_after_seconds": 321
                         }
@@ -4406,10 +4557,10 @@ mod tests {
         }"#;
         let usage = parse_weekly_usage_response(body, 1_700_000_000_000)
             .map_err(|_| anyhow::anyhow!("weekly usage did not parse"))?;
-        assert_eq!(usage.used_percent, 77.0);
+        assert_eq!(usage.used_percent, 63.0);
         assert_eq!(usage.window_seconds, 604800);
-        assert_eq!(usage.reset_at_ms, Some(1_700_000_321_000));
-        assert_eq!(usage.reset_after_seconds, Some(321));
+        assert_eq!(usage.reset_at_ms, Some(1_700_000_654_000));
+        assert_eq!(usage.reset_after_seconds, Some(654));
 
         let primary_body = br#"{
             "rate_limit": {
@@ -4441,13 +4592,162 @@ mod tests {
     }
 
     #[test]
+    fn canonical_weekly_secondary_beats_additional_sliding_zero() -> anyhow::Result<()> {
+        let body = br#"{
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 90,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 900
+                },
+                "secondary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 3600
+                }
+            },
+            "additional_rate_limits": [{
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0,
+                        "limit_window_seconds": 604800,
+                        "reset_after_seconds": 604800
+                    }
+                }
+            }]
+        }"#;
+
+        let usage = parse_weekly_usage_response(body, 1_700_000_000_000)
+            .map_err(|_| anyhow::anyhow!("canonical weekly usage did not parse"))?;
+        assert_eq!(usage.used_percent, 100.0);
+        assert_eq!(usage.window_seconds, 604_800);
+        assert_eq!(usage.reset_after_seconds, Some(3_600));
+        Ok(())
+    }
+
+    #[test]
+    fn conflicting_additional_weekly_windows_fail_independent_of_order() {
+        let first_order = br#"{
+            "rate_limit": {"primary_window": null, "secondary_window": null},
+            "additional_rate_limits": [
+                {"rate_limit": {"primary_window": {
+                    "used_percent": 20,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 300
+                }}},
+                {"rate_limit": {"primary_window": {
+                    "used_percent": 30,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 300
+                }}}
+            ]
+        }"#;
+        let reverse_order = br#"{
+            "rate_limit": {"primary_window": null, "secondary_window": null},
+            "additional_rate_limits": [
+                {"rate_limit": {"primary_window": {
+                    "used_percent": 30,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 300
+                }}},
+                {"rate_limit": {"primary_window": {
+                    "used_percent": 20,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 300
+                }}}
+            ]
+        }"#;
+
+        assert!(parse_weekly_usage_response(first_order, 0).is_err());
+        assert!(parse_weekly_usage_response(reverse_order, 0).is_err());
+    }
+
+    #[test]
+    fn same_cycle_zero_usage_regression_keeps_previous_usage() {
+        let now_ms = 1_700_000_000_000_i64;
+        let previous_reset = now_ms + 86_400_000;
+        let account_key = "fnv1a64-v1:0123456789abcdef";
+        let mut states = std::collections::BTreeMap::from([(
+            "2".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: account_key.to_owned(),
+                used_percent: 100.0,
+                reset_at: previous_reset,
+                window_seconds: 604_800,
+            },
+        )]);
+        let incoming = WeeklyUsage {
+            used_percent: 0.0,
+            reset_at_ms: Some(now_ms + 604_800_000),
+            reset_after_seconds: Some(604_800),
+            window_seconds: 604_800,
+        };
+
+        let (guarded, changed) = apply_codex_weekly_usage_history(
+            "2",
+            Some(account_key),
+            incoming,
+            Some(previous_reset),
+            &mut states,
+        );
+
+        assert!(!changed);
+        assert_eq!(guarded.used_percent, 100.0);
+        assert_eq!(guarded.reset_at_ms, Some(previous_reset));
+        assert_eq!(states.get("2").map(|state| state.used_percent), Some(100.0));
+    }
+
+    #[test]
+    fn post_reset_zero_usage_is_accepted_when_global_anchor_advances() {
+        let previous_reset = 1_700_000_000_000_i64;
+        let now_ms = previous_reset + 1;
+        let next_reset = now_ms + 604_800_000;
+        let account_key = "fnv1a64-v1:0123456789abcdef";
+        let mut states = std::collections::BTreeMap::from([(
+            "2".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: account_key.to_owned(),
+                used_percent: 100.0,
+                reset_at: previous_reset,
+                window_seconds: 604_800,
+            },
+        )]);
+        let incoming = WeeklyUsage {
+            used_percent: 0.0,
+            reset_at_ms: Some(next_reset),
+            reset_after_seconds: Some(604_800),
+            window_seconds: 604_800,
+        };
+
+        let (accepted, changed) = apply_codex_weekly_usage_history(
+            "2",
+            Some(account_key),
+            incoming,
+            Some(next_reset),
+            &mut states,
+        );
+        assert!(!changed);
+        assert_eq!(accepted.used_percent, 0.0);
+        assert!(remember_codex_weekly_usage(
+            "2",
+            Some(account_key),
+            &accepted,
+            Some(next_reset),
+            now_ms,
+            &mut states,
+        ));
+        assert_eq!(states.get("2").map(|state| state.used_percent), Some(0.0));
+        assert_eq!(
+            states.get("2").map(|state| state.reset_at),
+            Some(next_reset)
+        );
+    }
+
+    #[test]
     fn prefers_live_codex_auth_only_for_matching_account() {
-        let snapshot: &[u8] =
-            br#"{"tokens":{"account_id":"account-1","access_token":"saved"}}"#;
-        let live: &[u8] =
-            br#"{"tokens":{"account_id":"account-1","access_token":"fresh"}}"#;
-        let other: &[u8] =
-            br#"{"tokens":{"account_id":"account-2","access_token":"other"}}"#;
+        let snapshot: &[u8] = br#"{"tokens":{"account_id":"account-1","access_token":"saved"}}"#;
+        let live: &[u8] = br#"{"tokens":{"account_id":"account-1","access_token":"fresh"}}"#;
+        let other: &[u8] = br#"{"tokens":{"account_id":"account-2","access_token":"other"}}"#;
         let invalid_live: &[u8] = br#"{}"#;
 
         assert_eq!(prefer_live_codex_auth(snapshot, Some(live)), live);
@@ -4624,7 +4924,56 @@ mod tests {
     }
 
     #[test]
-    fn save_codex_account_preserves_pin_only_for_safely_matched_identity() -> anyhow::Result<()> {
+    fn replacing_account_without_identity_clears_weekly_usage_history() -> anyhow::Result<()> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "context-codex-account-replace-history-test-{}-{stamp}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let markdown = home.join("codex-out").join("codex sessions.md");
+        let codex_dir = home.join(".codex");
+        let accounts_dir = codex_dir.join("context-accounts");
+        fs::create_dir_all(
+            markdown
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("missing parent"))?,
+        )?;
+        fs::create_dir_all(&codex_dir)?;
+        fs::write(
+            codex_dir.join("auth.json"),
+            br#"{"tokens":{"account_id":"account-1"}}"#,
+        )?;
+
+        let markdown_text = markdown.to_string_lossy();
+        save_codex_account_file(&markdown_text, "1", "with-identity")?;
+        let mut labels = read_codex_account_labels(&accounts_dir)?;
+        labels.weekly_usage_state.insert(
+            "1".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: "fnv1a64-v1:0123456789abcdef".to_owned(),
+                used_percent: 75.0,
+                reset_at: 1_700_604_800_000,
+                window_seconds: 604_800,
+            },
+        );
+        write_codex_account_labels(&accounts_dir, &labels)?;
+
+        fs::write(codex_dir.join("auth.json"), br#"{"tokens":{}}"#)?;
+        save_codex_account_file(&markdown_text, "1", "missing-identity")?;
+        assert!(
+            !read_codex_account_labels(&accounts_dir)?
+                .weekly_usage_state
+                .contains_key("1")
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn save_codex_account_preserves_global_anchor_and_only_matching_history() -> anyhow::Result<()>
+    {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir().join(format!(
             "context-codex-account-pin-identity-test-{}-{stamp}",
@@ -4641,7 +4990,8 @@ mod tests {
         )?;
         fs::create_dir_all(&codex_dir)?;
         let markdown_text = markdown.to_string_lossy();
-        let pin = 1_700_604_800_000_i64;
+        let pin =
+            i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())? + 604_800_000;
 
         fs::write(
             codex_dir.join("auth.json"),
@@ -4649,7 +4999,16 @@ mod tests {
         )?;
         save_codex_account_file(&markdown_text, "1", "first")?;
         let mut labels = read_codex_account_labels(&accounts_dir)?;
-        labels.weekly_reset_at.insert("1".to_owned(), pin);
+        labels.weekly_cycle_reset_at = Some(pin);
+        labels.weekly_usage_state.insert(
+            "1".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: "fnv1a64-v1:0123456789abcdef".to_owned(),
+                used_percent: 80.0,
+                reset_at: pin,
+                window_seconds: 604_800,
+            },
+        );
         write_codex_account_labels(&accounts_dir, &labels)?;
 
         fs::write(
@@ -4658,10 +5017,13 @@ mod tests {
         )?;
         save_codex_account_file(&markdown_text, "1", "same-account")?;
         assert_eq!(
+            read_codex_account_labels(&accounts_dir)?.weekly_cycle_reset_at,
+            Some(pin)
+        );
+        assert!(
             read_codex_account_labels(&accounts_dir)?
-                .weekly_reset_at
-                .get("1"),
-            Some(&pin)
+                .weekly_usage_state
+                .contains_key("1")
         );
 
         fs::write(
@@ -4669,21 +5031,36 @@ mod tests {
             br#"{"tokens":{"account_id":"account-2"}}"#,
         )?;
         save_codex_account_file(&markdown_text, "1", "different-account")?;
-        assert!(!read_codex_account_labels(&accounts_dir)?
-            .weekly_reset_at
-            .contains_key("1"));
+        assert!(read_codex_account_labels(&accounts_dir)?.weekly_cycle_reset_at == Some(pin));
+        assert!(
+            !read_codex_account_labels(&accounts_dir)?
+                .weekly_usage_state
+                .contains_key("1")
+        );
 
         let mut labels = read_codex_account_labels(&accounts_dir)?;
-        labels.weekly_reset_at.insert("1".to_owned(), pin);
+        labels.weekly_cycle_reset_at = Some(pin);
+        labels.weekly_usage_state.insert(
+            "1".to_owned(),
+            CodexWeeklyUsageState {
+                account_key: "fnv1a64-v1:0123456789abcdef".to_owned(),
+                used_percent: 80.0,
+                reset_at: pin,
+                window_seconds: 604_800,
+            },
+        );
         write_codex_account_labels(&accounts_dir, &labels)?;
         fs::write(
             codex_dir.join("auth.json"),
             br#"{"tokens":{"session":"unknown-account"}}"#,
         )?;
         save_codex_account_file(&markdown_text, "1", "unknown-account")?;
-        assert!(!read_codex_account_labels(&accounts_dir)?
-            .weekly_reset_at
-            .contains_key("1"));
+        assert!(read_codex_account_labels(&accounts_dir)?.weekly_cycle_reset_at == Some(pin));
+        assert!(
+            !read_codex_account_labels(&accounts_dir)?
+                .weekly_usage_state
+                .contains_key("1")
+        );
 
         fs::remove_dir_all(root)?;
         Ok(())
