@@ -53,3 +53,28 @@ Signals sent between Dart and Rust are implemented using signal attributes. If y
 ```bash
 rinf gen
 ```
+
+## Refresh and save behavior
+
+Codex accounts and recent sessions refresh in the background. Setting, editing,
+or removing a manual reset saves local metadata without waiting for the usage
+API. Refresh responses preserve newer reset edits. Without a manual override,
+each account uses its own API-reported reset.
+
+Session autosave waits 500 ms after an edit. Background refreshes do not replace
+unsaved edits, and edits made during a save remain pending for the next save.
+Saving the sessions markdown does not trigger an extra account refresh.
+
+## Regression checks (Windows)
+
+With the build prerequisites installed and Dart bindings generated (`rinf gen`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test_refresh.ps1
+```
+
+This runs Rust tests, Dart formatting checks, Flutter analysis, and refresh/save
+UI tests using temporary fixtures, without live credentials or API requests.
+Flutter checks use a temporary NTFS directory so the command also works from a
+WSL path. Logs, exact commands, and SHA256 evidence are written under
+`.buildlog/refresh-validation/`. Use `-FlutterDir` if your Flutter SDK is elsewhere.

@@ -231,10 +231,7 @@ class ConfigItem {
 
   bool get isGroupEnd => kind == ConfigItemKind.groupEnd;
 
-  bool get supportsFork =>
-      isSession &&
-      (provider == SessionProvider.codex ||
-          provider == SessionProvider.opencode);
+  bool get supportsFork => isSession && provider == SessionProvider.codex;
 
   String get identityKey => '${provider.key}:${commandId.trim().toLowerCase()}';
 
@@ -259,9 +256,6 @@ class ConfigItem {
   String? get forkCommand {
     if (!supportsFork) {
       return null;
-    }
-    if (provider == SessionProvider.opencode) {
-      return 'opencode --session $commandId --fork';
     }
     return 'codex fork $commandId';
   }

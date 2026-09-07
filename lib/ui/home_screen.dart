@@ -181,9 +181,9 @@ class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            color.withValues(alpha: color.opacity * 0.72),
+            color.withValues(alpha: color.a * 0.72),
             color,
-            color.withValues(alpha: color.opacity * 0.88),
+            color.withValues(alpha: color.a * 0.88),
           ],
           stops: const [0, 0.52, 1],
         ).createShader(section);
@@ -855,7 +855,7 @@ class HomeScreen extends StatelessWidget {
       context,
       initialSlot: _nextCodexAccountSlot(state),
     );
-    if (account == null) {
+    if (account == null || !context.mounted) {
       return;
     }
     final (slot, displayName) = account;
@@ -2234,7 +2234,10 @@ class HomeScreen extends StatelessWidget {
                       ? 'Edit manual reset'
                       : 'Set manual reset',
                   child: IconButton(
-                    onPressed: state.busy || accountBusy || apiResetAt == null
+                    onPressed:
+                        state.busy ||
+                            state.codexManualResetBusy ||
+                            apiResetAt == null
                         ? null
                         : () => unawaited(_setCodexManualReset(context, state)),
                     icon: Icon(
@@ -2255,7 +2258,7 @@ class HomeScreen extends StatelessWidget {
                   Tooltip(
                     message: 'Remove manual reset',
                     child: IconButton(
-                      onPressed: state.busy || accountBusy
+                      onPressed: state.busy || state.codexManualResetBusy
                           ? null
                           : () => unawaited(
                               _clearCodexManualReset(context, state),
@@ -3549,6 +3552,8 @@ class HomeScreen extends StatelessWidget {
                                   'Use /fork command inside Kimi.',
                                 SessionProvider.qwen =>
                                   'Use /fork command inside Qwen Code.',
+                                SessionProvider.opencode =>
+                                  'Use /fork command inside OpenCode.',
                                 _ => 'Fork command unavailable.',
                               },
                         AnimatedOpacity(

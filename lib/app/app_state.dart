@@ -25,13 +25,29 @@ enum _PendingOpKind {
 enum ThemeAppearance { light, sepia, dim, dark }
 
 class _PendingOp {
-  const _PendingOp({required this.kind, required this.completer});
+  const _PendingOp({
+    required this.kind,
+    required this.completer,
+    required this.itemsRevision,
+    required this.markdownPath,
+  });
 
   final _PendingOpKind kind;
   final Completer<void> completer;
+  final int itemsRevision;
+  final String markdownPath;
 }
 
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
+  AppState() : _testRequestSender = null;
+
+  @visibleForTesting
+  AppState.forTesting({required void Function(Uint64) sendRequest})
+    : _testRequestSender = sendRequest {
+    _pendingRecentRefresh = false;
+    _listenToRust();
+  }
+
   static const themeSeedColors = <int>[
     0xFFFABD2F,
     0xFFFE8019,
@@ -81,6 +97,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<CodexAccount> codexAccounts = const <CodexAccount>[];
   String? codexActiveAccount;
   bool codexAccountBusy = false;
+  bool codexManualResetBusy = false;
   String? codexAccountStatus;
   String? codexAccountError;
 
@@ -91,7 +108,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RecentContext> recentOpencode = const <RecentContext>[];
   List<RecentContext> recentQwen = const <RecentContext>[];
   bool _codexAccountRequestInFlight = false;
+  bool _nativeCodexAccountBusy = false;
   bool _codexAccountLoadPending = false;
+  int _itemsRevision = 0;
+  String? _lastItemsJson;
+  final void Function(Uint64)? _testRequestSender;
 
   @override
   void dispose() {
@@ -103,13 +124,17 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<void> init() async {
-    WidgetsBinding.instance.addObserver(this);
+  void _listenToRust() {
     _uiStateSub?.cancel();
     _opFinishedSub?.cancel();
 
     _uiStateSub = UiState.rustSignalStream.listen(_onUiState);
     _opFinishedSub = OpFinished.rustSignalStream.listen(_onOpFinished);
+  }
+
+  Future<void> init() async {
+    WidgetsBinding.instance.addObserver(this);
+    _listenToRust();
 
     _prefs = await SharedPreferences.getInstance();
     themeSeedColorValue =
@@ -130,7 +155,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       themeSeedColorValue: themeSeedColorValue,
       sessionsMarkdownPath: sessionsMarkdownPath,
     ).sendSignalToRust();
-    unawaited(loadCodexAccounts());
 
     _startRecentRefreshTimer();
     notifyListeners();
@@ -154,9 +178,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _refreshLiveData() {
     unawaited(refreshRecent());
-    if (recentProvider == SessionProvider.codex) {
-      unawaited(loadCodexAccounts());
-    }
+    unawaited(loadCodexAccounts());
   }
 
   int get sessionCount => items.where((item) => item.isSession).length;
@@ -420,7 +442,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     if (_codexAccountRequestInFlight) {
-      _codexAccountLoadPending = true;
+      // Timer/focus events join the current refresh instead of creating a
+      // continuous refresh loop when the API takes longer than the timer.
+      if (!_pendingOps.values.any(
+        (op) => op.kind == _PendingOpKind.codexAccountLoad,
+      )) {
+        _codexAccountLoadPending = true;
+      }
       return;
     }
 
@@ -554,9 +582,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> setCodexManualReset(DateTime value) async {
-    await _runCodexAccountRequest(
+    await _runCodexManualResetRequest(
       kind: _PendingOpKind.codexAccountManualResetSet,
-      status: 'Setting Codex manual reset...',
       sender: (requestId) {
         SetCodexManualReset(
           requestId: requestId,
@@ -568,9 +595,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> clearCodexManualReset() async {
-    await _runCodexAccountRequest(
+    await _runCodexManualResetRequest(
       kind: _PendingOpKind.codexAccountManualResetClear,
-      status: 'Clearing Codex manual reset...',
       sender: (requestId) {
         ClearCodexManualReset(
           requestId: requestId,
@@ -578,6 +604,26 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         ).sendSignalToRust();
       },
     );
+  }
+
+  Future<void> _runCodexManualResetRequest({
+    required _PendingOpKind kind,
+    required void Function(Uint64 requestId) sender,
+  }) async {
+    if (codexManualResetBusy) {
+      throw StateError('A manual reset is already being saved.');
+    }
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      throw StateError('Pick a sessions markdown file first.');
+    }
+    codexManualResetBusy = true;
+    notifyListeners();
+    try {
+      await _runOp(kind, sender);
+    } finally {
+      codexManualResetBusy = false;
+      notifyListeners();
+    }
   }
 
   Future<void> _runCodexAccountRequest({
@@ -607,7 +653,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       rethrow;
     } finally {
       _codexAccountRequestInFlight = false;
-      codexAccountBusy = false;
+      codexAccountBusy = _nativeCodexAccountBusy;
       notifyListeners();
       if (_codexAccountLoadPending) {
         _codexAccountLoadPending = false;
@@ -646,13 +692,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> loadConfig({String? markdownPath}) async {
+    _autosaveTimer?.cancel();
+    final requestedPath = (markdownPath ?? sessionsMarkdownPath).trim();
     if (markdownPath != null) {
-      final nextPath = markdownPath.trim();
-      if (nextPath != sessionsMarkdownPath) {
+      if (requestedPath != sessionsMarkdownPath) {
         codexAccounts = const <CodexAccount>[];
       }
-      sessionsMarkdownPath = nextPath;
-      await _prefs?.setString('sessionsMarkdownPath', sessionsMarkdownPath);
+      sessionsMarkdownPath = requestedPath;
+      _prefs?.setString('sessionsMarkdownPath', requestedPath);
     }
 
     _pendingRecentRefresh = true;
@@ -661,12 +708,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     await _runOp(_PendingOpKind.load, (requestId) {
       LoadConfig(
         requestId: requestId,
-        sessionsMarkdownPath: sessionsMarkdownPath,
+        sessionsMarkdownPath: requestedPath,
       ).sendSignalToRust();
     });
-    if (recentProvider == SessionProvider.codex) {
-      unawaited(loadCodexAccounts());
-    }
   }
 
   Future<void> refreshRecent({bool queueIfBusy = false}) async {
@@ -684,8 +728,17 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
     _pendingRecentRefresh = false;
 
+    _sendRecentRefresh();
+  }
+
+  void _sendRecentRefresh() {
+    final requestId = Uint64.fromBigInt(BigInt.zero);
+    if (_testRequestSender != null) {
+      _testRequestSender(requestId);
+      return;
+    }
     RefreshRecent(
-      requestId: Uint64.fromBigInt(BigInt.zero),
+      requestId: requestId,
       sessionsMarkdownPath: sessionsMarkdownPath,
     ).sendSignalToRust();
   }
@@ -1086,6 +1139,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _applyItems(List<ConfigItem> updated) {
     items = updated;
+    _lastItemsJson = null;
+    _itemsRevision += 1;
     dirty = true;
     notifyListeners();
     _scheduleAutosave();
@@ -1125,14 +1180,31 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _nextRequestId += BigInt.one;
 
     final completer = Completer<void>();
-    _pendingOps[requestId] = _PendingOp(kind: kind, completer: completer);
-    sender(requestId);
-    await completer.future;
+    _pendingOps[requestId] = _PendingOp(
+      kind: kind,
+      completer: completer,
+      itemsRevision: _itemsRevision,
+      markdownPath: sessionsMarkdownPath,
+    );
+    try {
+      (_testRequestSender ?? sender)(requestId);
+      await completer.future;
+    } finally {
+      _pendingOps.remove(requestId);
+    }
   }
 
   void _onUiState(RustSignalPack<UiState> signalPack) {
     final state = signalPack.message;
+    final pendingLoad = _pendingOps.values
+        .where((op) => op.kind == _PendingOpKind.load)
+        .lastOrNull;
+    if (pendingLoad != null &&
+        pendingLoad.markdownPath != state.sessionsMarkdownPath) {
+      return;
+    }
     themeSeedColorValue = state.themeSeedColorValue;
+    final wasBusy = busy;
     busy = state.busy;
     status = state.status;
     lastError = state.lastError;
@@ -1142,22 +1214,43 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final nativeActiveAccount = _normalizeCodexAccountSlot(
       state.codexActiveAccount,
     );
-    final hasVerifiedNativeActiveAccount = nativeActiveAccount != null &&
+    final hasVerifiedNativeActiveAccount =
+        nativeActiveAccount != null &&
         codexAccounts.any(
           (account) => _sameCodexAccountSlot(account.slot, nativeActiveAccount),
         );
-    if (hasVerifiedNativeActiveAccount) {
-      codexActiveAccount = nativeActiveAccount;
-      _prefs?.setString('codexActiveAccount', nativeActiveAccount);
-    } else {
-      codexActiveAccount = null;
-      _prefs?.remove('codexActiveAccount');
+    final nextActiveAccount = hasVerifiedNativeActiveAccount
+        ? nativeActiveAccount
+        : null;
+    if (nextActiveAccount != codexActiveAccount) {
+      codexActiveAccount = nextActiveAccount;
+      if (nextActiveAccount != null) {
+        _prefs?.setString('codexActiveAccount', nextActiveAccount);
+      } else {
+        _prefs?.remove('codexActiveAccount');
+      }
     }
+    _nativeCodexAccountBusy = state.codexAccountBusy;
     codexAccountBusy = state.codexAccountBusy || _codexAccountRequestInFlight;
     codexAccountStatus = state.codexAccountStatus;
     codexAccountError = state.codexAccountError;
     sessionsMarkdownPath = state.sessionsMarkdownPath;
-    items = _decodeItems(state.itemsJson);
+    final reloadingItems =
+        !busy &&
+        lastError == null &&
+        _pendingOps.values.any(
+          (op) =>
+              op.kind == _PendingOpKind.load &&
+              op.markdownPath == sessionsMarkdownPath &&
+              op.itemsRevision == _itemsRevision,
+        );
+    // Account/recent updates carry a backend copy of the session list. It can
+    // predate local edits, including edits made while an earlier save is pending.
+    if ((!dirty || reloadingItems) &&
+        (_lastItemsJson != state.itemsJson || reloadingItems)) {
+      items = _decodeItems(state.itemsJson);
+      _lastItemsJson = state.itemsJson;
+    }
     warnings = _decodeWarnings(state.warningsJson);
     recentCodex = _decodeRecentContexts(state.recentCodexJson);
     recentKimi = _decodeRecentContexts(state.recentKimiJson);
@@ -1171,10 +1264,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         sessionsMarkdownPath.trim().isNotEmpty;
     if (shouldStartPendingRecentRefresh) {
       _pendingRecentRefresh = false;
-      RefreshRecent(
-        requestId: Uint64.fromBigInt(BigInt.zero),
-        sessionsMarkdownPath: sessionsMarkdownPath,
-      ).sendSignalToRust();
+      _sendRecentRefresh();
+    }
+    if (wasBusy && !busy && lastError == null && dirty) {
+      _scheduleAutosave();
     }
     notifyListeners();
   }
@@ -1189,7 +1282,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (msg.ok) {
       if (pending.kind == _PendingOpKind.load ||
           pending.kind == _PendingOpKind.save) {
-        dirty = false;
+        if (pending.itemsRevision == _itemsRevision &&
+            pending.markdownPath == sessionsMarkdownPath) {
+          dirty = false;
+          _autosaveTimer?.cancel();
+        } else if (pending.kind == _PendingOpKind.save) {
+          _scheduleAutosave();
+        }
       }
       pending.completer.complete();
     } else {
