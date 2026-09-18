@@ -20,6 +20,8 @@ enum _PendingOpKind {
   codexAccountDelete,
   codexAccountManualResetSet,
   codexAccountManualResetClear,
+  museAccountLoad,
+  zcodeAccountLoad,
 }
 
 enum ThemeAppearance { light, sepia, dim, dark }
@@ -36,6 +38,21 @@ class _PendingOp {
   final Completer<void> completer;
   final int itemsRevision;
   final String markdownPath;
+}
+
+// Reuse unchanged payloads so section selectors retain stable list identities.
+// Only the last payload is kept; changed API data is always decoded immediately.
+class _JsonListCache<T> {
+  String? _source;
+  List<T> _value = const [];
+
+  List<T> decode(String source, List<T> Function(String) parser) {
+    if (_source != source) {
+      _value = parser(source);
+      _source = source;
+    }
+    return _value;
+  }
 }
 
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
@@ -74,10 +91,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<RustSignalPack<OpFinished>>? _opFinishedSub;
   Timer? _autosaveTimer;
   Timer? _recentRefreshTimer;
+  Timer? _museRefreshTimer;
+  Timer? _zcodeRefreshTimer;
   bool _pendingRecentRefresh = true;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
 
   static const _recentRefreshInterval = Duration(seconds: 30);
+  static const _museRefreshInterval = Duration(hours: 24);
+  static const _zcodeRefreshInterval = Duration(hours: 1);
+  static const _recentTabOrderKey = 'recentTabOrder';
+  static const _recentTabHiddenKey = 'recentTabHidden';
 
   BigInt _nextRequestId = BigInt.one;
   final Map<Uint64, _PendingOp> _pendingOps = <Uint64, _PendingOp>{};
@@ -89,6 +112,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool dirty = false;
   bool autosaveEnabled = true;
   bool recentBusy = false;
+  int recentRefreshRevision = 0;
   SessionProvider recentProvider = SessionProvider.codex;
   String filterQuery = '';
   String? status;
@@ -97,9 +121,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<CodexAccount> codexAccounts = const <CodexAccount>[];
   String? codexActiveAccount;
   bool codexAccountBusy = false;
+  int codexAccountRefreshRevision = 0;
   bool codexManualResetBusy = false;
   String? codexAccountStatus;
   String? codexAccountError;
+  List<MuseAccount> museAccounts = const <MuseAccount>[];
+  String? museActiveAccount;
+  bool museAccountBusy = false;
+  int museAccountRefreshRevision = 0;
+  int? museManualResetAt;
+  String? museAccountStatus;
+  String? museAccountError;
+  List<ZcodeAccount> zcodeAccounts = const <ZcodeAccount>[];
+  bool zcodeAccountBusy = false;
+  int zcodeAccountRefreshRevision = 0;
+  String? zcodeAccountStatus;
+  String? zcodeAccountError;
+  List<String> recentTabOrder = const <String>[];
+  List<String> recentTabHidden = const <String>[];
 
   List<ConfigItem> items = const <ConfigItem>[];
   List<String> warnings = const <String>[];
@@ -107,11 +146,29 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RecentContext> recentKimi = const <RecentContext>[];
   List<RecentContext> recentOpencode = const <RecentContext>[];
   List<RecentContext> recentQwen = const <RecentContext>[];
+  List<RecentContext> recentMuse = const <RecentContext>[];
+  List<RecentContext> recentZcode = const <RecentContext>[];
   bool _codexAccountRequestInFlight = false;
   bool _nativeCodexAccountBusy = false;
   bool _codexAccountLoadPending = false;
+  bool _museAccountRequestInFlight = false;
+  bool _nativeMuseAccountBusy = false;
+  bool _museAccountLoadPending = false;
+  bool _zcodeAccountRequestInFlight = false;
+  bool _nativeZcodeAccountBusy = false;
+  bool _zcodeAccountLoadPending = false;
   int _itemsRevision = 0;
   String? _lastItemsJson;
+  final _accountsCache = _JsonListCache<CodexAccount>();
+  final _museAccountsCache = _JsonListCache<MuseAccount>();
+  final _zcodeAccountsCache = _JsonListCache<ZcodeAccount>();
+  final _warningsCache = _JsonListCache<String>();
+  final _recentCodexCache = _JsonListCache<RecentContext>();
+  final _recentKimiCache = _JsonListCache<RecentContext>();
+  final _recentOpencodeCache = _JsonListCache<RecentContext>();
+  final _recentQwenCache = _JsonListCache<RecentContext>();
+  final _recentMuseCache = _JsonListCache<RecentContext>();
+  final _recentZcodeCache = _JsonListCache<RecentContext>();
   final void Function(Uint64)? _testRequestSender;
 
   @override
@@ -119,6 +176,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _autosaveTimer?.cancel();
     _recentRefreshTimer?.cancel();
+    _museRefreshTimer?.cancel();
+    _zcodeRefreshTimer?.cancel();
     _uiStateSub?.cancel();
     _opFinishedSub?.cancel();
     super.dispose();
@@ -150,6 +209,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     codexActiveAccount = _normalizeCodexAccountSlot(
       _prefs?.getString('codexActiveAccount'),
     );
+    museManualResetAt = _prefs?.getInt('museManualResetAt');
+    recentTabOrder = _sanitizeTabKeys(
+      _prefs?.getStringList(_recentTabOrderKey) ??
+          SessionProvider.values.map((provider) => provider.key).toList(),
+    );
+    recentTabHidden = _sanitizeTabKeys(
+      _prefs?.getStringList(_recentTabHiddenKey) ?? const <String>[],
+    );
 
     InitApp(
       themeSeedColorValue: themeSeedColorValue,
@@ -157,6 +224,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     ).sendSignalToRust();
 
     _startRecentRefreshTimer();
+    _startMuseRefreshTimer();
+    _startZcodeRefreshTimer();
+    unawaited(loadMuseAccounts());
+    unawaited(loadZcodeAccounts());
     notifyListeners();
   }
 
@@ -173,6 +244,28 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _recentRefreshTimer = Timer.periodic(
       _recentRefreshInterval,
       (_) => _refreshLiveData(),
+    );
+  }
+
+  void _startMuseRefreshTimer() {
+    _museRefreshTimer?.cancel();
+    // Muse usage refreshes daily, on open, and on manual refresh only: every
+    // refresh burns a few tokens on a minimal model call, so there is no fast
+    // auto-refresh timer like recent sessions use.
+    _museRefreshTimer = Timer.periodic(
+      _museRefreshInterval,
+      (_) => unawaited(loadMuseAccounts()),
+    );
+  }
+
+  void _startZcodeRefreshTimer() {
+    _zcodeRefreshTimer?.cancel();
+    // ZCode usage is read from the local ZCode database, so refreshing is
+    // free; an hourly timer keeps the pace bar current without polling the
+    // database every few seconds.
+    _zcodeRefreshTimer = Timer.periodic(
+      _zcodeRefreshInterval,
+      (_) => unawaited(loadZcodeAccounts()),
     );
   }
 
@@ -193,6 +286,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     SessionProvider.kimi => recentKimi,
     SessionProvider.opencode => recentOpencode,
     SessionProvider.qwen => recentQwen,
+    SessionProvider.muse => recentMuse,
+    SessionProvider.zcode => recentZcode,
   };
 
   CodexAccount? get activeCodexAccount {
@@ -427,6 +522,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       if (value == SessionProvider.codex) {
         unawaited(loadCodexAccounts());
       }
+      if (value == SessionProvider.zcode) {
+        unawaited(loadZcodeAccounts());
+      }
       return;
     }
     recentProvider = value;
@@ -434,6 +532,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
     if (value == SessionProvider.codex) {
       unawaited(loadCodexAccounts());
+    }
+    if (value == SessionProvider.zcode) {
+      unawaited(loadZcodeAccounts());
     }
   }
 
@@ -466,6 +567,288 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     } catch (_) {
       // The account error is exposed through codexAccountError.
+    }
+  }
+
+  MuseAccount? get activeMuseAccount {
+    if (museAccounts.isEmpty) {
+      return null;
+    }
+    final active = museActiveAccount;
+    if (active != null) {
+      for (final account in museAccounts) {
+        if (account.slot.trim().toLowerCase() == active.trim().toLowerCase()) {
+          return account;
+        }
+      }
+    }
+    return museAccounts.first;
+  }
+
+  Future<void> loadMuseAccounts() async {
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      return;
+    }
+    if (_museAccountRequestInFlight) {
+      // Open/daily/manual triggers join the current refresh instead of
+      // stacking model calls that each burn quota.
+      if (!_pendingOps.values.any(
+        (op) => op.kind == _PendingOpKind.museAccountLoad,
+      )) {
+        _museAccountLoadPending = true;
+      }
+      return;
+    }
+
+    try {
+      await _runMuseAccountRequest(
+        kind: _PendingOpKind.museAccountLoad,
+        status: 'Loading Muse usage...',
+        sender: (requestId) {
+          LoadMuseAccounts(
+            requestId: requestId,
+            sessionsMarkdownPath: sessionsMarkdownPath,
+          ).sendSignalToRust();
+        },
+      );
+      notifyListeners();
+    } catch (_) {
+      // The account error is exposed through museAccountError.
+    }
+  }
+
+  Future<void> setMuseManualReset(DateTime value) async {
+    museManualResetAt = value.millisecondsSinceEpoch;
+    await _prefs?.setInt('museManualResetAt', museManualResetAt!);
+    notifyListeners();
+  }
+
+  Future<void> clearMuseManualReset() async {
+    museManualResetAt = null;
+    await _prefs?.remove('museManualResetAt');
+    notifyListeners();
+  }
+
+  ZcodeAccount? get activeZcodeAccount {
+    if (zcodeAccounts.isEmpty) {
+      return null;
+    }
+    return zcodeAccounts.first;
+  }
+
+  Future<void> loadZcodeAccounts() async {
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      return;
+    }
+    if (_zcodeAccountRequestInFlight) {
+      // Open/timer/manual triggers join the current refresh instead of
+      // stacking local database reads.
+      if (!_pendingOps.values.any(
+        (op) => op.kind == _PendingOpKind.zcodeAccountLoad,
+      )) {
+        _zcodeAccountLoadPending = true;
+      }
+      return;
+    }
+
+    try {
+      await _runZcodeAccountRequest(
+        kind: _PendingOpKind.zcodeAccountLoad,
+        status: 'Loading ZCode usage...',
+        sender: (requestId) {
+          LoadZcodeAccounts(
+            requestId: requestId,
+            sessionsMarkdownPath: sessionsMarkdownPath,
+          ).sendSignalToRust();
+        },
+      );
+      notifyListeners();
+    } catch (_) {
+      // The account error is exposed through zcodeAccountError.
+    }
+  }
+
+  Future<void> _runZcodeAccountRequest({
+    required _PendingOpKind kind,
+    required String status,
+    required void Function(Uint64 requestId) sender,
+  }) async {
+    if (_zcodeAccountRequestInFlight) {
+      throw StateError('A ZCode account operation is already running.');
+    }
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      throw StateError('Pick a sessions markdown file first.');
+    }
+
+    _zcodeAccountRequestInFlight = true;
+    zcodeAccountBusy = true;
+    zcodeAccountStatus = status;
+    zcodeAccountError = null;
+    notifyListeners();
+
+    try {
+      await _runOp(kind, sender);
+    } catch (error) {
+      zcodeAccountError = _accountErrorText(error);
+      zcodeAccountStatus = 'ZCode account operation failed.';
+      notifyListeners();
+      rethrow;
+    } finally {
+      _zcodeAccountRequestInFlight = false;
+      zcodeAccountBusy = _nativeZcodeAccountBusy;
+      notifyListeners();
+      if (_zcodeAccountLoadPending) {
+        _zcodeAccountLoadPending = false;
+        unawaited(loadZcodeAccounts());
+      }
+    }
+  }
+
+  List<String> _sanitizeTabKeys(List<String>? keys) {
+    final valid = SessionProvider.values.map((provider) => provider.key);
+    final seen = <String>{};
+    final out = <String>[];
+    for (final key in keys ?? const <String>[]) {
+      if (valid.contains(key) && seen.add(key)) {
+        out.add(key);
+      }
+    }
+    return out;
+  }
+
+  List<SessionProvider> get orderedRecentTabs {
+    final order = recentTabOrder.isEmpty
+        ? SessionProvider.values.map((provider) => provider.key).toList()
+        : recentTabOrder;
+    final hidden = recentTabHidden.toSet();
+    return order
+        .map(SessionProviderInfo.parse)
+        .where((provider) => !hidden.contains(provider.key))
+        .toList(growable: false);
+  }
+
+  List<SessionProvider> get hiddenRecentTabs => recentTabHidden
+      .map(SessionProviderInfo.parse)
+      .toList(growable: false);
+
+  void reorderRecentTab(SessionProvider provider, int targetIndex) {
+    final visible = orderedRecentTabs;
+    final currentIndex = visible.indexOf(provider);
+    if (currentIndex < 0) {
+      return;
+    }
+    var target = targetIndex.clamp(0, visible.length - 1).toInt();
+    if (target == currentIndex) {
+      return;
+    }
+    final updated = List<SessionProvider>.from(visible)..removeAt(currentIndex);
+    if (target > currentIndex) {
+      target -= 1;
+    }
+    updated.insert(target.clamp(0, updated.length), provider);
+
+    // Hidden tabs are not part of the visible sequence; keep them at the end.
+    final newOrder = <String>[
+      ...updated.map((tab) => tab.key),
+      ...recentTabHidden,
+    ];
+    if (newOrder.length == recentTabOrder.length) {
+      var same = true;
+      for (var index = 0; index < newOrder.length; index += 1) {
+        if (newOrder[index] != recentTabOrder[index]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        return;
+      }
+    }
+    recentTabOrder = List<String>.unmodifiable(newOrder);
+    _prefs?.setStringList(_recentTabOrderKey, newOrder);
+    notifyListeners();
+  }
+
+  void hideRecentTab(SessionProvider provider) {
+    final key = provider.key;
+    if (recentTabHidden.contains(key)) {
+      return;
+    }
+    final hidden = List<String>.from(recentTabHidden)..add(key);
+    recentTabHidden = List<String>.unmodifiable(hidden);
+    _prefs?.setStringList(_recentTabHiddenKey, hidden);
+    final visible = orderedRecentTabs;
+    if (visible.isEmpty) {
+      // Never leave the panel without a selectable tab.
+      recentTabHidden = const <String>[];
+      _prefs?.setStringList(_recentTabHiddenKey, const <String>[]);
+      return;
+    }
+    if (recentProvider == provider) {
+      recentProvider = visible.first;
+      _prefs?.setString('recentProvider', recentProvider.key);
+    }
+    notifyListeners();
+  }
+
+  void unhideRecentTab(SessionProvider provider) {
+    final key = provider.key;
+    if (!recentTabHidden.contains(key)) {
+      return;
+    }
+    final hidden = List<String>.from(recentTabHidden)..remove(key);
+    recentTabHidden = List<String>.unmodifiable(hidden);
+    _prefs?.setStringList(_recentTabHiddenKey, hidden);
+    if (!recentTabOrder.contains(key)) {
+      final order = List<String>.from(recentTabOrder)..add(key);
+      recentTabOrder = List<String>.unmodifiable(order);
+      _prefs?.setStringList(_recentTabOrderKey, order);
+    }
+    notifyListeners();
+  }
+
+  void unhideAllRecentTabs() {
+    if (recentTabHidden.isEmpty) {
+      return;
+    }
+    recentTabHidden = const <String>[];
+    _prefs?.setStringList(_recentTabHiddenKey, const <String>[]);
+    notifyListeners();
+  }
+
+  Future<void> _runMuseAccountRequest({
+    required _PendingOpKind kind,
+    required String status,
+    required void Function(Uint64 requestId) sender,
+  }) async {
+    if (_museAccountRequestInFlight) {
+      throw StateError('A Muse account operation is already running.');
+    }
+    if (sessionsMarkdownPath.trim().isEmpty) {
+      throw StateError('Pick a sessions markdown file first.');
+    }
+
+    _museAccountRequestInFlight = true;
+    museAccountBusy = true;
+    museAccountStatus = status;
+    museAccountError = null;
+    notifyListeners();
+
+    try {
+      await _runOp(kind, sender);
+    } catch (error) {
+      museAccountError = _accountErrorText(error);
+      museAccountStatus = 'Muse account operation failed.';
+      notifyListeners();
+      rethrow;
+    } finally {
+      _museAccountRequestInFlight = false;
+      museAccountBusy = _nativeMuseAccountBusy;
+      notifyListeners();
+      if (_museAccountLoadPending) {
+        _museAccountLoadPending = false;
+        unawaited(loadMuseAccounts());
+      }
     }
   }
 
@@ -1208,9 +1591,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     busy = state.busy;
     status = state.status;
     lastError = state.lastError;
+    // Time-based labels must update even if begin/end share a single UI frame.
+    if (recentBusy && !state.recentBusy) {
+      recentRefreshRevision += 1;
+    }
     recentBusy = state.recentBusy;
     recentStatus = state.recentStatus;
-    codexAccounts = _decodeCodexAccounts(state.codexAccountsJson);
+    codexAccounts = _accountsCache.decode(
+      state.codexAccountsJson,
+      _decodeCodexAccounts,
+    );
     final nativeActiveAccount = _normalizeCodexAccountSlot(
       state.codexActiveAccount,
     );
@@ -1230,10 +1620,37 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _prefs?.remove('codexActiveAccount');
       }
     }
+    if (_nativeCodexAccountBusy && !state.codexAccountBusy) {
+      codexAccountRefreshRevision += 1;
+    }
     _nativeCodexAccountBusy = state.codexAccountBusy;
     codexAccountBusy = state.codexAccountBusy || _codexAccountRequestInFlight;
     codexAccountStatus = state.codexAccountStatus;
     codexAccountError = state.codexAccountError;
+    museAccounts = _museAccountsCache.decode(
+      state.museAccountsJson,
+      _decodeMuseAccounts,
+    );
+    final nativeMuseActive = (state.museActiveAccount ?? '').trim();
+    museActiveAccount = nativeMuseActive.isEmpty ? null : nativeMuseActive;
+    if (_nativeMuseAccountBusy && !state.museAccountBusy) {
+      museAccountRefreshRevision += 1;
+    }
+    _nativeMuseAccountBusy = state.museAccountBusy;
+    museAccountBusy = state.museAccountBusy || _museAccountRequestInFlight;
+    museAccountStatus = state.museAccountStatus;
+    museAccountError = state.museAccountError;
+    zcodeAccounts = _zcodeAccountsCache.decode(
+      state.zcodeAccountsJson,
+      _decodeZcodeAccounts,
+    );
+    if (_nativeZcodeAccountBusy && !state.zcodeAccountBusy) {
+      zcodeAccountRefreshRevision += 1;
+    }
+    _nativeZcodeAccountBusy = state.zcodeAccountBusy;
+    zcodeAccountBusy = state.zcodeAccountBusy || _zcodeAccountRequestInFlight;
+    zcodeAccountStatus = state.zcodeAccountStatus;
+    zcodeAccountError = state.zcodeAccountError;
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     final reloadingItems =
         !busy &&
@@ -1251,11 +1668,31 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       items = _decodeItems(state.itemsJson);
       _lastItemsJson = state.itemsJson;
     }
-    warnings = _decodeWarnings(state.warningsJson);
-    recentCodex = _decodeRecentContexts(state.recentCodexJson);
-    recentKimi = _decodeRecentContexts(state.recentKimiJson);
-    recentOpencode = _decodeRecentContexts(state.recentOpencodeJson);
-    recentQwen = _decodeRecentContexts(state.recentQwenJson);
+    warnings = _warningsCache.decode(state.warningsJson, _decodeWarnings);
+    recentCodex = _recentCodexCache.decode(
+      state.recentCodexJson,
+      _decodeRecentContexts,
+    );
+    recentKimi = _recentKimiCache.decode(
+      state.recentKimiJson,
+      _decodeRecentContexts,
+    );
+    recentOpencode = _recentOpencodeCache.decode(
+      state.recentOpencodeJson,
+      _decodeRecentContexts,
+    );
+    recentQwen = _recentQwenCache.decode(
+      state.recentQwenJson,
+      _decodeRecentContexts,
+    );
+    recentMuse = _recentMuseCache.decode(
+      state.recentMuseJson,
+      _decodeRecentContexts,
+    );
+    recentZcode = _recentZcodeCache.decode(
+      state.recentZcodeJson,
+      _decodeRecentContexts,
+    );
     final shouldStartPendingRecentRefresh =
         _pendingRecentRefresh &&
         !busy &&
@@ -1328,6 +1765,64 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         .whereType<Map>()
         .map((item) => RecentContext.fromJson(Map<String, dynamic>.from(item)))
         .toList(growable: false);
+  }
+
+  List<MuseAccount> _decodeMuseAccounts(String jsonText) {
+    final decoded = jsonDecode(jsonText);
+    final entries = decoded is List
+        ? decoded
+        : decoded is Map && decoded['accounts'] is List
+        ? decoded['accounts'] as List
+        : null;
+    if (entries == null) {
+      return const <MuseAccount>[];
+    }
+
+    final out = <MuseAccount>[];
+    final seen = <String>{};
+    for (final item in entries) {
+      if (item is! Map) {
+        continue;
+      }
+      final account =
+          MuseAccount.fromJson(Map<String, dynamic>.from(item));
+      if (account.slot.isEmpty ||
+          account.displayName.isEmpty ||
+          !seen.add(account.identityKey)) {
+        continue;
+      }
+      out.add(account);
+    }
+    return out.toList(growable: false);
+  }
+
+  List<ZcodeAccount> _decodeZcodeAccounts(String jsonText) {
+    final decoded = jsonDecode(jsonText);
+    final entries = decoded is List
+        ? decoded
+        : decoded is Map && decoded['accounts'] is List
+        ? decoded['accounts'] as List
+        : null;
+    if (entries == null) {
+      return const <ZcodeAccount>[];
+    }
+
+    final out = <ZcodeAccount>[];
+    final seen = <String>{};
+    for (final item in entries) {
+      if (item is! Map) {
+        continue;
+      }
+      final account =
+          ZcodeAccount.fromJson(Map<String, dynamic>.from(item));
+      if (account.slot.isEmpty ||
+          account.displayName.isEmpty ||
+          !seen.add(account.identityKey)) {
+        continue;
+      }
+      out.add(account);
+    }
+    return out.toList(growable: false);
   }
 
   List<CodexAccount> _decodeCodexAccounts(String jsonText) {
@@ -1404,9 +1899,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return (provider: SessionProvider.qwen, id: qwenMatch.group(1)!);
     }
 
+    final museMatch = RegExp(
+      r'(?:^|[\s&])muse(?:\.exe)?\s+(?:resume\s+([A-Za-z0-9._-]+)|.*?(?:--resume|--session-id|--session|-r|-s)(?:=|\s+)([A-Za-z0-9._-]+))',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (museMatch != null) {
+      final id = museMatch.group(1) ?? museMatch.group(2);
+      if (id != null && id.isNotEmpty) {
+        return (provider: SessionProvider.muse, id: id);
+      }
+    }
+
     if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(trimmed)) {
       throw const FormatException(
-        'Enter a session id, Codex resume command, Kimi session command, OpenCode session command, or Qwen resume command.',
+        'Enter a session id, Codex resume command, Kimi session command, OpenCode session command, Qwen resume command, or Muse resume command.',
       );
     }
 

@@ -15,6 +15,11 @@ crate-type = ["lib", "cdylib", "staticlib"]
 # Developer-only utilities (not built in normal app builds).
 dev-tools = []
 
+[dev-dependencies]
+# Pins the UiState bincode wire layout against the Dart binding; see
+# wire_order_tests in src/signals/mod.rs.
+bincode = "1.3"
+
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

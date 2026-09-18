@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 
 import '../app/app_state.dart';
 import '../app/models.dart';
+import 'widgets/codex_account_card.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
 
@@ -538,6 +539,218 @@ class _PassiveTooltipState extends State<_PassiveTooltip> {
   }
 }
 
+class _RecentProviderTabBar extends StatefulWidget {
+  const _RecentProviderTabBar({required this.state});
+
+  final AppState state;
+
+  @override
+  State<_RecentProviderTabBar> createState() => _RecentProviderTabBarState();
+}
+
+class _RecentProviderTabBarState extends State<_RecentProviderTabBar> {
+  SessionProvider? _draggingProvider;
+
+  HomeScreen get _screen => const HomeScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final scheme = Theme.of(context).colorScheme;
+    final tabs = state.orderedRecentTabs;
+    final dragging = _draggingProvider;
+    final canHideMore = tabs.length > 1;
+
+    Widget tabAt(int index) {
+      final provider = tabs[index];
+      return DragTarget<SessionProvider>(
+        onWillAcceptWithDetails: (details) => details.data != provider,
+        onMove: (details) {
+          if (details.data != provider) {
+            state.reorderRecentTab(details.data, index);
+          }
+        },
+        builder: (context, candidates, _) {
+          final highlighted = candidates.isNotEmpty;
+          return Draggable<SessionProvider>(
+            data: provider,
+            maxSimultaneousDrags: 1,
+            onDragStarted: () => setState(() => _draggingProvider = provider),
+            onDragEnd: (_) => setState(() => _draggingProvider = null),
+            onDraggableCanceled: (_, _) =>
+                setState(() => _draggingProvider = null),
+            feedback: Material(
+              elevation: 6,
+              color: scheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(9),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 7,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      switch (provider) {
+                        SessionProvider.codex => Icons.terminal_rounded,
+                        SessionProvider.kimi => Icons.nights_stay_outlined,
+                        SessionProvider.opencode => Icons.code_rounded,
+                        SessionProvider.qwen => Icons.auto_awesome_rounded,
+                        SessionProvider.muse => Icons.bolt_rounded,
+                        SessionProvider.zcode => Icons.smart_toy_outlined,
+                      },
+                      size: 15,
+                      color: _screen._providerColor(scheme, provider),
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      provider.label,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            childWhenDragging: Opacity(
+              opacity: 0.45,
+              child: _screen._buildRecentProviderTab(
+                context,
+                state,
+                provider,
+                _screen._recentCountFor(state, provider),
+              ),
+            ),
+            child: MouseRegion(
+              cursor: dragging == null
+                  ? SystemMouseCursors.grab
+                  : SystemMouseCursors.grabbing,
+              child: _screen._buildRecentProviderTab(
+                context,
+                state,
+                provider,
+                _screen._recentCountFor(state, provider),
+                highlighted: highlighted,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
+    return Row(
+      children: [
+        for (var index = 0; index < tabs.length; index += 1) ...[
+          Expanded(child: tabAt(index)),
+          if (index < tabs.length - 1) const SizedBox(width: 3),
+        ],
+        const SizedBox(width: 3),
+        DragTarget<SessionProvider>(
+          onWillAcceptWithDetails: (_) => canHideMore,
+          onAcceptWithDetails: (details) =>
+              state.hideRecentTab(details.data),
+          builder: (context, candidates, _) {
+            final hovering = candidates.isNotEmpty;
+            final hiddenCount = state.hiddenRecentTabs.length;
+            return _screen._tooltip(
+              dragging != null && canHideMore ? 'Drop here to hide' : 'Hidden tabs',
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => _screen._showHiddenTabsDialog(context, state),
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 150),
+                    opacity: dragging != null && canHideMore ? 1 : 0.72,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: hovering
+                            ? scheme.errorContainer.withValues(alpha: 0.9)
+                            : scheme.surfaceContainerHighest.withValues(
+                                alpha: 0.5,
+                              ),
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(
+                          color: hovering ? scheme.error : Colors.transparent,
+                          width: 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            hovering
+                                ? Icons.visibility_off_rounded
+                                : Icons.visibility_off_outlined,
+                            size: 15,
+                            color: hovering
+                                ? scheme.onErrorContainer
+                                : scheme.onSurfaceVariant,
+                          ),
+                          if (hiddenCount > 0) ...[
+                            const SizedBox(width: 5),
+                            Text(
+                              '$hiddenCount',
+                              style: Theme.of(
+                                context,
+                              ).textTheme.labelSmall?.copyWith(
+                                color: hovering
+                                    ? scheme.onErrorContainer
+                                    : scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// Owns the scroll controller so the scrollbar thumb can render outside the
+/// decorated panel instead of inside its clipped frame.
+class _PanelScrollbar extends StatefulWidget {
+  const _PanelScrollbar({required this.builder});
+
+  final Widget Function(ScrollController controller) builder;
+
+  @override
+  State<_PanelScrollbar> createState() => _PanelScrollbarState();
+}
+
+class _PanelScrollbarState extends State<_PanelScrollbar> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      controller: _controller,
+      notificationPredicate: (notification) => notification.depth == 0,
+      child: widget.builder(_controller),
+    );
+  }
+}
+
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
@@ -750,6 +963,11 @@ class HomeScreen extends StatelessWidget {
                         icon: Icon(Icons.auto_awesome_rounded, size: 16),
                         label: Text('Qwen'),
                       ),
+                      ButtonSegment(
+                        value: SessionProvider.muse,
+                        icon: Icon(Icons.bolt_rounded, size: 16),
+                        label: Text('Muse'),
+                      ),
                     ],
                     selected: <SessionProvider>{selectedProvider},
                     onSelectionChanged: (selection) => setDialogState(
@@ -775,6 +993,8 @@ class HomeScreen extends StatelessWidget {
                         SessionProvider.kimi => 'kimi --session <id>',
                         SessionProvider.opencode => 'opencode --session <id>',
                         SessionProvider.qwen => 'qwen --resume <id>',
+                        SessionProvider.muse => 'muse resume <id> --yolo',
+                        SessionProvider.zcode => '<session id>',
                       },
                     ),
                     onChanged: (value) {
@@ -787,6 +1007,7 @@ class HomeScreen extends StatelessWidget {
                         if ((lower.contains('codex ') ||
                                 lower.contains('kimi ') ||
                                 lower.contains('opencode ') ||
+                                lower.contains('muse ') ||
                                 lower.contains('qwen ')) &&
                             parsed.provider != selectedProvider) {
                           setDialogState(
@@ -898,18 +1119,19 @@ class HomeScreen extends StatelessWidget {
     }
   }
 
-  Future<void> _switchCodexAccount(
+  Future<bool> _switchCodexAccount(
     BuildContext context,
     AppState state,
     String slot,
   ) async {
     try {
       await state.switchCodexAccount(slot);
+      return true;
     } catch (error) {
-      if (!context.mounted) {
-        return;
+      if (context.mounted) {
+        await _showError(context, error);
       }
-      await _showError(context, error);
+      return false;
     }
   }
 
@@ -2062,6 +2284,20 @@ class HomeScreen extends StatelessWidget {
       SessionProvider.kimi => 'kimi --session ${item.id}',
       SessionProvider.opencode => 'opencode --session ${item.id}',
       SessionProvider.qwen => 'qwen --resume ${item.id}',
+      SessionProvider.muse => 'muse resume ${item.id} --yolo',
+      // ZCode sessions are identified by their raw session id.
+      SessionProvider.zcode => item.id,
+    };
+  }
+
+  int _recentCountFor(AppState state, SessionProvider provider) {
+    return switch (provider) {
+      SessionProvider.codex => state.recentCodex.length,
+      SessionProvider.kimi => state.recentKimi.length,
+      SessionProvider.opencode => state.recentOpencode.length,
+      SessionProvider.qwen => state.recentQwen.length,
+      SessionProvider.muse => state.recentMuse.length,
+      SessionProvider.zcode => state.recentZcode.length,
     };
   }
 
@@ -2069,78 +2305,158 @@ class HomeScreen extends StatelessWidget {
     BuildContext context,
     AppState state,
     SessionProvider provider,
-    int count,
-  ) {
+    int count, {
+    bool highlighted = false,
+  }) {
     final scheme = Theme.of(context).colorScheme;
     final selected = state.recentProvider == provider;
     final providerColor = _providerColor(scheme, provider);
 
-    return Expanded(
-      child: InkWell(
-        onTap: () => state.setRecentProvider(provider),
-        borderRadius: BorderRadius.circular(9),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
+    return InkWell(
+      onTap: () => state.setRecentProvider(provider),
+      borderRadius: BorderRadius.circular(9),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected
+              ? providerColor.withValues(alpha: 0.16)
+              : highlighted
+              ? providerColor.withValues(alpha: 0.08)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(
             color: selected
-                ? providerColor.withValues(alpha: 0.16)
+                ? providerColor.withValues(alpha: 0.55)
+                : highlighted
+                ? providerColor.withValues(alpha: 0.45)
                 : Colors.transparent,
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(
-              color: selected
-                  ? providerColor.withValues(alpha: 0.55)
-                  : Colors.transparent,
-              width: 0.8,
+            width: 0.8,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              switch (provider) {
+                SessionProvider.codex => Icons.terminal_rounded,
+                SessionProvider.kimi => Icons.nights_stay_outlined,
+                SessionProvider.opencode => Icons.code_rounded,
+                SessionProvider.qwen => Icons.auto_awesome_rounded,
+                SessionProvider.muse => Icons.bolt_rounded,
+                SessionProvider.zcode => Icons.smart_toy_outlined,
+              },
+              size: 15,
+              color: selected ? providerColor : scheme.onSurfaceVariant,
             ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                switch (provider) {
-                  SessionProvider.codex => Icons.terminal_rounded,
-                  SessionProvider.kimi => Icons.nights_stay_outlined,
-                  SessionProvider.opencode => Icons.code_rounded,
-                  SessionProvider.qwen => Icons.auto_awesome_rounded,
-                },
-                size: 15,
-                color: selected ? providerColor : scheme.onSurfaceVariant,
+            const SizedBox(width: 7),
+            Text(
+              provider.label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
               ),
-              const SizedBox(width: 7),
-              Text(
-                provider.label,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            ),
+            const SizedBox(width: 6),
+            Container(
+              constraints: const BoxConstraints(minWidth: 20),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: selected
+                    ? providerColor.withValues(alpha: 0.22)
+                    : scheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                '$count',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(width: 6),
-              Container(
-                constraints: const BoxConstraints(minWidth: 20),
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: selected
-                      ? providerColor.withValues(alpha: 0.22)
-                      : scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  '$count',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: selected
-                        ? scheme.onSurface
-                        : scheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
+
+  Future<void> _showHiddenTabsDialog(
+    BuildContext context,
+    AppState state,
+  ) async {
+    final hidden = state.hiddenRecentTabs;
+    if (hidden.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No hidden tabs. Drag a tab onto the hide area to hide it.')),
+      );
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => ListenableBuilder(
+        listenable: state,
+        builder: (dialogContext, _) {
+          final hidden = state.hiddenRecentTabs;
+          return AlertDialog(
+            title: const Text('Hidden Tabs'),
+            content: SizedBox(
+              width: 360,
+              child: hidden.isEmpty
+                  ? const Text('No hidden tabs.')
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final provider in hidden)
+                          ListTile(
+                            dense: true,
+                            leading: Icon(
+                              switch (provider) {
+                                SessionProvider.codex =>
+                                  Icons.terminal_rounded,
+                                SessionProvider.kimi =>
+                                  Icons.nights_stay_outlined,
+                                SessionProvider.opencode => Icons.code_rounded,
+                                SessionProvider.qwen =>
+                                  Icons.auto_awesome_rounded,
+                                SessionProvider.muse => Icons.bolt_rounded,
+                                SessionProvider.zcode =>
+                                  Icons.smart_toy_outlined,
+                              },
+                              size: 18,
+                              color: _providerColor(
+                                Theme.of(dialogContext).colorScheme,
+                                provider,
+                              ),
+                            ),
+                            title: Text(provider.label),
+                            trailing: TextButton(
+                              onPressed: () =>
+                                  state.unhideRecentTab(provider),
+                              child: const Text('Unhide'),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: hidden.isEmpty ? null : state.unhideAllRecentTabs,
+                child: const Text('Unhide all'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
 
   Widget _buildCodexAccountSection(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
@@ -2400,161 +2716,80 @@ class HomeScreen extends StatelessWidget {
               'Fair target by now ${_formatExpectedCodexPercent(usage.expectedPercent)} percent '
               'used, or ${_formatCodexPercent(usage.targetLeftPercent)} percent target left.';
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 5),
-      padding: EdgeInsets.zero,
-      decoration: BoxDecoration(
-        color: accountCardSurfaceColor,
-        borderRadius: BorderRadius.circular(9),
-        border: Border.all(
-          color: selected
-              ? underTargetColor.withValues(alpha: 0.44)
-              : neutralQuotaOutlineColor.withValues(alpha: 0.28),
-          width: selected ? 0.9 : 0.65,
-        ),
-      ),
+    return Padding(
+      key: ValueKey('codex-account-${account.identityKey}'),
+      padding: const EdgeInsets.only(bottom: 5),
       child: _tooltip(
         quotaTooltipMessage,
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8.2),
-          child: Stack(
-            children: [
-              if (usage != null)
-                Positioned.fill(
-                  child: Semantics(
-                    container: true,
-                    label: quotaSemanticsLabel,
-                    child: IgnorePointer(
-                      child: CustomPaint(
-                        painter: _CodexWeeklyUsageBackgroundPainter(
-                          actualPercent: usage.actualPercent,
-                          expectedPercent: usage.expectedPercent,
-                          usedColor: underTargetColor.withValues(alpha: 0.32),
-                          overTargetColor: overTargetColor.withValues(
-                            alpha: 0.17,
-                          ),
-                          remainingColor: accountCardSurfaceColor,
-                          targetMarkerColor:
-                              usage.paceDeltaPercent <
-                                  -_codexPaceTolerancePercent
-                              ? underTargetColor.withValues(alpha: 0.55)
-                              : scheme.onSurface.withValues(alpha: 0.23),
-                          actualEdgeColor: scheme.onSurface.withValues(
-                            alpha: 0.16,
-                          ),
+        CodexAccountCard(
+          name: account.displayName,
+          slot: account.slot,
+          selected: selected,
+          surfaceColor: accountCardSurfaceColor,
+          accentColor: underTargetColor,
+          outlineColor: neutralQuotaOutlineColor,
+          onActivate: switchEnabled && !selected
+              ? () => _switchCodexAccount(context, state, account.slot)
+              : null,
+          usage: _buildCodexWeeklyUsage(
+            context,
+            account.weeklyError,
+            usage,
+          ),
+          usageBackground: usage == null
+              ? null
+              : Semantics(
+                  container: true,
+                  label: quotaSemanticsLabel,
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: _CodexWeeklyUsageBackgroundPainter(
+                        actualPercent: usage.actualPercent,
+                        expectedPercent: usage.expectedPercent,
+                        usedColor: underTargetColor.withValues(alpha: 0.32),
+                        overTargetColor: overTargetColor.withValues(
+                          alpha: 0.17,
                         ),
-                        child: const SizedBox.expand(),
+                        remainingColor: accountCardSurfaceColor,
+                        targetMarkerColor:
+                            usage.paceDeltaPercent < -_codexPaceTolerancePercent
+                            ? underTargetColor.withValues(alpha: 0.55)
+                            : scheme.onSurface.withValues(alpha: 0.23),
+                        actualEdgeColor: scheme.onSurface.withValues(
+                          alpha: 0.16,
+                        ),
                       ),
+                      child: const SizedBox.expand(),
                     ),
                   ),
                 ),
-              SizedBox(
-                width: double.infinity,
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(8.2),
-                    onTap: switchEnabled && !selected
-                        ? () => unawaited(
-                            _switchCodexAccount(context, state, account.slot),
-                          )
-                        : null,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(7, 5, 4, 6),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 3,
-                                    vertical: 2,
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        account.displayName,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall
-                                            ?.copyWith(
-                                              fontWeight: selected
-                                                  ? FontWeight.w700
-                                                  : FontWeight.w600,
-                                            ),
-                                      ),
-                                      Text(
-                                        'Slot ${account.slot}${selected ? ' · active' : ''}',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelSmall
-                                            ?.copyWith(
-                                              color: selected
-                                                  ? underTargetColor
-                                                  : scheme.onSurfaceVariant,
-                                            ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 60, height: 30),
-                            ],
-                          ),
-                          _buildCodexWeeklyUsage(context, account, usage),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+          actions: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                onPressed: enabled
+                    ? () => unawaited(
+                        _renameCodexAccount(context, state, account),
+                      )
+                    : null,
+                tooltip: 'Rename account',
+                icon: const Icon(Icons.edit_outlined, size: 16),
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
               ),
-              Positioned(
-                top: 5,
-                right: 4,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      onPressed: enabled
-                          ? () => unawaited(
-                              _renameCodexAccount(context, state, account),
-                            )
-                          : null,
-                      tooltip: 'Rename account',
-                      icon: const Icon(Icons.edit_outlined, size: 16),
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                        minWidth: 30,
-                        minHeight: 30,
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: enabled
-                          ? () => unawaited(
-                              _deleteCodexAccount(context, state, account),
-                            )
-                          : null,
-                      tooltip: 'Delete saved account',
-                      icon: const Icon(Icons.delete_outline_rounded, size: 16),
-                      color: scheme.error,
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                        minWidth: 30,
-                        minHeight: 30,
-                      ),
-                    ),
-                  ],
-                ),
+              IconButton(
+                onPressed: enabled
+                    ? () => unawaited(
+                        _deleteCodexAccount(context, state, account),
+                      )
+                    : null,
+                tooltip: 'Delete saved account',
+                icon: const Icon(Icons.delete_outline_rounded, size: 16),
+                color: scheme.error,
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
               ),
             ],
           ),
@@ -2563,14 +2798,701 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
+  Future<void> _setMuseManualReset(
+    BuildContext context,
+    AppState state,
+  ) async {
+    final account = state.activeMuseAccount;
+    final apiResetAt = account?.weeklyResetAt == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(account!.weeklyResetAt!);
+    if (apiResetAt == null) {
+      await _showError(
+        context,
+        StateError('No weekly reset is available yet.'),
+      );
+      return;
+    }
+
+    final stored = state.museManualResetAt;
+    final configuredManualResetAt = stored == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(stored);
+    final manualResetAt = await _showCodexManualResetDialog(
+      context,
+      apiResetAt: apiResetAt,
+      configuredManualResetAt: configuredManualResetAt,
+    );
+    if (manualResetAt == null) {
+      return;
+    }
+    if (!manualResetAt.isAfter(DateTime.now())) {
+      if (!context.mounted) {
+        return;
+      }
+      await _showError(
+        context,
+        StateError('Choose a future Muse reset time.'),
+      );
+      return;
+    }
+
+    await state.setMuseManualReset(manualResetAt);
+  }
+
+  Future<void> _clearMuseManualReset(
+    BuildContext context,
+    AppState state,
+  ) async {
+    await state.clearMuseManualReset();
+  }
+
+  _CodexWeeklyUsage? _museWeeklyUsageFor(
+    MuseAccount account,
+    DateTime now, {
+    DateTime? manualResetAt,
+  }) {
+    if (account.museError != null || account.weeklyUsedPercent == null) {
+      return null;
+    }
+
+    final apiWindow = Duration(
+      seconds: account.effectiveWeeklyWindowSeconds,
+    );
+    if (apiWindow.inMilliseconds <= 0) {
+      return null;
+    }
+    final apiResetAt = account.weeklyResetAt == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(account.weeklyResetAt!);
+    final usesManualReset = manualResetAt?.isAfter(now) == true;
+    final resetAt = usesManualReset ? manualResetAt : apiResetAt;
+    if (resetAt == null) {
+      return null;
+    }
+    if (apiResetAt == null) {
+      return null;
+    }
+    final cycleStart = apiResetAt.subtract(apiWindow);
+    final effectivePaceWindow = resetAt.difference(cycleStart);
+    if (effectivePaceWindow.inMilliseconds <= 0 ||
+        effectivePaceWindow.inSeconds <= 0) {
+      return null;
+    }
+    final elapsedMilliseconds = now.difference(cycleStart).inMilliseconds;
+    final expectedPercent =
+        (elapsedMilliseconds / effectivePaceWindow.inMilliseconds * 100)
+            .clamp(0, 100)
+            .toDouble();
+    final actualPercent = account.weeklyUsedPercent!.clamp(0, 100).toDouble();
+
+    return _CodexWeeklyUsage(
+      actualPercent: actualPercent,
+      expectedPercent: expectedPercent,
+      remainingPercent: 100 - actualPercent,
+      resetAt: resetAt,
+      effectivePaceWindowSeconds: effectivePaceWindow.inSeconds,
+    );
+  }
+
+  Widget _buildMuseAccountSection(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    final providerColor = _providerColor(scheme, SessionProvider.muse);
+    final accountSectionSurfaceColor = scheme.surfaceContainerLowest.withValues(
+      alpha: 0.38,
+    );
+    final neutralAccountOutlineColor = HSLColor.fromColor(
+      scheme.outlineVariant,
+    ).withSaturation(0).toColor();
+    final account = state.activeMuseAccount;
+    final accountBusy = state.museAccountBusy;
+    final accountError = state.museAccountError;
+    final accountStatus = state.museAccountStatus;
+    final hasAccountError = accountError?.trim().isNotEmpty ?? false;
+    final hasAccountStatus = accountStatus?.trim().isNotEmpty ?? false;
+    final now = DateTime.now();
+    final storedManualReset = state.museManualResetAt;
+    final configuredManualResetAt = storedManualReset == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(storedManualReset);
+    final manualResetAt = configuredManualResetAt?.isAfter(now) == true
+        ? configuredManualResetAt
+        : null;
+    final hasConfiguredManualReset = configuredManualResetAt != null;
+    final apiResetAt = account?.weeklyResetAt == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(account!.weeklyResetAt!);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+        decoration: BoxDecoration(
+          color: accountSectionSurfaceColor,
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(
+            color: neutralAccountOutlineColor.withValues(alpha: 0.25),
+            width: 0.65,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.bolt_rounded,
+                  size: 17,
+                  color: providerColor,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  'Muse account',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    account == null
+                        ? 'Not checked yet'
+                        : account.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _tooltip(
+                  'Refresh Muse usage (uses a few tokens)',
+                  IconButton(
+                    onPressed: state.busy || accountBusy
+                        ? null
+                        : () => unawaited(state.loadMuseAccounts()),
+                    icon: const Icon(Icons.refresh_rounded, size: 17),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+                Tooltip(
+                  message: hasConfiguredManualReset
+                      ? 'Edit manual reset'
+                      : 'Set manual reset',
+                  child: IconButton(
+                    onPressed:
+                        state.busy || apiResetAt == null
+                        ? null
+                        : () => unawaited(_setMuseManualReset(context, state)),
+                    icon: Icon(
+                      hasConfiguredManualReset
+                          ? Icons.edit_calendar_outlined
+                          : Icons.add_alarm_outlined,
+                      size: 16,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 30,
+                      minHeight: 30,
+                    ),
+                  ),
+                ),
+                if (hasConfiguredManualReset)
+                  Tooltip(
+                    message: 'Remove manual reset',
+                    child: IconButton(
+                      onPressed: state.busy
+                          ? null
+                          : () => unawaited(
+                              _clearMuseManualReset(context, state),
+                            ),
+                      icon: const Icon(Icons.close_rounded, size: 16),
+                      color: scheme.error,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 30,
+                        minHeight: 30,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 7),
+            if (account == null)
+              Row(
+                children: [
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 15,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Usage not checked yet. It refreshes on open, daily, or with the refresh button above.',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            else
+              _buildMuseAccountRow(
+                context,
+                state,
+                account,
+                now: now,
+                manualResetAt: manualResetAt,
+              ),
+            SizedBox(
+              height: 9,
+              child: accountBusy
+                  ? Align(
+                      alignment: Alignment.bottomCenter,
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 2,
+                        child: LinearProgressIndicator(
+                          minHeight: 2,
+                          color: neutralAccountOutlineColor,
+                          backgroundColor: neutralAccountOutlineColor
+                              .withValues(alpha: 0.12),
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 22),
+              child: hasAccountError
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        accountError!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelSmall?.copyWith(color: scheme.error),
+                      ),
+                    )
+                  : hasAccountStatus
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        accountStatus!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMuseAccountRow(
+    BuildContext context,
+    AppState state,
+    MuseAccount account, {
+    required DateTime now,
+    required DateTime? manualResetAt,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final usage = _museWeeklyUsageFor(account, now, manualResetAt: manualResetAt);
+    final underTargetColor = scheme.brightness == Brightness.dark
+        ? const Color(0xFF6AD697)
+        : const Color(0xFF138A4B);
+    final overTargetColor = scheme.brightness == Brightness.dark
+        ? const Color(0xFFFF7070)
+        : const Color(0xFFC62828);
+    final accountCardSurfaceColor = scheme.surfaceContainerLowest.withValues(
+      alpha: 0.62,
+    );
+    final neutralQuotaOutlineColor = HSLColor.fromColor(
+      scheme.outlineVariant,
+    ).withSaturation(0).toColor();
+    final quotaTooltipMessage = usage == null
+        ? ''
+        : 'Spent ${_formatCodexPercent(usage.actualPercent)}% last recorded.\n'
+              'Fair target by now: ${_formatExpectedCodexPercent(usage.expectedPercent)}% used '
+              '(${_formatCodexPercent(usage.targetLeftPercent)}% target left).';
+    final quotaSemanticsLabel = usage == null
+        ? null
+        : 'Weekly usage ${_formatCodexPercent(usage.actualPercent)} percent used, '
+              'last recorded.\n'
+              'Fair target by now ${_formatExpectedCodexPercent(usage.expectedPercent)} percent '
+              'used, or ${_formatCodexPercent(usage.targetLeftPercent)} percent target left.';
+
+    return Padding(
+      key: ValueKey('muse-account-${account.identityKey}'),
+      padding: const EdgeInsets.only(bottom: 5),
+      child: _tooltip(
+        quotaTooltipMessage,
+        CodexAccountCard(
+          name: account.displayName,
+          slot: account.slot,
+          selected: true,
+          surfaceColor: accountCardSurfaceColor,
+          accentColor: underTargetColor,
+          outlineColor: neutralQuotaOutlineColor,
+          onActivate: null,
+          usage: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildCodexWeeklyUsage(
+                context,
+                account.museError,
+                usage,
+              ),
+              _buildMuseWindowUsage(context, account),
+            ],
+          ),
+          usageBackground: usage == null
+              ? null
+              : Semantics(
+                  container: true,
+                  label: quotaSemanticsLabel,
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: _CodexWeeklyUsageBackgroundPainter(
+                        actualPercent: usage.actualPercent,
+                        expectedPercent: usage.expectedPercent,
+                        usedColor: underTargetColor.withValues(alpha: 0.32),
+                        overTargetColor: overTargetColor.withValues(
+                          alpha: 0.17,
+                        ),
+                        remainingColor: accountCardSurfaceColor,
+                        targetMarkerColor:
+                            usage.paceDeltaPercent < -_codexPaceTolerancePercent
+                            ? underTargetColor.withValues(alpha: 0.55)
+                            : scheme.onSurface.withValues(alpha: 0.23),
+                        actualEdgeColor: scheme.onSurface.withValues(
+                          alpha: 0.16,
+                        ),
+                      ),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+          actions: const Row(mainAxisSize: MainAxisSize.min),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMuseWindowUsage(BuildContext context, MuseAccount account) {
+    final scheme = Theme.of(context).colorScheme;
+    final percent = account.windowUsedPercent;
+    final resetAt = account.windowResetAt;
+    if (account.museError != null || percent == null || resetAt == null) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, left: 3, right: 3),
+      child: Row(
+        children: [
+          Icon(
+            Icons.timelapse_outlined,
+            size: 13,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text(
+              'Current window ${_formatCodexPercent(percent)}% used · resets ${_formatCodexResetLabel(DateTime.fromMillisecondsSinceEpoch(resetAt))}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  _CodexWeeklyUsage? _zcodeWeeklyUsageFor(
+    ZcodeAccount account,
+    DateTime now,
+  ) {
+    if (account.zcodeError != null ||
+        account.usedPercent == null ||
+        account.resetAt == null) {
+      return null;
+    }
+
+    final window = Duration(seconds: account.effectiveWindowSeconds);
+    if (window.inMilliseconds <= 0) {
+      return null;
+    }
+    final resetAt = DateTime.fromMillisecondsSinceEpoch(account.resetAt!);
+    final cycleStart = resetAt.subtract(window);
+    final elapsedMilliseconds = now.difference(cycleStart).inMilliseconds;
+    final expectedPercent =
+        (elapsedMilliseconds / window.inMilliseconds * 100)
+            .clamp(0, 100)
+            .toDouble();
+    final actualPercent = account.usedPercent!.clamp(0, 100).toDouble();
+
+    return _CodexWeeklyUsage(
+      actualPercent: actualPercent,
+      expectedPercent: expectedPercent,
+      remainingPercent: 100 - actualPercent,
+      resetAt: resetAt,
+      effectivePaceWindowSeconds: window.inSeconds,
+    );
+  }
+
+  Widget _buildZcodeAccountSection(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    final providerColor = _providerColor(scheme, SessionProvider.zcode);
+    final accountSectionSurfaceColor = scheme.surfaceContainerLowest.withValues(
+      alpha: 0.38,
+    );
+    final neutralAccountOutlineColor = HSLColor.fromColor(
+      scheme.outlineVariant,
+    ).withSaturation(0).toColor();
+    final account = state.activeZcodeAccount;
+    final accountBusy = state.zcodeAccountBusy;
+    final accountError = state.zcodeAccountError;
+    final accountStatus = state.zcodeAccountStatus;
+    final hasAccountError = accountError?.trim().isNotEmpty ?? false;
+    final hasAccountStatus = accountStatus?.trim().isNotEmpty ?? false;
+    final now = DateTime.now();
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+        decoration: BoxDecoration(
+          color: accountSectionSurfaceColor,
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(
+            color: neutralAccountOutlineColor.withValues(alpha: 0.25),
+            width: 0.65,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.smart_toy_outlined,
+                  size: 17,
+                  color: providerColor,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  'ZCode account',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    account == null
+                        ? 'Not checked yet'
+                        : account.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _tooltip(
+                  'Refresh ZCode usage (reads local ZCode data)',
+                  IconButton(
+                    onPressed: state.busy || accountBusy
+                        ? null
+                        : () => unawaited(state.loadZcodeAccounts()),
+                    icon: const Icon(Icons.refresh_rounded, size: 17),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 7),
+            if (account == null)
+              Row(
+                children: [
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 15,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Usage not checked yet. It refreshes on open, hourly, or with the refresh button above.',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            else
+              _buildZcodeAccountRow(context, state, account, now: now),
+            SizedBox(
+              height: 9,
+              child: accountBusy
+                  ? Align(
+                      alignment: Alignment.bottomCenter,
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 2,
+                        child: LinearProgressIndicator(
+                          minHeight: 2,
+                          color: neutralAccountOutlineColor,
+                          backgroundColor: neutralAccountOutlineColor
+                              .withValues(alpha: 0.12),
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 22),
+              child: hasAccountError
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        accountError!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelSmall?.copyWith(color: scheme.error),
+                      ),
+                    )
+                  : hasAccountStatus
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        accountStatus!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildZcodeAccountRow(
+    BuildContext context,
+    AppState state,
+    ZcodeAccount account, {
+    required DateTime now,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final usage = _zcodeWeeklyUsageFor(account, now);
+    final underTargetColor = scheme.brightness == Brightness.dark
+        ? const Color(0xFF6AD697)
+        : const Color(0xFF138A4B);
+    final overTargetColor = scheme.brightness == Brightness.dark
+        ? const Color(0xFFFF7070)
+        : const Color(0xFFC62828);
+    final accountCardSurfaceColor = scheme.surfaceContainerLowest.withValues(
+      alpha: 0.62,
+    );
+    final neutralQuotaOutlineColor = HSLColor.fromColor(
+      scheme.outlineVariant,
+    ).withSaturation(0).toColor();
+    final quotaTooltipMessage = usage == null
+        ? ''
+        : 'Spent ${_formatCodexPercent(usage.actualPercent)}% last recorded.\n'
+              'Fair target by now: ${_formatExpectedCodexPercent(usage.expectedPercent)}% used '
+              '(${_formatCodexPercent(usage.targetLeftPercent)}% target left).';
+    final quotaSemanticsLabel = usage == null
+        ? null
+        : 'Usage ${_formatCodexPercent(usage.actualPercent)} percent used, '
+              'last recorded.\n'
+              'Fair target by now ${_formatExpectedCodexPercent(usage.expectedPercent)} percent '
+              'used, or ${_formatCodexPercent(usage.targetLeftPercent)} percent target left.';
+
+    return Padding(
+      key: ValueKey('zcode-account-${account.identityKey}'),
+      padding: const EdgeInsets.only(bottom: 5),
+      child: _tooltip(
+        quotaTooltipMessage,
+        CodexAccountCard(
+          name: account.displayName,
+          slot: account.slot,
+          selected: true,
+          surfaceColor: accountCardSurfaceColor,
+          accentColor: underTargetColor,
+          outlineColor: neutralQuotaOutlineColor,
+          onActivate: null,
+          usage: _buildCodexWeeklyUsage(
+            context,
+            account.zcodeError,
+            usage,
+          ),
+          usageBackground: usage == null
+              ? null
+              : Semantics(
+                  container: true,
+                  label: quotaSemanticsLabel,
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: _CodexWeeklyUsageBackgroundPainter(
+                        actualPercent: usage.actualPercent,
+                        expectedPercent: usage.expectedPercent,
+                        usedColor: underTargetColor.withValues(alpha: 0.32),
+                        overTargetColor: overTargetColor.withValues(
+                          alpha: 0.17,
+                        ),
+                        remainingColor: accountCardSurfaceColor,
+                        targetMarkerColor:
+                            usage.paceDeltaPercent < -_codexPaceTolerancePercent
+                            ? underTargetColor.withValues(alpha: 0.55)
+                            : scheme.onSurface.withValues(alpha: 0.23),
+                        actualEdgeColor: scheme.onSurface.withValues(
+                          alpha: 0.16,
+                        ),
+                      ),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+          actions: const Row(mainAxisSize: MainAxisSize.min),
+        ),
+      ),
+    );
+  }
+
   Widget _buildCodexWeeklyUsage(
     BuildContext context,
-    CodexAccount account,
+    String? weeklyError,
     _CodexWeeklyUsage? usage,
   ) {
     final scheme = Theme.of(context).colorScheme;
     if (usage == null) {
-      final error = account.weeklyError?.trim();
+      final error = weeklyError?.trim();
       return Padding(
         padding: const EdgeInsets.only(top: 3, left: 3),
         child: Row(
@@ -2882,76 +3804,38 @@ class HomeScreen extends StatelessWidget {
     return '${state.visibleRecent.length} loaded';
   }
 
-  Widget _buildRecentContexts(BuildContext context, AppState state) {
+  Widget _buildRecentContexts(
+    BuildContext context,
+    AppState state, {
+    required Widget accountSection,
+  }) {
     final scheme = Theme.of(context).colorScheme;
-    final providerColor = _providerColor(scheme, state.recentProvider);
     final recent = state.visibleRecent;
 
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            providerColor.withValues(alpha: 0.10),
-            scheme.surfaceContainerLowest.withValues(alpha: 0.38),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(13),
-        border: Border.all(
-          color: providerColor.withValues(alpha: 0.30),
-          width: 0.7,
-        ),
-      ),
-      child: _CodexDither(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
-              child: Container(
-                padding: const EdgeInsets.all(3),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: Row(
-                  children: [
-                    _buildRecentProviderTab(
-                      context,
-                      state,
-                      SessionProvider.codex,
-                      state.recentCodex.length,
-                    ),
-                    _buildRecentProviderTab(
-                      context,
-                      state,
-                      SessionProvider.kimi,
-                      state.recentKimi.length,
-                    ),
-                    _buildRecentProviderTab(
-                      context,
-                      state,
-                      SessionProvider.opencode,
-                      state.recentOpencode.length,
-                    ),
-                    _buildRecentProviderTab(
-                      context,
-                      state,
-                      SessionProvider.qwen,
-                      state.recentQwen.length,
-                    ),
-                  ],
-                ),
+    // No framed container here: the panel border plus the account box are the
+    // only two frames; the recent section sits directly on the panel.
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+            child: Container(
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
+                borderRadius: BorderRadius.circular(11),
               ),
+              child: _RecentProviderTabBar(state: state),
             ),
-            if (state.recentProvider == SessionProvider.codex)
-              _buildCodexAccountSection(context, state),
-            _buildRecentSectionHeader(context, state),
-            Padding(
+          ),
+          if (state.recentProvider == SessionProvider.codex ||
+              state.recentProvider == SessionProvider.muse ||
+              state.recentProvider == SessionProvider.zcode)
+            accountSection,
+          _buildRecentSectionHeader(context, state),
+          Padding(
               padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
               child: recent.isEmpty
                   ? Container(
@@ -3010,7 +3894,9 @@ class HomeScreen extends StatelessWidget {
                                 children: [
                                   Expanded(
                                     child: _tooltip(
-                                      'Click card to copy resume command',
+                                      item.provider == SessionProvider.zcode
+                                          ? 'Click card to copy session id'
+                                          : 'Click card to copy resume command',
                                       Material(
                                         color: Colors.transparent,
                                         child: InkWell(
@@ -3133,27 +4019,44 @@ class HomeScreen extends StatelessWidget {
                                     ),
                                   ),
                                   const SizedBox(width: 7),
-                                  _tooltip(
-                                    alreadySaved
-                                        ? 'Already saved'
-                                        : 'Add to Context',
-                                    IconButton.filledTonal(
-                                      visualDensity: VisualDensity.compact,
-                                      onPressed: alreadySaved || state.busy
-                                          ? null
-                                          : () => _saveRecentContext(
-                                              context,
-                                              state,
-                                              item,
-                                            ),
-                                      icon: Icon(
-                                        alreadySaved
-                                            ? Icons.check_rounded
-                                            : Icons.add_rounded,
-                                        size: 17,
+                                  if (item.provider == SessionProvider.zcode)
+                                    _tooltip(
+                                      'Copy session id',
+                                      IconButton.filledTonal(
+                                        visualDensity: VisualDensity.compact,
+                                        onPressed: () => _copyCommand(
+                                          context,
+                                          item.id,
+                                          'Session id',
+                                        ),
+                                        icon: const Icon(
+                                          Icons.copy_rounded,
+                                          size: 17,
+                                        ),
+                                      ),
+                                    )
+                                  else
+                                    _tooltip(
+                                      alreadySaved
+                                          ? 'Already saved'
+                                          : 'Add to Context',
+                                      IconButton.filledTonal(
+                                        visualDensity: VisualDensity.compact,
+                                        onPressed: alreadySaved || state.busy
+                                            ? null
+                                            : () => _saveRecentContext(
+                                                context,
+                                                state,
+                                                item,
+                                              ),
+                                        icon: Icon(
+                                          alreadySaved
+                                              ? Icons.check_rounded
+                                              : Icons.add_rounded,
+                                          size: 17,
+                                        ),
                                       ),
                                     ),
-                                  ),
                                 ],
                               ),
                             );
@@ -3163,90 +4066,179 @@ class HomeScreen extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
+      );
   }
 
-  Widget _buildContextPanel(BuildContext context, AppState state) {
+  Widget _buildContextPanel(
+    BuildContext context,
+    AppState state,
+    ScrollController scrollController,
+  ) {
     final scheme = Theme.of(context).colorScheme;
-    final filteredSessionIndices = state.filteredSessionIndices;
 
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLowest.withValues(alpha: 0.28),
-        border: Border.all(color: scheme.outlineVariant, width: 0.7),
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.035),
-            blurRadius: 18,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: CustomScrollView(
-              slivers: [
-                SliverToBoxAdapter(child: _buildPanelHeader(context, state)),
-                if (state.hasFilter && filteredSessionIndices.isEmpty)
-                  const SliverToBoxAdapter(
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-                      child: Text('No matching contexts.'),
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(12, 12, 0, 12),
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerLowest.withValues(alpha: 0.28),
+              border: Border.all(color: scheme.outlineVariant, width: 0.7),
+              borderRadius: BorderRadius.circular(14),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.035),
+                  blurRadius: 18,
+                  offset: const Offset(0, 5),
+                ),
+              ],
+            ),
+            child: ScrollConfiguration(
+              // The scrollbar is drawn by _PanelScrollbar outside this frame.
+              behavior: ScrollConfiguration.of(
+                context,
+              ).copyWith(scrollbars: false),
+              child: CustomScrollView(
+                controller: scrollController,
+                slivers: [
+                SliverToBoxAdapter(
+                  child: Selector<AppState, Object>(
+                    selector: (_, state) => (
+                      state.items,
+                      state.busy,
+                      state.dirty,
+                      state.filterQuery,
+                      state.status,
+                      state.sessionsMarkdownPath,
                     ),
-                  )
-                else if (state.items.isEmpty)
-                  const SliverToBoxAdapter(
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-                      child: Text(
-                        'No items yet. Add a session entry or a group, then drag rows into place and save.',
-                      ),
-                    ),
-                  )
-                else if (state.hasFilter)
-                  SliverList(
-                    delegate: SliverChildBuilderDelegate((
-                      context,
-                      filteredIndex,
-                    ) {
-                      final actualIndex = filteredSessionIndices[filteredIndex];
-                      return _buildSessionCard(
-                        context,
-                        state,
-                        state.items[actualIndex],
-                        actualIndex,
-                        forceUngrouped: true,
-                        showDragHandle: false,
-                      );
-                    }, childCount: filteredSessionIndices.length),
-                  )
-                else
-                  SliverReorderableList(
-                    itemCount: state.items.length,
-                    onReorderItem: state.busy
-                        ? (_, _) {}
-                        : (oldIndex, adjustedIndex) {
-                            final legacyIndex = adjustedIndex >= oldIndex
-                                ? adjustedIndex + 1
-                                : adjustedIndex;
-                            state.reorderItems(oldIndex, legacyIndex);
-                          },
-                    itemBuilder: (context, index) =>
-                        _buildItem(context, state, state.items[index], index),
+                    builder: (context, _, _) =>
+                        _buildPanelHeader(context, state),
                   ),
-                SliverToBoxAdapter(child: _buildRecentContexts(context, state)),
+                ),
+                Selector<AppState, Object>(
+                  selector: (_, state) =>
+                      (state.items, state.busy, state.filterQuery),
+                  builder: (context, _, _) =>
+                      _buildSessionSliver(context, state),
+                ),
+                SliverToBoxAdapter(
+                  child: Selector<AppState, Object>(
+                    selector: (_, state) => (
+                      state.recentProvider,
+                      state.recentBusy,
+                      state.recentRefreshRevision,
+                      state.recentStatus,
+                      state.items,
+                      state.busy,
+                      state.recentCodex,
+                      state.recentKimi,
+                      state.recentOpencode,
+                      state.recentQwen,
+                      state.recentMuse,
+                      state.recentZcode,
+                      state.recentTabOrder,
+                      state.recentTabHidden,
+                    ),
+                    // Keep account widgets stable while recent sessions refresh.
+                    child: Selector<AppState, Object>(
+                      selector: (_, state) => (
+                        state.recentProvider,
+                        state.codexAccounts,
+                        state.codexActiveAccount,
+                        state.codexAccountBusy,
+                        state.codexAccountRefreshRevision,
+                        state.codexManualResetBusy,
+                        state.codexAccountStatus,
+                        state.codexAccountError,
+                        state.museAccounts,
+                        state.museActiveAccount,
+                        state.museAccountBusy,
+                        state.museAccountRefreshRevision,
+                        state.museManualResetAt,
+                        state.museAccountStatus,
+                        state.museAccountError,
+                        state.zcodeAccounts,
+                        state.zcodeAccountBusy,
+                        state.zcodeAccountRefreshRevision,
+                        state.zcodeAccountStatus,
+                        state.zcodeAccountError,
+                        state.busy,
+                      ),
+                      builder: (context, _, _) =>
+                          state.recentProvider == SessionProvider.muse
+                          ? _buildMuseAccountSection(context, state)
+                          : state.recentProvider == SessionProvider.zcode
+                          ? _buildZcodeAccountSection(context, state)
+                          : _buildCodexAccountSection(context, state),
+                    ),
+                    builder: (context, _, accounts) => _buildRecentContexts(
+                      context,
+                      state,
+                      accountSection: accounts!,
+                    ),
+                  ),
+                ),
                 const SliverToBoxAdapter(child: SizedBox(height: 16)),
               ],
             ),
           ),
-        ],
-      ),
+          ),
+        ),
+        // Gutter outside the panel frame where the scrollbar thumb lives.
+        const SizedBox(width: 13),
+      ],
+    );
+  }
+
+  Widget _buildSessionSliver(BuildContext context, AppState state) {
+    final filteredSessionIndices = state.filteredSessionIndices;
+    if (state.hasFilter && filteredSessionIndices.isEmpty) {
+      return const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: Text('No matching contexts.'),
+        ),
+      );
+    }
+    if (state.items.isEmpty) {
+      return const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: Text(
+            'No items yet. Add a session entry or a group, then drag rows into place and save.',
+          ),
+        ),
+      );
+    }
+    if (state.hasFilter) {
+      return SliverList(
+        delegate: SliverChildBuilderDelegate((context, filteredIndex) {
+          final actualIndex = filteredSessionIndices[filteredIndex];
+          return _buildSessionCard(
+            context,
+            state,
+            state.items[actualIndex],
+            actualIndex,
+            forceUngrouped: true,
+            showDragHandle: false,
+          );
+        }, childCount: filteredSessionIndices.length),
+      );
+    }
+    return SliverReorderableList(
+      itemCount: state.items.length,
+      onReorderItem: state.busy
+          ? (_, _) {}
+          : (oldIndex, adjustedIndex) {
+              final legacyIndex = adjustedIndex >= oldIndex
+                  ? adjustedIndex + 1
+                  : adjustedIndex;
+              state.reorderItems(oldIndex, legacyIndex);
+            },
+      itemBuilder: (context, index) =>
+          _buildItem(context, state, state.items[index], index),
     );
   }
 
@@ -3554,6 +4546,8 @@ class HomeScreen extends StatelessWidget {
                                   'Use /fork command inside Qwen Code.',
                                 SessionProvider.opencode =>
                                   'Use /fork command inside OpenCode.',
+                                SessionProvider.muse =>
+                                  'Fork command unavailable for Muse.',
                                 _ => 'Fork command unavailable.',
                               },
                         AnimatedOpacity(
@@ -3668,7 +4662,7 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
+    final state = context.read<AppState>();
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -3695,16 +4689,24 @@ class HomeScreen extends StatelessWidget {
           ),
         ),
         actions: [
-          FilledButton.tonalIcon(
-            onPressed: state.busy ? null : () => _addSession(context, state),
-            icon: const Icon(Icons.add_link_rounded, size: 17),
-            label: const Text('Add Entry'),
-          ),
-          const SizedBox(width: 6),
-          TextButton.icon(
-            onPressed: state.busy ? null : () => _addGroup(context, state),
-            icon: const Icon(Icons.create_new_folder_outlined, size: 17),
-            label: const Text('Add Group'),
+          Selector<AppState, bool>(
+            selector: (_, state) => state.busy,
+            builder: (context, busy, _) => Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: busy ? null : () => _addSession(context, state),
+                  icon: const Icon(Icons.add_link_rounded, size: 17),
+                  label: const Text('Add Entry'),
+                ),
+                const SizedBox(width: 6),
+                TextButton.icon(
+                  onPressed: busy ? null : () => _addGroup(context, state),
+                  icon: const Icon(Icons.create_new_folder_outlined, size: 17),
+                  label: const Text('Add Group'),
+                ),
+              ],
+            ),
           ),
           _tooltip(
             'Settings',
@@ -3728,8 +4730,16 @@ class HomeScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _buildWarnings(context, state),
-              Expanded(child: _buildContextPanel(context, state)),
+              Selector<AppState, Object>(
+                selector: (_, state) => (state.lastError, state.warnings),
+                builder: (context, _, _) => _buildWarnings(context, state),
+              ),
+              Expanded(
+                child: _PanelScrollbar(
+                  builder: (controller) =>
+                      _buildContextPanel(context, state, controller),
+                ),
+              ),
             ],
           ),
         ),
@@ -3750,6 +4760,16 @@ class HomeScreen extends StatelessWidget {
       return scheme.brightness == Brightness.dark
           ? const Color(0xFFD7A8FF)
           : const Color(0xFF7A3EAA);
+    }
+    if (provider == SessionProvider.muse) {
+      return scheme.brightness == Brightness.dark
+          ? const Color(0xFF8EC07C)
+          : const Color(0xFF427B58);
+    }
+    if (provider == SessionProvider.zcode) {
+      return scheme.brightness == Brightness.dark
+          ? const Color(0xFF7DA6E0)
+          : const Color(0xFF2E5FA3);
     }
     return scheme.brightness == Brightness.dark
         ? const Color(0xFFFFB15C)

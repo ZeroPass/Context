@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::signals::{
-    ClearCodexManualReset, DeleteCodexAccount, InitApp, LoadCodexAccounts, LoadConfig, OpFinished,
+    ClearCodexManualReset, DeleteCodexAccount, InitApp, LoadCodexAccounts, LoadConfig,
+    LoadMuseAccounts, LoadZcodeAccounts, OpFinished,
     RefreshRecent, RenameCodexAccount, SaveCodexAccount, SaveConfig, SetCodexManualReset,
     SetThemeSeed, SwitchCodexAccount, UiState,
 };
@@ -35,6 +36,8 @@ const PROVIDER_CODEX: &str = "codex";
 const PROVIDER_KIMI: &str = "kimi";
 const PROVIDER_OPENCODE: &str = "opencode";
 const PROVIDER_QWEN: &str = "qwen";
+const PROVIDER_MUSE: &str = "muse";
+const PROVIDER_ZCODE: &str = "zcode";
 const RECENT_LIMIT: usize = 3;
 const RECENT_CANDIDATE_LIMIT: usize = RECENT_LIMIT * 4;
 const CODEX_ACCOUNTS_DIR: &str = "context-accounts";
@@ -47,6 +50,44 @@ const CODEX_USAGE_CREDENTIAL_ERROR: &str =
 const CODEX_USAGE_MAX_BODY_BYTES: usize = 512 * 1024;
 const CODEX_USAGE_CONNECT_TIMEOUT_SECONDS: u64 = 5;
 const CODEX_USAGE_TIMEOUT_SECONDS: u64 = 12;
+const MUSE_USAGE_CONNECT_TIMEOUT_SECONDS: u64 = 5;
+const MUSE_USAGE_TIMEOUT_SECONDS: u64 = 45;
+const MUSE_USAGE_MAX_BODY_BYTES: usize = 512 * 1024;
+const MUSE_USAGE_URL_PATH: &str = "/responses";
+const MUSE_USAGE_MODEL: &str = "muse-spark-1.3";
+const MUSE_USAGE_PROMPT: &str = "Reply with exactly: ok";
+// POST body carries no secrets, so it is passed via argv; the Bearer key
+// always travels through curl's stdin config, never the argument list.
+const MUSE_USAGE_ERROR: &str = "Usage currently unavailable (network or parse failure).";
+const MUSE_USAGE_CREDENTIAL_ERROR: &str =
+    "Usage currently unavailable: Muse credentials rejected (HTTP 401/403). Run `muse login` again.";
+const CODEX_USAGE_MAX_CONCURRENT_READS: usize = 3;
+// ZCode keeps per-request usage rows in its local sqlite database. The weekly
+// pace is computed on the Dart side (local timezone anchor), so Rust ships raw
+// request samples for a window slightly wider than a week, bounded to keep the
+// UI-state JSON small.
+// ZCode's API exposes a usage/quota endpoint for coding-plan API keys; the
+// desktop app reads the same data for its sidebar ("N% used · Resets <date>").
+// The key lives in plaintext in ~/.zcode/v2/config.json under
+// provider."builtin:zai-coding-plan".options.apiKey. The response carries both
+// the 5-hour and the weekly credit limit; the weekly one (furthest reset) is
+// what the sidebar displays and what the card shows, mirroring Codex.
+const ZCODE_QUOTA_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
+const ZCODE_QUOTA_CONNECT_TIMEOUT_SECONDS: u64 = 5;
+const ZCODE_QUOTA_TIMEOUT_SECONDS: u64 = 12;
+const ZCODE_QUOTA_MAX_BODY_BYTES: usize = 512 * 1024;
+const ZCODE_QUOTA_ERROR: &str = "Usage unavailable (network or parse failure).";
+const ZCODE_QUOTA_CREDENTIAL_ERROR: &str =
+    "Usage unavailable: API rejected the ZCode credentials (HTTP 401/403).";
+// Fallback measurement when the quota endpoint is unreachable: count distinct
+// user messages (parent_user_message_id) in the provider-style 5h window from
+// ZCode's local request log against the Lite plan's 120-prompts allowance.
+const ZCODE_WINDOW_SECONDS: i64 = 5 * 60 * 60;
+const ZCODE_PROMPT_QUOTA: i64 = 120;
+const ZCODE_USAGE_LOOKBACK_MS: i64 = 48 * 60 * 60 * 1000;
+const ZCODE_USAGE_ROW_LIMIT: usize = 50000;
+const ZCODE_STATE_NOT_FOUND_ERROR: &str =
+    "ZCode state not found (no ~/.zcode cli database or v2 config).";
 // Only local metadata transactions take this lock, never token or usage requests.
 static CODEX_METADATA_LOCK: Mutex<()> = Mutex::new(());
 const CODEX_WEEKLY_WINDOW_MIN_SECONDS: i64 = 6 * 24 * 60 * 60;
@@ -190,6 +231,8 @@ struct LoadedRecent {
     kimi: Vec<RecentContext>,
     opencode: Vec<RecentContext>,
     qwen: Vec<RecentContext>,
+    muse: Vec<RecentContext>,
+    zcode: Vec<RecentContext>,
     status: String,
 }
 
@@ -204,6 +247,53 @@ struct CodexAccountsRefreshed {
     generation: u64,
     manual_reset_revision: u64,
     result: Result<LoadedCodexAccounts>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct MuseAccountMetadata {
+    slot: String,
+    name: String,
+    updated_at: Option<i64>,
+    tier: Option<String>,
+    weekly_used_percent: Option<f64>,
+    weekly_reset_at: Option<i64>,
+    window_used_percent: Option<f64>,
+    window_reset_at: Option<i64>,
+    window_duration_mins: Option<i64>,
+    muse_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct LoadedMuseAccounts {
+    accounts: Vec<MuseAccountMetadata>,
+    active_slot: Option<String>,
+}
+
+struct MuseAccountsRefreshed {
+    generation: u64,
+    result: Result<LoadedMuseAccounts>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ZcodeAccountMetadata {
+    slot: String,
+    name: String,
+    updated_at: Option<i64>,
+    tier: Option<String>,
+    used_percent: Option<f64>,
+    reset_at: Option<i64>,
+    window_seconds: Option<i64>,
+    zcode_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct LoadedZcodeAccounts {
+    accounts: Vec<ZcodeAccountMetadata>,
+}
+
+struct ZcodeAccountsRefreshed {
+    generation: u64,
+    result: Result<LoadedZcodeAccounts>,
 }
 
 struct RecentRefreshed {
@@ -226,6 +316,8 @@ struct ContextActor {
     recent_kimi: Vec<RecentContext>,
     recent_opencode: Vec<RecentContext>,
     recent_qwen: Vec<RecentContext>,
+    recent_muse: Vec<RecentContext>,
+    recent_zcode: Vec<RecentContext>,
     recent_busy: bool,
     recent_status: Option<String>,
     recent_requests: Vec<u64>,
@@ -238,6 +330,19 @@ struct ContextActor {
     codex_account_requests: Vec<u64>,
     codex_manual_reset_at: Option<i64>,
     codex_manual_reset_revision: u64,
+    muse_accounts: Vec<MuseAccountMetadata>,
+    muse_active_account: Option<String>,
+    muse_account_busy: bool,
+    muse_account_status: Option<String>,
+    muse_account_error: Option<String>,
+    muse_account_refreshing: bool,
+    muse_account_requests: Vec<u64>,
+    zcode_accounts: Vec<ZcodeAccountMetadata>,
+    zcode_account_busy: bool,
+    zcode_account_status: Option<String>,
+    zcode_account_error: Option<String>,
+    zcode_account_refreshing: bool,
+    zcode_account_requests: Vec<u64>,
     _owned_tasks: JoinSet<()>,
 }
 
@@ -253,6 +358,12 @@ impl ContextActor {
         ));
         owned.spawn(Self::forward_dart_signal::<SaveConfig>(self_addr.clone()));
         owned.spawn(Self::forward_dart_signal::<LoadCodexAccounts>(
+            self_addr.clone(),
+        ));
+        owned.spawn(Self::forward_dart_signal::<LoadMuseAccounts>(
+            self_addr.clone(),
+        ));
+        owned.spawn(Self::forward_dart_signal::<LoadZcodeAccounts>(
             self_addr.clone(),
         ));
         owned.spawn(Self::forward_dart_signal::<SetCodexManualReset>(
@@ -290,6 +401,8 @@ impl ContextActor {
             recent_kimi: Vec::new(),
             recent_opencode: Vec::new(),
             recent_qwen: Vec::new(),
+            recent_muse: Vec::new(),
+            recent_zcode: Vec::new(),
             recent_busy: false,
             recent_status: Some("Recent sessions not loaded.".to_owned()),
             recent_requests: Vec::new(),
@@ -302,6 +415,19 @@ impl ContextActor {
             codex_account_requests: Vec::new(),
             codex_manual_reset_at: None,
             codex_manual_reset_revision: 0,
+            muse_accounts: Vec::new(),
+            muse_active_account: None,
+            muse_account_busy: false,
+            muse_account_status: Some("Muse accounts not loaded.".to_owned()),
+            muse_account_error: None,
+            muse_account_refreshing: false,
+            muse_account_requests: Vec::new(),
+            zcode_accounts: Vec::new(),
+            zcode_account_busy: false,
+            zcode_account_status: Some("ZCode usage not loaded.".to_owned()),
+            zcode_account_error: None,
+            zcode_account_refreshing: false,
+            zcode_account_requests: Vec::new(),
             _owned_tasks: owned,
         }
     }
@@ -329,8 +455,16 @@ impl ContextActor {
             serde_json::to_string(&self.recent_opencode).unwrap_or_else(|_| "[]".to_owned());
         let recent_qwen_json =
             serde_json::to_string(&self.recent_qwen).unwrap_or_else(|_| "[]".to_owned());
+        let recent_muse_json =
+            serde_json::to_string(&self.recent_muse).unwrap_or_else(|_| "[]".to_owned());
+        let recent_zcode_json =
+            serde_json::to_string(&self.recent_zcode).unwrap_or_else(|_| "[]".to_owned());
         let codex_accounts_json =
             serde_json::to_string(&self.codex_accounts).unwrap_or_else(|_| "[]".to_owned());
+        let muse_accounts_json =
+            serde_json::to_string(&self.muse_accounts).unwrap_or_else(|_| "[]".to_owned());
+        let zcode_accounts_json =
+            serde_json::to_string(&self.zcode_accounts).unwrap_or_else(|_| "[]".to_owned());
 
         UiState {
             theme_seed_color_value: self.theme_seed_color_value,
@@ -344,6 +478,8 @@ impl ContextActor {
             recent_kimi_json,
             recent_opencode_json,
             recent_qwen_json,
+            recent_muse_json,
+            recent_zcode_json,
             recent_busy: self.recent_busy,
             recent_status: self.recent_status.clone(),
             codex_accounts_json,
@@ -351,6 +487,15 @@ impl ContextActor {
             codex_account_busy: self.codex_account_busy,
             codex_account_status: self.codex_account_status.clone(),
             codex_account_error: self.codex_account_error.clone(),
+            muse_accounts_json,
+            muse_active_account: self.muse_active_account.clone(),
+            muse_account_busy: self.muse_account_busy,
+            muse_account_status: self.muse_account_status.clone(),
+            muse_account_error: self.muse_account_error.clone(),
+            zcode_accounts_json,
+            zcode_account_busy: self.zcode_account_busy,
+            zcode_account_status: self.zcode_account_status.clone(),
+            zcode_account_error: self.zcode_account_error.clone(),
         }
         .send_signal_to_dart();
     }
@@ -374,6 +519,8 @@ impl ContextActor {
             self.path_generation += 1;
             let requests = std::mem::take(&mut self.codex_account_requests)
                 .into_iter()
+                .chain(std::mem::take(&mut self.muse_account_requests))
+                .chain(std::mem::take(&mut self.zcode_account_requests))
                 .chain(std::mem::take(&mut self.recent_requests));
             for request_id in requests {
                 self.finish_op(
@@ -386,12 +533,21 @@ impl ContextActor {
             self.recent_kimi.clear();
             self.recent_opencode.clear();
             self.recent_qwen.clear();
+            self.recent_muse.clear();
+            self.recent_zcode.clear();
             self.recent_status = Some("Recent sessions not loaded.".to_owned());
             self.codex_accounts.clear();
             self.codex_active_account = None;
             self.codex_account_status = Some("Codex accounts not loaded.".to_owned());
             self.codex_account_error = None;
             self.codex_manual_reset_at = None;
+            self.muse_accounts.clear();
+            self.muse_active_account = None;
+            self.muse_account_status = Some("Muse accounts not loaded.".to_owned());
+            self.muse_account_error = None;
+            self.zcode_accounts.clear();
+            self.zcode_account_status = Some("ZCode usage not loaded.".to_owned());
+            self.zcode_account_error = None;
         }
         self.sessions_markdown_path = next_path;
         changed
@@ -502,6 +658,165 @@ impl ContextActor {
 
         self.emit_state();
         for request_id in std::mem::take(&mut self.codex_account_requests) {
+            self.finish_op(
+                request_id,
+                outcome.is_ok(),
+                outcome.as_ref().err().map(ToString::to_string),
+            );
+        }
+    }
+
+    fn load_muse_accounts(
+        &mut self,
+        path_override: Option<String>,
+        request_id: u64,
+    ) -> Result<()> {
+        if self.muse_account_busy && !self.muse_account_refreshing {
+            return Err(anyhow!("Muse account operation is already in progress."));
+        }
+
+        if let Some(path) = path_override {
+            self.set_sessions_markdown_path(path);
+        }
+
+        if request_id != 0 {
+            self.muse_account_requests.push(request_id);
+        }
+        if self.muse_account_refreshing {
+            return Ok(());
+        }
+
+        self.muse_account_refreshing = true;
+        self.muse_account_busy = true;
+        self.muse_account_error = None;
+        self.muse_account_status = Some("Loading Muse usage...".to_owned());
+        self.emit_state();
+
+        let path = self.sessions_markdown_path.clone();
+        let generation = self.path_generation;
+        let mut addr = self.self_addr.clone();
+        self.reap_tasks();
+        self._owned_tasks.spawn(async move {
+            let result = spawn_blocking(move || load_muse_accounts_for_markdown(&path))
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("Could not load Muse usage.")));
+            let _ = addr
+                .notify(MuseAccountsRefreshed { generation, result })
+                .await;
+        });
+        Ok(())
+    }
+
+    fn complete_muse_refresh(&mut self, msg: MuseAccountsRefreshed) {
+        self.muse_account_refreshing = false;
+        self.muse_account_busy = false;
+        if msg.generation != self.path_generation {
+            let _ = self.load_muse_accounts(None, 0);
+            return;
+        }
+        let outcome = match msg.result {
+            Ok(loaded) => {
+                self.muse_accounts = loaded.accounts;
+                self.muse_active_account = loaded.active_slot;
+                self.muse_account_error = self
+                    .muse_accounts
+                    .first()
+                    .and_then(|account| account.muse_error.clone());
+                self.muse_account_status = if self.muse_account_error.is_some() {
+                    Some("Could not load Muse usage.".to_owned())
+                } else {
+                    Some("Muse usage updated.".to_owned())
+                };
+                Ok(())
+            }
+            Err(error) => {
+                self.muse_account_error = Some(error.to_string());
+                self.muse_account_status = Some("Could not load Muse usage.".to_owned());
+                Err(error)
+            }
+        };
+
+        self.emit_state();
+        for request_id in std::mem::take(&mut self.muse_account_requests) {
+            self.finish_op(
+                request_id,
+                outcome.is_ok(),
+                outcome.as_ref().err().map(ToString::to_string),
+            );
+        }
+    }
+
+    fn load_zcode_accounts(
+        &mut self,
+        path_override: Option<String>,
+        request_id: u64,
+    ) -> Result<()> {
+        if self.zcode_account_busy && !self.zcode_account_refreshing {
+            return Err(anyhow!("ZCode account operation is already in progress."));
+        }
+
+        if let Some(path) = path_override {
+            self.set_sessions_markdown_path(path);
+        }
+
+        if request_id != 0 {
+            self.zcode_account_requests.push(request_id);
+        }
+        if self.zcode_account_refreshing {
+            return Ok(());
+        }
+
+        self.zcode_account_refreshing = true;
+        self.zcode_account_busy = true;
+        self.zcode_account_error = None;
+        self.zcode_account_status = Some("Loading ZCode usage...".to_owned());
+        self.emit_state();
+
+        let path = self.sessions_markdown_path.clone();
+        let generation = self.path_generation;
+        let mut addr = self.self_addr.clone();
+        self.reap_tasks();
+        self._owned_tasks.spawn(async move {
+            let result = spawn_blocking(move || load_zcode_accounts_for_markdown(&path))
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("Could not load ZCode usage.")));
+            let _ = addr
+                .notify(ZcodeAccountsRefreshed { generation, result })
+                .await;
+        });
+        Ok(())
+    }
+
+    fn complete_zcode_refresh(&mut self, msg: ZcodeAccountsRefreshed) {
+        self.zcode_account_refreshing = false;
+        self.zcode_account_busy = false;
+        if msg.generation != self.path_generation {
+            let _ = self.load_zcode_accounts(None, 0);
+            return;
+        }
+        let outcome = match msg.result {
+            Ok(loaded) => {
+                self.zcode_accounts = loaded.accounts;
+                self.zcode_account_error = self
+                    .zcode_accounts
+                    .first()
+                    .and_then(|account| account.zcode_error.clone());
+                self.zcode_account_status = if self.zcode_account_error.is_some() {
+                    Some("Could not load ZCode usage.".to_owned())
+                } else {
+                    Some("ZCode usage updated.".to_owned())
+                };
+                Ok(())
+            }
+            Err(error) => {
+                self.zcode_account_error = Some(error.to_string());
+                self.zcode_account_status = Some("Could not load ZCode usage.".to_owned());
+                Err(error)
+            }
+        };
+
+        self.emit_state();
+        for request_id in std::mem::take(&mut self.zcode_account_requests) {
             self.finish_op(
                 request_id,
                 outcome.is_ok(),
@@ -871,6 +1186,8 @@ impl ContextActor {
                 self.recent_kimi = loaded.kimi;
                 self.recent_opencode = loaded.opencode;
                 self.recent_qwen = loaded.qwen;
+                self.recent_muse = loaded.muse;
+                self.recent_zcode = loaded.zcode;
                 self.recent_status = Some(loaded.status);
                 Ok(())
             }
@@ -998,6 +1315,42 @@ impl Notifiable<LoadCodexAccounts> for ContextActor {
 impl Notifiable<CodexAccountsRefreshed> for ContextActor {
     async fn notify(&mut self, msg: CodexAccountsRefreshed, _: &Context<Self>) {
         self.complete_codex_refresh(msg);
+    }
+}
+
+#[async_trait]
+impl Notifiable<LoadMuseAccounts> for ContextActor {
+    async fn notify(&mut self, msg: LoadMuseAccounts, _: &Context<Self>) {
+        if let Err(error) =
+            self.load_muse_accounts(Some(msg.sessions_markdown_path), msg.request_id)
+        {
+            self.finish_op(msg.request_id, false, Some(error.to_string()));
+        }
+    }
+}
+
+#[async_trait]
+impl Notifiable<MuseAccountsRefreshed> for ContextActor {
+    async fn notify(&mut self, msg: MuseAccountsRefreshed, _: &Context<Self>) {
+        self.complete_muse_refresh(msg);
+    }
+}
+
+#[async_trait]
+impl Notifiable<LoadZcodeAccounts> for ContextActor {
+    async fn notify(&mut self, msg: LoadZcodeAccounts, _: &Context<Self>) {
+        if let Err(error) =
+            self.load_zcode_accounts(Some(msg.sessions_markdown_path), msg.request_id)
+        {
+            self.finish_op(msg.request_id, false, Some(error.to_string()));
+        }
+    }
+}
+
+#[async_trait]
+impl Notifiable<ZcodeAccountsRefreshed> for ContextActor {
+    async fn notify(&mut self, msg: ZcodeAccountsRefreshed, _: &Context<Self>) {
+        self.complete_zcode_refresh(msg);
     }
 }
 
@@ -1136,6 +1489,8 @@ fn load_recent_file(path_str: &str) -> Result<LoadedRecent> {
             kimi: Vec::new(),
             opencode: Vec::new(),
             qwen: Vec::new(),
+            muse: Vec::new(),
+            zcode: Vec::new(),
             status: "Pick a sessions markdown file first.".to_owned(),
         });
     }
@@ -1168,13 +1523,29 @@ fn load_recent_file(path_str: &str) -> Result<LoadedRecent> {
         }
         Err(error) => (Vec::new(), format!("Qwen unavailable: {error}")),
     };
+    let (muse, muse_status) = match load_recent_muse_contexts(path_str) {
+        Ok(items) => {
+            let count = items.len();
+            (items, format!("Muse {count}"))
+        }
+        Err(error) => (Vec::new(), format!("Muse unavailable: {error}")),
+    };
+    let (zcode, zcode_status) = match load_recent_zcode_contexts(path_str) {
+        Ok(items) => {
+            let count = items.len();
+            (items, format!("ZCode {count}"))
+        }
+        Err(error) => (Vec::new(), format!("ZCode unavailable: {error}")),
+    };
 
     Ok(LoadedRecent {
         codex,
         kimi,
         opencode,
         qwen,
-        status: format!("{codex_status}  /  {kimi_status}  /  {opencode_status}  /  {qwen_status}"),
+        muse,
+        zcode,
+        status: format!("{codex_status}  /  {kimi_status}  /  {opencode_status}  /  {qwen_status}  /  {muse_status}  /  {zcode_status}"),
     })
 }
 
@@ -1211,6 +1582,1075 @@ fn load_recent_qwen_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> 
         .filter(|item| seen.insert(item.id.clone()))
         .take(RECENT_LIMIT)
         .collect())
+}
+
+fn infer_wsl_home_root(markdown_path: &str) -> Option<PathBuf> {
+    // The app runs on Windows while the user's CLIs live in WSL. When the
+    // picked markdown file is a WSL UNC path, derive the Linux home from it:
+    // \\server\distro\home\<user>\... -> \\server\distro\home\<user>
+    let normalized = markdown_path.replace('/', "\\");
+    let mut parts = normalized.split('\\').filter(|part| !part.is_empty());
+    let server = parts.next()?;
+    let distro = parts.next()?;
+    if parts.next()? != "home" {
+        return None;
+    }
+    let user = parts.next()?;
+    if server.is_empty() || distro.is_empty() || user.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(format!(
+        "\\\\{server}\\{distro}\\home\\{user}"
+    )))
+}
+
+fn muse_home_roots(markdown_path: &str) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    // Prefer the WSL home when the markdown file itself lives in WSL: that is
+    // where the user's CLIs keep their state, invisible to USERPROFILE.
+    if let Some(wsl_root) = infer_wsl_home_root(markdown_path) {
+        push_unique_path(&mut roots, wsl_root);
+    }
+    if let Some(home_root) = infer_user_home_root(markdown_path) {
+        push_unique_path(&mut roots, home_root);
+    }
+    roots
+}
+
+fn muse_auth_path(markdown_path: &str) -> Option<PathBuf> {
+    muse_home_roots(markdown_path)
+        .into_iter()
+        .map(|home| home.join(".config").join("muse").join("auth.json"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn zcode_home_roots(markdown_path: &str) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    // ZCode can run natively on Windows and inside WSL; both installs keep
+    // state under <home>/.zcode. Scan the native profile first, then the WSL
+    // home implied by the markdown path, so both session stores are visible.
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        let profile = PathBuf::from(profile);
+        if !profile.as_os_str().is_empty() {
+            push_unique_path(&mut roots, profile.join(".zcode"));
+        }
+    }
+    if let Some(wsl_root) = infer_wsl_home_root(markdown_path) {
+        push_unique_path(&mut roots, wsl_root.join(".zcode"));
+    }
+    if roots.is_empty() {
+        if let Some(home_root) = infer_user_home_root(markdown_path) {
+            push_unique_path(&mut roots, home_root.join(".zcode"));
+        }
+    }
+    roots
+}
+
+fn zcode_db_path_for_root(root: &Path) -> PathBuf {
+    root.join("cli").join("db").join("db.sqlite")
+}
+
+fn load_recent_zcode_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
+    let mut recent = Vec::<RecentContext>::new();
+    for root in zcode_home_roots(markdown_path) {
+        let db_path = zcode_db_path_for_root(&root);
+        if !db_path.is_file() {
+            continue;
+        }
+        let items = load_recent_zcode_database(&db_path).with_context(|| {
+            format!("Failed to read ZCode sessions from {}", db_path.display())
+        })?;
+        recent.extend(items);
+    }
+
+    recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    let mut seen = std::collections::HashSet::new();
+    Ok(recent
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .take(RECENT_LIMIT)
+        .collect())
+}
+
+fn load_recent_zcode_database(db_path: &PathBuf) -> Result<Vec<RecentContext>> {
+    match query_recent_zcode_contexts(db_path) {
+        Ok(items) => Ok(items),
+        Err(error) if is_locked_sqlite_error(&error) => {
+            let snapshot = snapshot_sqlite_database(db_path)?;
+            let result = query_recent_zcode_contexts(&snapshot)
+                .with_context(|| format!("Failed to read snapshot of {}", db_path.display()));
+            let _ = remove_snapshot_database(&snapshot);
+            result
+        }
+        Err(error) => Err(error).with_context(|| format!("Failed to read {}", db_path.display())),
+    }
+}
+
+fn query_recent_zcode_contexts(db_path: &PathBuf) -> rusqlite::Result<Vec<RecentContext>> {
+    let connection = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let _ = connection.busy_timeout(Duration::from_millis(250));
+    let query = format!(
+        "SELECT id, title, directory, time_updated
+         FROM session
+         WHERE time_archived IS NULL
+           AND TRIM(COALESCE(parent_id, '')) = ''
+           AND COALESCE(task_type, '') != 'subagent_child'
+         ORDER BY time_updated DESC
+         LIMIT {RECENT_CANDIDATE_LIMIT}"
+    );
+    let mut statement = connection.prepare(&query)?;
+
+    let rows = statement.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let title: String = row.get(1)?;
+        let directory: Option<String> = row.get(2)?;
+        Ok(RecentContext {
+            provider: PROVIDER_ZCODE.to_owned(),
+            id,
+            title,
+            updated_at: normalize_epoch_millis(row.get(3)?),
+            forked_from_id: None,
+            work_dir: directory
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+        })
+    })?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(items)
+}
+
+fn read_zcode_config_providers(root: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let config_path = root.join("v2").join("config.json");
+    let bytes = fs::read(&config_path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("provider")?.as_object().cloned()
+}
+
+fn read_zcode_provider_names(
+    root: &Path,
+    names: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Some(providers) = read_zcode_config_providers(root) else {
+        return;
+    };
+    for (provider_id, provider) in providers {
+        let Some(name) = provider.get("name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() {
+            names.insert(provider_id, name.to_owned());
+        }
+    }
+}
+
+fn read_zcode_enabled_providers(root: &Path, enabled: &mut Vec<String>) {
+    let Some(providers) = read_zcode_config_providers(root) else {
+        return;
+    };
+    for (provider_id, provider) in providers {
+        if provider.get("enabled").and_then(|value| value.as_bool()) == Some(true) {
+            enabled.push(provider_id);
+        }
+    }
+}
+
+fn zcode_provider_display_name(
+    slot: &str,
+    names: &std::collections::BTreeMap<String, String>,
+) -> String {
+    if let Some(name) = names.get(slot) {
+        return name.clone();
+    }
+    let trimmed = slot.trim();
+    for prefix in ["builtin:", "account:"] {
+        if let Some(stripped) = trimmed.strip_prefix(prefix)
+            && !stripped.is_empty()
+        {
+            return stripped.to_owned();
+        }
+    }
+    if trimmed.is_empty() {
+        "ZCode".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn zcode_unavailable_account(error: &str) -> ZcodeAccountMetadata {
+    ZcodeAccountMetadata {
+        slot: "default".to_owned(),
+        name: "ZCode".to_owned(),
+        updated_at: unix_epoch_millis().ok(),
+        tier: None,
+        used_percent: None,
+        reset_at: None,
+        window_seconds: None,
+        zcode_error: Some(error.to_owned()),
+    }
+}
+
+fn load_zcode_accounts_for_markdown(markdown_path: &str) -> Result<LoadedZcodeAccounts> {
+    let roots = zcode_home_roots(markdown_path);
+    if roots.is_empty() {
+        return Ok(LoadedZcodeAccounts {
+            accounts: vec![zcode_unavailable_account(ZCODE_STATE_NOT_FOUND_ERROR)],
+        });
+    }
+
+    let mut provider_names = std::collections::BTreeMap::new();
+    let mut enabled_providers = Vec::new();
+    let mut found_any_state = false;
+    for root in &roots {
+        if root.join("v2").join("config.json").is_file()
+            || zcode_db_path_for_root(root).is_file()
+        {
+            found_any_state = true;
+        }
+        read_zcode_provider_names(root, &mut provider_names);
+        read_zcode_enabled_providers(root, &mut enabled_providers);
+    }
+    if !found_any_state {
+        return Ok(LoadedZcodeAccounts {
+            accounts: vec![zcode_unavailable_account(ZCODE_STATE_NOT_FOUND_ERROR)],
+        });
+    }
+
+    let now_ms = unix_epoch_millis().unwrap_or_default();
+    let since_ms = now_ms.saturating_sub(ZCODE_USAGE_LOOKBACK_MS);
+    let mut rows: Vec<(i64, String)> = Vec::new();
+    let mut latest_request: Option<(i64, String)> = None;
+    for root in &roots {
+        let db_path = zcode_db_path_for_root(root);
+        if !db_path.is_file() {
+            continue;
+        }
+        // An unreadable install (for example a locked database on a slow WSL
+        // link) must not hide usage recorded by the other install.
+        let Ok((db_rows, db_latest)) = load_zcode_usage_rows(&db_path, since_ms) else {
+            continue;
+        };
+        if db_latest.is_some()
+            && match &latest_request {
+                Some((latest_at, _)) => db_latest
+                    .as_ref()
+                    .is_some_and(|(at, _)| at > latest_at),
+                None => true,
+            }
+        {
+            latest_request = db_latest;
+        }
+        rows.extend(db_rows);
+    }
+
+    // Primary source: the provider's own quota endpoint (same data the ZCode
+    // sidebar shows). Local request-log measurement is the offline fallback.
+    let (used_percent, reset_at, window_seconds, zcode_error) =
+        match zcode_quota_api_key(&roots) {
+            Some(api_key) => match fetch_zcode_quota(&api_key) {
+                Ok(usage) => (
+                    Some(usage.used_percent),
+                    Some(usage.reset_at_ms),
+                    Some(usage.window_seconds),
+                    None,
+                ),
+                Err(error) => {
+                    let fallback = compute_zcode_window_usage(&mut rows, now_ms);
+                    if fallback.0 > 0.0 {
+                        (
+                            Some(fallback.0),
+                            Some(fallback.1),
+                            Some(fallback.2),
+                            None,
+                        )
+                    } else {
+                        (None, None, None, Some(error.message().to_owned()))
+                    }
+                }
+            },
+            None => {
+                let fallback = compute_zcode_window_usage(&mut rows, now_ms);
+                if fallback.0 > 0.0 {
+                    (
+                        Some(fallback.0),
+                        Some(fallback.1),
+                        Some(fallback.2),
+                        None,
+                    )
+                } else {
+                    (
+                        None,
+                        None,
+                        None,
+                        Some("Usage unavailable: no ZCode API key in config.".to_owned()),
+                    )
+                }
+            }
+        };
+
+    let raw_slot = latest_request
+        .map(|(_, provider_id)| provider_id)
+        .or_else(|| enabled_providers.first().cloned())
+        .unwrap_or_else(|| "default".to_owned());
+    let name = zcode_provider_display_name(&raw_slot, &provider_names);
+    let slot = zcode_provider_display_name(&raw_slot, &std::collections::BTreeMap::new());
+
+    Ok(LoadedZcodeAccounts {
+        accounts: vec![ZcodeAccountMetadata {
+            tier: Some(raw_slot),
+            slot,
+            name,
+            updated_at: unix_epoch_millis().ok(),
+            used_percent,
+            reset_at,
+            window_seconds,
+            zcode_error,
+        }],
+    })
+}
+
+/// Folds the request rows into the provider's window model: a window starts at
+/// the first request after the previous window's five hours elapse, and every
+/// request inside keeps it open. Returns the percent of the prompt quota used
+/// in the active window plus its reset instant; an expired or empty history
+/// reads as a fresh window.
+fn compute_zcode_window_usage(
+    rows: &mut [(i64, String)],
+    now_ms: i64,
+) -> (f64, i64, i64) {
+    let window_ms = ZCODE_WINDOW_SECONDS * 1000;
+    rows.sort_by_key(|(at, _)| *at);
+    let Some(&oldest) = rows.first().map(|(at, _)| at) else {
+        return (0.0, now_ms + window_ms, ZCODE_WINDOW_SECONDS);
+    };
+    let mut window_start = oldest;
+    for &(at, _) in rows.iter() {
+        if at >= window_start + window_ms {
+            window_start = at;
+        }
+    }
+
+    let window_end = window_start + window_ms;
+    if now_ms >= window_end {
+        return (0.0, now_ms + window_ms, ZCODE_WINDOW_SECONDS);
+    }
+
+    let mut prompts = std::collections::HashSet::new();
+    for &(at, ref identity) in rows.iter() {
+        if at >= window_start && at < window_end {
+            prompts.insert(identity);
+        }
+    }
+    let used_percent = (prompts.len() as f64 / ZCODE_PROMPT_QUOTA as f64 * 100.0).min(100.0);
+    (used_percent, window_end, ZCODE_WINDOW_SECONDS)
+}
+
+/// Reads the coding-plan API key ZCode stores in plaintext in
+/// ~/.zcode/v2/config.json. Prefers the enabled Z.ai coding-plan provider.
+fn zcode_quota_api_key(roots: &[PathBuf]) -> Option<String> {
+    fn priority(id: &str, enabled: bool) -> u8 {
+        let base = if id == "builtin:zai-coding-plan" {
+            0u8
+        } else if id.contains("zai") && id.contains("coding-plan") {
+            1
+        } else if id.contains("coding-plan") {
+            2
+        } else {
+            3
+        };
+        base * 2 + u8::from(!enabled)
+    }
+
+    for root in roots {
+        let config_path = root.join("v2").join("config.json");
+        let Ok(bytes) = fs::read(&config_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(providers) = value.get("provider").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let mut candidates: Vec<(u8, String, String)> = Vec::new();
+        for (id, provider) in providers {
+            let enabled = provider.get("enabled").and_then(|v| v.as_bool()) == Some(true);
+            let Some(key) = provider
+                .get("options")
+                .and_then(|options| options.get("apiKey"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+            else {
+                continue;
+            };
+            candidates.push((priority(id, enabled), id.clone(), key.to_owned()));
+        }
+        candidates.sort_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+        });
+        if let Some((_, _, key)) = candidates.into_iter().next() {
+            return Some(key);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ZcodeQuotaError {
+    Unavailable,
+    CredentialRejected,
+}
+
+impl ZcodeQuotaError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => ZCODE_QUOTA_ERROR,
+            Self::CredentialRejected => ZCODE_QUOTA_CREDENTIAL_ERROR,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ZcodeQuotaUsage {
+    used_percent: f64,
+    reset_at_ms: i64,
+    window_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ZcodeQuotaLimit {
+    percentage: f64,
+    next_reset_time_ms: i64,
+    window_seconds: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZcodeQuotaEnvelope {
+    #[serde(default)]
+    data: Option<ZcodeQuotaData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZcodeQuotaData {
+    #[serde(default)]
+    limits: Vec<ZcodeQuotaRawLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZcodeQuotaRawLimit {
+    #[serde(default)]
+    number: Option<f64>,
+    #[serde(default)]
+    unit: Option<f64>,
+    #[serde(default)]
+    percentage: Option<f64>,
+    #[serde(default, rename = "nextResetTime")]
+    next_reset_time: Option<i64>,
+}
+
+/// The endpoint reports one limit per rolling window (5-hour and weekly for
+/// coding plans). The weekly limit — the furthest reset — is the one ZCode's
+/// sidebar displays, so prefer it; its length is derived from unit/number.
+fn pick_zcode_quota_limit(limits: &[ZcodeQuotaRawLimit]) -> Option<ZcodeQuotaLimit> {
+    fn normalize(limit: &ZcodeQuotaRawLimit) -> Option<ZcodeQuotaLimit> {
+        let percentage = limit.percentage?;
+        let next_reset_time_ms = limit.next_reset_time?;
+        if !(0.0..=100.0).contains(&percentage) || next_reset_time_ms <= 0 {
+            return None;
+        }
+        let unit_seconds = match limit.unit {
+            Some(unit) if unit == 3.0 => 3_600.0,
+            Some(unit) if unit == 4.0 => 86_400.0,
+            Some(unit) if unit == 6.0 => 604_800.0,
+            _ => 604_800.0,
+        };
+        let number = limit.number.filter(|value| *value > 0.0).unwrap_or(1.0);
+        Some(ZcodeQuotaLimit {
+            percentage,
+            next_reset_time_ms,
+            window_seconds: (unit_seconds * number) as i64,
+        })
+    }
+
+    let normalized: Vec<ZcodeQuotaLimit> = limits.iter().filter_map(normalize).collect();
+    normalized
+        .iter()
+        .max_by_key(|limit| limit.next_reset_time_ms)
+        .cloned()
+        .or_else(|| normalized.first().cloned())
+}
+
+fn fetch_zcode_quota(api_key: &str) -> std::result::Result<ZcodeQuotaUsage, ZcodeQuotaError> {
+    let api_key = escape_curl_config_value(api_key).ok_or(ZcodeQuotaError::Unavailable)?;
+    let curl_config = format!(
+        "url = \"{ZCODE_QUOTA_URL}\"\nheader = \"Accept: application/json\"\nheader = \"Authorization: Bearer {api_key}\"\nconnect-timeout = {ZCODE_QUOTA_CONNECT_TIMEOUT_SECONDS}\nmax-time = {ZCODE_QUOTA_TIMEOUT_SECONDS}\n"
+    );
+
+    // The API key travels through curl's stdin config, never the argv list,
+    // matching how the Codex and Muse usage fetches handle credentials.
+    let mut command = Command::new("curl");
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
+        .args([
+            "-q",
+            "--silent",
+            "--proto",
+            "=https",
+            "--config",
+            "-",
+            "--output",
+            "-",
+            "--max-filesize",
+            "524288",
+            "--write-out",
+            "\n%{http_code}",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ZcodeQuotaError::Unavailable)?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or(ZcodeQuotaError::Unavailable)
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(curl_config.as_bytes())
+                .map_err(|_| ZcodeQuotaError::Unavailable)
+        });
+    if write_result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ZcodeQuotaError::Unavailable);
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|_| ZcodeQuotaError::Unavailable)?;
+    if !output.status.success() {
+        return Err(ZcodeQuotaError::Unavailable);
+    }
+    let newline = output
+        .stdout
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or(ZcodeQuotaError::Unavailable)?;
+    let status = std::str::from_utf8(&output.stdout[newline + 1..])
+        .map_err(|_| ZcodeQuotaError::Unavailable)?;
+    if status.len() != 3 || !status.chars().all(|character| character.is_ascii_digit()) {
+        return Err(ZcodeQuotaError::Unavailable);
+    }
+    let status = status
+        .parse::<u16>()
+        .map_err(|_| ZcodeQuotaError::Unavailable)?;
+    if !(200..300).contains(&status) {
+        return Err(if matches!(status, 401 | 403) {
+            ZcodeQuotaError::CredentialRejected
+        } else {
+            ZcodeQuotaError::Unavailable
+        });
+    }
+    let body = &output.stdout[..newline];
+    if body.len() > ZCODE_QUOTA_MAX_BODY_BYTES {
+        return Err(ZcodeQuotaError::Unavailable);
+    }
+    parse_zcode_quota_response(body).ok_or(ZcodeQuotaError::Unavailable)
+}
+
+fn parse_zcode_quota_response(body: &[u8]) -> Option<ZcodeQuotaUsage> {
+    let envelope: ZcodeQuotaEnvelope = serde_json::from_slice(body).ok()?;
+    let data = envelope.data?;
+    let limit = pick_zcode_quota_limit(&data.limits)?;
+    Some(ZcodeQuotaUsage {
+        used_percent: limit.percentage,
+        reset_at_ms: limit.next_reset_time_ms,
+        window_seconds: limit.window_seconds,
+    })
+}
+
+fn load_zcode_usage_rows(
+    db_path: &PathBuf,
+    since_ms: i64,
+) -> Result<(Vec<(i64, String)>, Option<(i64, String)>)> {
+    match query_zcode_usage_rows(db_path, since_ms) {
+        Ok(value) => Ok(value),
+        Err(error) if is_locked_sqlite_error(&error) => {
+            let snapshot = snapshot_sqlite_database(db_path)?;
+            let result = query_zcode_usage_rows(&snapshot, since_ms)
+                .with_context(|| format!("Failed to read snapshot of {}", db_path.display()));
+            let _ = remove_snapshot_database(&snapshot);
+            result
+        }
+        Err(error) => Err(error).with_context(|| format!("Failed to read {}", db_path.display())),
+    }
+}
+
+fn query_zcode_usage_rows(
+    db_path: &PathBuf,
+    since_ms: i64,
+) -> rusqlite::Result<(Vec<(i64, String)>, Option<(i64, String)>)> {
+    let connection = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let _ = connection.busy_timeout(Duration::from_millis(250));
+    let has_prompt_id =
+        sqlite_table_has_column(&connection, "model_usage", "parent_user_message_id")?;
+    let has_turn_id = sqlite_table_has_column(&connection, "model_usage", "turn_id")?;
+    let mut selected = String::from("started_at, COALESCE(provider_id, '')");
+    if has_prompt_id {
+        selected.push_str(", COALESCE(parent_user_message_id, '')");
+    }
+    if has_turn_id {
+        selected.push_str(", COALESCE(turn_id, '')");
+    }
+    let prompt_index = if has_prompt_id { Some(2) } else { None };
+    let turn_index = if has_turn_id {
+        Some(if has_prompt_id { 3 } else { 2 })
+    } else {
+        None
+    };
+    let query = format!(
+        "SELECT {selected}
+         FROM model_usage
+         WHERE started_at >= ?1
+         ORDER BY started_at ASC
+         LIMIT ?2"
+    );
+    let mut statement = connection.prepare(&query)?;
+    let rows = statement.query_map(rusqlite::params![since_ms, ZCODE_USAGE_ROW_LIMIT as i64], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            prompt_index.map(|index| row.get::<_, String>(index)).transpose()?,
+            turn_index.map(|index| row.get::<_, String>(index)).transpose()?,
+        ))
+    })?;
+
+    let mut usage_rows = Vec::new();
+    let mut latest_at: Option<i64> = None;
+    let mut latest_provider: Option<String> = None;
+    for row in rows {
+        let (started_at, provider_id, prompt_id, turn_id) = row?;
+        // Rows arrive ascending, so the last write wins with the newest
+        // provider id, which identifies the account for the header.
+        let provider_id = provider_id.trim();
+        if !provider_id.is_empty()
+            && latest_at.is_none_or(|at| started_at >= at)
+        {
+            latest_at = Some(started_at);
+            latest_provider = Some(provider_id.to_owned());
+        }
+        // One prompt = one user message; fall back to the turn id and finally
+        // to the row itself so internal retries of one prompt never multiply
+        // the count.
+        let identity = if let Some(prompt_id) =
+            prompt_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
+        {
+            format!("p:{prompt_id}")
+        } else if let Some(turn_id) = turn_id.as_deref().map(str::trim).filter(|id| !id.is_empty())
+        {
+            format!("t:{turn_id}")
+        } else {
+            format!("r:{}", usage_rows.len())
+        };
+        usage_rows.push((started_at, identity));
+    }
+    let latest = match (latest_at, latest_provider) {
+        (Some(at), Some(provider)) => Some((at, provider)),
+        _ => None,
+    };
+    Ok((usage_rows, latest))
+}
+
+fn load_muse_accounts_for_markdown(markdown_path: &str) -> Result<LoadedMuseAccounts> {
+    const MUSE_DEFAULT_SLOT: &str = "default";
+    let Some(auth_path) = muse_auth_path(markdown_path) else {
+        return Ok(LoadedMuseAccounts {
+            accounts: vec![MuseAccountMetadata {
+                slot: MUSE_DEFAULT_SLOT.to_owned(),
+                name: "Muse".to_owned(),
+                updated_at: unix_epoch_millis().ok(),
+                tier: None,
+                weekly_used_percent: None,
+                weekly_reset_at: None,
+                window_used_percent: None,
+                window_reset_at: None,
+                window_duration_mins: None,
+                muse_error: Some("Muse is not logged in (auth.json not found).".to_owned()),
+            }],
+            active_slot: Some(MUSE_DEFAULT_SLOT.to_owned()),
+        });
+    };
+    let auth_bytes = fs::read(&auth_path).map_err(|error| {
+        anyhow!(
+            "Could not read Muse auth file {}: {error}",
+            auth_path.display()
+        )
+    })?;
+    let name = muse_auth_user_email(&auth_bytes).unwrap_or_else(|| "Muse".to_owned());
+    match fetch_muse_subscription_usage(&auth_bytes) {
+        Ok(usage) => Ok(LoadedMuseAccounts {
+            accounts: vec![MuseAccountMetadata {
+                slot: MUSE_DEFAULT_SLOT.to_owned(),
+                name,
+                updated_at: unix_epoch_millis().ok(),
+                tier: usage.tier,
+                weekly_used_percent: usage.weekly_used_percent,
+                weekly_reset_at: usage.weekly_reset_at_ms,
+                window_used_percent: usage.window_used_percent,
+                window_reset_at: usage.window_reset_at_ms,
+                window_duration_mins: usage.window_duration_mins,
+                muse_error: None,
+            }],
+            active_slot: Some(MUSE_DEFAULT_SLOT.to_owned()),
+        }),
+        Err(error) => Ok(LoadedMuseAccounts {
+            accounts: vec![MuseAccountMetadata {
+                slot: MUSE_DEFAULT_SLOT.to_owned(),
+                name,
+                updated_at: unix_epoch_millis().ok(),
+                tier: None,
+                weekly_used_percent: None,
+                weekly_reset_at: None,
+                window_used_percent: None,
+                window_reset_at: None,
+                window_duration_mins: None,
+                muse_error: Some(error.message().to_owned()),
+            }],
+            active_slot: Some(MUSE_DEFAULT_SLOT.to_owned()),
+        }),
+    }
+}
+
+fn load_recent_muse_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
+    let mut session_files = Vec::<PathBuf>::new();
+    for sessions_root in infer_muse_sessions_roots(markdown_path) {
+        collect_muse_session_files(&sessions_root, &mut session_files);
+    }
+
+    // session.jsonl files can be megabytes; parsing every candidate over a
+    // slow link (WSL UNC) stalls the refresh. Sort by mtime first and parse
+    // only the newest candidates — mtime tracks content recency closely.
+    session_files.sort_by_key(|path| std::cmp::Reverse(modified_at_ms(path)));
+    session_files.truncate(RECENT_CANDIDATE_LIMIT);
+
+    let mut recent = session_files
+        .iter()
+        .filter_map(|path| read_muse_context_file(path))
+        .collect::<Vec<_>>();
+    recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+
+    let mut seen = std::collections::HashSet::new();
+    Ok(recent
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .take(RECENT_LIMIT)
+        .collect())
+}
+
+fn infer_muse_sessions_roots(markdown_path: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(value) = std::env::var_os("MUSE_HOME") {
+        let base = PathBuf::from(value);
+        push_unique_path(&mut candidates, base.join("sessions"));
+        push_unique_path(&mut candidates, base.clone());
+    }
+    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
+        let base = PathBuf::from(value);
+        if !base.as_os_str().is_empty() {
+            push_unique_path(&mut candidates, base.join("muse").join("sessions"));
+        }
+    }
+    for home_root in muse_home_roots(markdown_path) {
+        push_unique_path(
+            &mut candidates,
+            home_root
+                .join(".local")
+                .join("share")
+                .join("muse")
+                .join("sessions"),
+        );
+    }
+    candidates
+}
+
+fn collect_muse_session_files(root: &Path, files: &mut Vec<PathBuf>) {
+    if is_muse_subagent_path(root) {
+        return;
+    }
+    if root.is_file() {
+        if is_muse_session_file(root) {
+            files.push(root.to_owned());
+        }
+        return;
+    }
+    if !root.is_dir() {
+        return;
+    }
+    // Bound the walk so a huge sessions tree cannot stall the refresh task.
+    let mut visited_dirs = 0usize;
+    let mut stack = vec![root.to_owned()];
+    while let Some(dir) = stack.pop() {
+        visited_dirs += 1;
+        if visited_dirs > 4000 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        // Ascending push order: the stack below is LIFO, so date/session
+        // directories (which sort chronologically) are visited newest-first
+        // and fresh sessions are reached before any cap cuts in.
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries.into_iter().take(2000) {
+            let path = entry.path();
+            if is_muse_subagent_path(&path) || is_muse_tool_outputs_dir(&path) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if is_muse_session_file(&path) {
+                files.push(path);
+                // Paths are cheap (no reads yet); the expensive parse step is
+                // capped separately after an mtime sort.
+                if files.len() >= RECENT_CANDIDATE_LIMIT * 64 {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn is_muse_subagent_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str().map(str::to_ascii_lowercase).as_deref(),
+            Some("subagent") | Some("subagents")
+        )
+    })
+}
+
+fn is_muse_tool_outputs_dir(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str().map(str::to_ascii_lowercase).as_deref(),
+            Some("tool-outputs") | Some("tool_outputs")
+        )
+    })
+}
+
+fn is_muse_session_file(path: &Path) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) != Some("session.jsonl") {
+        return false;
+    }
+    // Top-level Muse sessions live under sessions/YYYY/MM/DD/<session-id>/session.jsonl.
+    // Anything nested under a subagent directory is excluded above.
+    matches!(
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| !name.trim().is_empty()),
+        Some(true)
+    )
+}
+
+fn read_muse_context_file(path: &Path) -> Option<RecentContext> {
+    let id = path
+        .parent()?
+        .file_name()?
+        .to_str()?
+        .trim()
+        .to_owned();
+    if id.is_empty() {
+        return None;
+    }
+    let fallback_mtime = modified_at_ms(path);
+    let file = fs::File::open(path).ok()?;
+    let mut session_name: Option<String> = None;
+    let mut first_prompt: Option<String> = None;
+    let mut work_dir: Option<String> = None;
+    let mut latest_recorded_ms: Option<i64> = None;
+
+    for line in BufReader::new(file).lines().filter_map(|line| line.ok()) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if let Some(recorded) = value.get("recorded_at").and_then(|v| {
+            v.as_i64().or_else(|| {
+                v.as_u64()
+                    .and_then(|n| i64::try_from(n).ok())
+            })
+        }) {
+            let normalized = normalize_muse_epoch_millis(recorded);
+            if latest_recorded_ms.map_or(true, |current| normalized > current) {
+                latest_recorded_ms = Some(normalized);
+            }
+        }
+        let payload_type = value
+            .get("payload_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let payload = value.get("payload");
+        if payload_type == "session.name.changed" {
+            if let Some(name) = payload
+                .and_then(|p| p.get("new_name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                session_name = Some(name.to_owned());
+            }
+            continue;
+        }
+        if work_dir.is_none() {
+            // route_facts carries cwd; metadata carries workspace_root.
+            let cwd = payload
+                .and_then(|p| p.get("record"))
+                .and_then(|r| r.get("cwd"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    payload
+                        .and_then(|p| p.get("record"))
+                        .and_then(|r| r.get("workspace_root"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(ToOwned::to_owned)
+                });
+            if cwd.is_some() {
+                work_dir = cwd;
+            }
+        }
+        if first_prompt.is_none() {
+            if let Some(prompt) = muse_prompt_from_value(&value) {
+                first_prompt = Some(prompt);
+            }
+        }
+    }
+
+    let title = session_name
+        .filter(|name| !name.trim().is_empty())
+        .or(first_prompt)
+        .unwrap_or_else(|| short_session_id(&id));
+    let updated_at = latest_recorded_ms.unwrap_or(fallback_mtime);
+    if updated_at <= 0 {
+        return None;
+    }
+    Some(RecentContext {
+        provider: PROVIDER_MUSE.to_owned(),
+        id,
+        title,
+        updated_at,
+        forked_from_id: None,
+        work_dir,
+    })
+}
+
+fn normalize_muse_epoch_millis(value: i64) -> i64 {
+    // Muse session.jsonl uses microseconds since the Unix epoch.
+    if value >= 100_000_000_000_000 {
+        value / 1_000
+    } else if value >= 100_000_000_000 {
+        value
+    } else if value >= 1_000_000_000 {
+        value.saturating_mul(1_000)
+    } else {
+        value
+    }
+}
+
+fn muse_prompt_from_value(value: &serde_json::Value) -> Option<String> {
+    let payload = value.get("payload")?;
+    // Newest schema: runtime.user_intent.accepted with model_messages/refill_blocks.
+    for key in ["model_messages", "refill_blocks"] {
+        if let Some(text) = payload
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| muse_first_text_in_messages(items))
+        {
+            return Some(text);
+        }
+    }
+    // Run-level prompt echoes.
+    for key in ["prompt"] {
+        if let Some(text) = payload
+            .get("record")
+            .and_then(|record| record.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(muse_single_line_title)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text);
+        }
+        if let Some(text) = payload
+            .get("event")
+            .and_then(|event| event.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(muse_single_line_title)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn muse_first_text_in_messages(items: &[serde_json::Value]) -> Option<String> {
+    for item in items {
+        if let Some(content) = item.get("content").and_then(serde_json::Value::as_array) {
+            for block in content {
+                let kind = block.get("kind").and_then(serde_json::Value::as_str).unwrap_or("");
+                if kind != "text" {
+                    continue;
+                }
+                if let Some(text) = block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(muse_single_line_title)
+                    .filter(|text| !text.is_empty())
+                {
+                    return Some(text);
+                }
+            }
+        }
+        if let Some(text) = item
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(muse_single_line_title)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn muse_single_line_title(raw: &str) -> String {
+    let single_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 80;
+    let mut out = String::new();
+    for ch in single_line.chars().take(MAX_CHARS) {
+        out.push(ch);
+    }
+    out.trim().to_owned()
 }
 
 fn infer_qwen_runtime_bases(markdown_path: &str) -> Vec<PathBuf> {
@@ -2622,22 +4062,19 @@ fn list_codex_account_metadata(accounts_dir: &Path) -> Result<Vec<CodexAccountMe
         accounts_dir,
         |slot, snapshot_bytes, live_auth_bytes, now_ms| {
             prepare_codex_account_auth(accounts_dir, slot, snapshot_bytes, live_auth_bytes, now_ms)
-                .and_then(|auth_bytes| fetch_codex_weekly_usage(&auth_bytes))
         },
+        fetch_codex_weekly_usage,
     )
 }
 
-fn list_codex_account_metadata_with<F>(
+fn list_codex_account_metadata_with<P, F>(
     accounts_dir: &Path,
-    mut fetch: F,
+    mut prepare: P,
+    fetch: F,
 ) -> Result<Vec<CodexAccountMetadata>>
 where
-    F: FnMut(
-        &str,
-        &[u8],
-        Option<&[u8]>,
-        i64,
-    ) -> std::result::Result<CodexUsageQuery, CodexUsageError>,
+    P: FnMut(&str, &[u8], Option<&[u8]>, i64) -> std::result::Result<Vec<u8>, CodexUsageError>,
+    F: Fn(&[u8]) -> std::result::Result<CodexUsageQuery, CodexUsageError> + Sync,
 {
     if !accounts_dir.is_dir() {
         return Ok(Vec::new());
@@ -2646,15 +4083,17 @@ where
     let live_auth_bytes =
         infer_codex_live_auth_path(accounts_dir).and_then(|path| fs::read(path).ok());
     let now_ms = unix_epoch_millis()?;
-    let mut fetched_accounts = Vec::new();
+    // Mirroring live credentials and renewing saved tokens can write snapshots.
+    // Finish those operations serially before starting any read-only usage calls.
+    let mut prepared_accounts = Vec::new();
     for (slot, path) in list_codex_account_snapshot_paths(accounts_dir)? {
-        let (usage, account_key) = match read_codex_snapshot_bytes_for_usage(&path) {
+        let (auth, account_key) = match read_codex_snapshot_bytes_for_usage(&path) {
             Ok(snapshot_bytes) => {
                 let original_auth_bytes =
                     prefer_live_codex_auth(&snapshot_bytes, live_auth_bytes.as_deref());
                 let account_key = codex_auth_account_key(original_auth_bytes);
-                let usage = fetch(&slot, &snapshot_bytes, live_auth_bytes.as_deref(), now_ms);
-                (usage, account_key)
+                let auth = prepare(&slot, &snapshot_bytes, live_auth_bytes.as_deref(), now_ms);
+                (auth, account_key)
             }
             Err(()) => (Err(CodexUsageError::Unavailable), None),
         };
@@ -2663,8 +4102,50 @@ where
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
             .and_then(|duration| i64::try_from(duration.as_millis()).ok());
-        fetched_accounts.push((slot, updated_at, account_key, usage));
+        prepared_accounts.push((slot, updated_at, account_key, auth));
     }
+
+    let worker_count = prepared_accounts
+        .len()
+        .min(CODEX_USAGE_MAX_CONCURRENT_READS);
+    let queue = Mutex::new(prepared_accounts.into_iter());
+    let mut fetched_accounts = std::thread::scope(|scope| -> Result<Vec<_>> {
+        let mut workers = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            let queue = &queue;
+            let fetch = &fetch;
+            workers.push(
+                std::thread::Builder::new()
+                    .name(format!("codex-usage-{index}"))
+                    .spawn_scoped(scope, move || -> Result<Vec<_>> {
+                        let mut results = Vec::new();
+                        loop {
+                            let next = queue
+                                .lock()
+                                .map_err(|_| anyhow!("Could not read Codex usage queue."))?
+                                .next();
+                            let Some((slot, updated_at, account_key, auth)) = next else {
+                                break;
+                            };
+                            let usage = auth.and_then(|bytes| fetch(&bytes));
+                            results.push((slot, updated_at, account_key, usage));
+                        }
+                        Ok(results)
+                    })
+                    .map_err(|_| anyhow!("Could not start Codex usage reader."))?,
+            );
+        }
+        let mut results = Vec::new();
+        for worker in workers {
+            results.extend(
+                worker
+                    .join()
+                    .map_err(|_| anyhow!("Codex usage reader stopped unexpectedly."))??,
+            );
+        }
+        Ok(results)
+    })?;
+    fetched_accounts.sort_by(|left, right| compare_codex_account_slots(&left.0, &right.0));
 
     // Merge usage into the latest labels only after network work. A local reset edit
     // must neither wait for the API nor be overwritten by this refresh.
@@ -3205,6 +4686,237 @@ fn parse_weekly_usage_response(body: &[u8], now_ms: i64) -> std::result::Result<
     Err(())
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct MuseUsage {
+    tier: Option<String>,
+    weekly_used_percent: Option<f64>,
+    weekly_reset_at_ms: Option<i64>,
+    window_used_percent: Option<f64>,
+    window_reset_at_ms: Option<i64>,
+    window_duration_mins: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MuseUsageError {
+    Unavailable,
+    CredentialRejected,
+}
+
+impl MuseUsageError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => MUSE_USAGE_ERROR,
+            Self::CredentialRejected => MUSE_USAGE_CREDENTIAL_ERROR,
+        }
+    }
+}
+
+fn muse_usage_error_for_http_status(status: u16) -> MuseUsageError {
+    if status == 401 || status == 403 {
+        MuseUsageError::CredentialRejected
+    } else {
+        MuseUsageError::Unavailable
+    }
+}
+
+fn muse_auth_api_key(auth_bytes: &[u8]) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_slice(auth_bytes).ok()?;
+    let meta = value.get("providers")?.get("meta")?;
+    let api_key = meta.get("api_key")?.as_str()?.trim();
+    if api_key.is_empty() {
+        return None;
+    }
+    let base_url = meta
+        .get("api_base_url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "https://api.meta.ai/v1".to_owned());
+    Some((base_url, api_key.to_owned()))
+}
+
+fn muse_auth_user_email(auth_bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(auth_bytes).ok()?;
+    value
+        .get("providers")?
+        .get("meta")?
+        .get("user_email")?
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn fetch_muse_subscription_usage(
+    auth_bytes: &[u8],
+) -> std::result::Result<MuseUsage, MuseUsageError> {
+    let (base_url, api_key) =
+        muse_auth_api_key(auth_bytes).ok_or(MuseUsageError::Unavailable)?;
+    let api_key =
+        escape_curl_config_value(&api_key).ok_or(MuseUsageError::Unavailable)?;
+    let url = format!(
+        "{}{MUSE_USAGE_URL_PATH}",
+        base_url.trim_end_matches('/')
+    );
+    let request_body = format!(
+        "{{\"model\":\"{MUSE_USAGE_MODEL}\",\"input\":\"{MUSE_USAGE_PROMPT}\",\"stream\":true}}"
+    );
+    let curl_config = format!(
+        "url = \"{url}\"\nheader = \"Accept: text/event-stream\"\nheader = \"Content-Type: application/json\"\nheader = \"Authorization: Bearer {api_key}\"\nconnect-timeout = {MUSE_USAGE_CONNECT_TIMEOUT_SECONDS}\nmax-time = {MUSE_USAGE_TIMEOUT_SECONDS}\n"
+    );
+
+    // The refresh burns a few tokens on a minimal completion; the
+    // subscription_usage SSE event rides the response. The POST body carries
+    // no secrets, so it travels via argv while the key uses stdin config.
+    let mut command = Command::new("curl");
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
+        .args([
+            "-q",
+            "--silent",
+            "--proto",
+            "=https",
+            "--config",
+            "-",
+            "--output",
+            "-",
+            "--max-filesize",
+            "524288",
+            "--write-out",
+            "\n%{http_code}",
+            "-X",
+            "POST",
+            "-d",
+            &request_body,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| MuseUsageError::Unavailable)?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or(MuseUsageError::Unavailable)
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(curl_config.as_bytes())
+                .map_err(|_| MuseUsageError::Unavailable)
+        });
+    if write_result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(MuseUsageError::Unavailable);
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|_| MuseUsageError::Unavailable)?;
+    if !output.status.success() {
+        return Err(MuseUsageError::Unavailable);
+    }
+    let newline = output
+        .stdout
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or(MuseUsageError::Unavailable)?;
+    let status = std::str::from_utf8(&output.stdout[newline + 1..])
+        .map_err(|_| MuseUsageError::Unavailable)?;
+    if status.len() != 3 || !status.chars().all(|character| character.is_ascii_digit()) {
+        return Err(MuseUsageError::Unavailable);
+    }
+    let status = status
+        .parse::<u16>()
+        .map_err(|_| MuseUsageError::Unavailable)?;
+    if !(200..300).contains(&status) {
+        return Err(muse_usage_error_for_http_status(status));
+    }
+    let body = &output.stdout[..newline];
+    if body.len() > MUSE_USAGE_MAX_BODY_BYTES {
+        return Err(MuseUsageError::Unavailable);
+    }
+    parse_muse_subscription_sse(body).ok_or(MuseUsageError::Unavailable)
+}
+
+fn muse_percent(value: &serde_json::Value) -> Option<f64> {
+    let percent = value.get("used_percent")?.as_f64()?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return None;
+    }
+    Some(percent)
+}
+
+fn muse_reset_at_ms(value: &serde_json::Value) -> Option<i64> {
+    let seconds = value
+        .get("resets_at")?
+        .as_i64()
+        .or_else(|| {
+            value
+                .get("resets_at")?
+                .as_u64()
+                .and_then(|seconds| i64::try_from(seconds).ok())
+        })
+        .filter(|seconds| *seconds > 0)?;
+    seconds.checked_mul(1_000)
+}
+
+fn parse_muse_subscription_sse(body: &[u8]) -> Option<MuseUsage> {
+    let text = std::str::from_utf8(body).ok()?;
+    for line in text.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data.trim_matches('"') == "[DONE]" {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str)
+            != Some("response.subscription_usage")
+        {
+            continue;
+        }
+        let subscription = value.get("subscription")?;
+        let tier = subscription
+            .get("tier")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|tier| !tier.is_empty())
+            .map(ToOwned::to_owned);
+        let weekly = subscription.get("weekly");
+        let window = subscription.get("window");
+        let weekly_used_percent = weekly.and_then(muse_percent);
+        let weekly_reset_at_ms = weekly.and_then(muse_reset_at_ms);
+        let window_used_percent = window.and_then(muse_percent);
+        let window_reset_at_ms = window.and_then(muse_reset_at_ms);
+        let window_duration_mins = window
+            .and_then(|window| window.get("window_duration_mins"))
+            .and_then(|value| {
+                value.as_i64().or_else(|| {
+                    value
+                        .as_u64()
+                        .and_then(|mins| i64::try_from(mins).ok())
+                })
+            })
+            .filter(|mins| *mins > 0);
+        if weekly_used_percent.is_none() && window_used_percent.is_none() {
+            continue;
+        }
+        return Some(MuseUsage {
+            tier,
+            weekly_used_percent,
+            weekly_reset_at_ms,
+            window_used_percent,
+            window_reset_at_ms,
+            window_duration_mins,
+        });
+    }
+    None
+}
+
 fn read_json_object_bytes(
     path: &Path,
     missing_message: &str,
@@ -3663,6 +5375,33 @@ fn parse_session_command(line: &str) -> Option<ParsedSessionCommand> {
         }
     }
 
+    if executable == PROVIDER_MUSE {
+        for (index, token) in tokens.iter().enumerate().skip(1) {
+            if let Some((flag, value)) = token.split_once('=')
+                && matches!(
+                    flag.to_ascii_lowercase().as_str(),
+                    "--resume" | "--session-id" | "--session" | "-r" | "-s"
+                )
+            {
+                let command_id = normalize_session_id(value, PROVIDER_MUSE)?;
+                return Some(ParsedSessionCommand {
+                    provider: PROVIDER_MUSE.to_owned(),
+                    command_id,
+                });
+            }
+            if matches!(
+                token.to_ascii_lowercase().as_str(),
+                "--resume" | "--session-id" | "--session" | "-r" | "-s" | "resume"
+            ) {
+                let command_id = normalize_session_id(tokens.get(index + 1)?, PROVIDER_MUSE)?;
+                return Some(ParsedSessionCommand {
+                    provider: PROVIDER_MUSE.to_owned(),
+                    command_id,
+                });
+            }
+        }
+    }
+
     None
 }
 
@@ -3705,6 +5444,8 @@ fn normalize_provider(value: &str) -> String {
     } else if normalized == PROVIDER_QWEN || normalized == "qwen-code" || normalized == "qwen code"
     {
         PROVIDER_QWEN.to_owned()
+    } else if normalized == PROVIDER_MUSE || normalized == "muse-code" || normalized == "muse code" {
+        PROVIDER_MUSE.to_owned()
     } else {
         PROVIDER_CODEX.to_owned()
     }
@@ -3875,6 +5616,10 @@ fn render_markdown_items(items: &[ConfigItem]) -> String {
             } else if provider == PROVIDER_QWEN {
                 out.push_str("qwen --resume ");
                 out.push_str(&command_id);
+            } else if provider == PROVIDER_MUSE {
+                out.push_str("muse resume ");
+                out.push_str(&command_id);
+                out.push_str(" --yolo");
             } else {
                 out.push_str("codex resume ");
                 out.push_str(&command_id);
@@ -3995,8 +5740,37 @@ fn short_session_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zcode_quota_response_picks_weekly_limit() {
+        let body = br#"{"code":200,"msg":"Operation successful","success":true,"data":{
+            "level":"lite",
+            "limits":[
+                {"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":2000,"currentValue":1060,"remaining":939,"percentage":53,"nextResetTime":1789698221644},
+                {"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":10000,"currentValue":2923,"remaining":7076,"percentage":29,"nextResetTime":1790265030984}
+            ]
+        }}"#;
+        let usage = parse_zcode_quota_response(body).expect("parse quota response");
+        assert!((usage.used_percent - 29.0).abs() < f64::EPSILON);
+        assert_eq!(usage.reset_at_ms, 1_790_265_030_984);
+        assert_eq!(usage.window_seconds, 604_800);
+    }
+
+    #[test]
+    fn zcode_quota_response_rejects_garbage() {
+        assert!(parse_zcode_quota_response(b"not json").is_none());
+        assert!(parse_zcode_quota_response(br#"{"code":500}"#).is_none());
+        assert!(parse_zcode_quota_response(br#"{"data":{"limits":[]}}"#).is_none());
+        assert!(
+            parse_zcode_quota_response(
+                br#"{"data":{"limits":[{"percentage":150,"nextResetTime":123}]}}"#
+            )
+            .is_none()
+        );
+    }
+
     use std::cell::Cell;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use rusqlite::Connection;
@@ -4004,13 +5778,18 @@ mod tests {
     use super::codex_refresh::RefreshError;
     use super::{
         CODEX_ACTIVE_ACCOUNT_OWNERSHIP_ERROR, CodexAccountPaths, CodexUsageError,
-        CodexWeeklyUsageState, ConfigItem, PROVIDER_CODEX, PROVIDER_KIMI, PROVIDER_OPENCODE,
+        CodexWeeklyUsageState, ConfigItem, MUSE_USAGE_CREDENTIAL_ERROR, MuseUsageError,
+        PROVIDER_CODEX, PROVIDER_KIMI, PROVIDER_OPENCODE,
         PROVIDER_QWEN, WeeklyUsage, apply_codex_weekly_usage_history, codex_auth_account_key,
         codex_usage_error_for_http_status, delete_codex_account_file, deserialize_items,
         is_valid_codex_account_key, list_codex_account_metadata, load_recent_kimi_contexts,
-        load_recent_opencode_contexts, load_recent_qwen_contexts, parse_iso8601_utc_ms,
-        parse_markdown_items, parse_opencode_session_list, parse_session_command,
-        parse_weekly_usage_response, prefer_live_codex_auth, prepare_codex_account_auth_with,
+        infer_wsl_home_root, is_muse_subagent_path, is_muse_tool_outputs_dir,
+        load_recent_opencode_contexts, load_recent_qwen_contexts, muse_auth_api_key,
+        muse_auth_user_email, muse_usage_error_for_http_status, parse_iso8601_utc_ms,
+        parse_markdown_items, parse_muse_subscription_sse, parse_opencode_session_list,
+        parse_session_command,
+        parse_weekly_usage_response, parse_zcode_quota_response,
+        prefer_live_codex_auth, prepare_codex_account_auth_with,
         process_listing_has_codex, query_recent_codex_contexts, read_codex_account_labels,
         remember_codex_weekly_usage, remove_codex_account_label, rename_codex_account_file,
         render_markdown_items, replace_file_from_temp, replace_live_auth_with_rollback,
@@ -4548,6 +6327,121 @@ mod tests {
 
         assert!(parse_weekly_usage_response(first_order, 0).is_err());
         assert!(parse_weekly_usage_response(reverse_order, 0).is_err());
+    }
+
+    #[test]
+    fn parses_muse_subscription_usage_sse_event() {
+        let body = br#"event: response.created
+data: {"type":"response.created","response":{"id":"resp_1"}}
+
+event: response.subscription_usage
+data: {"subscription":{"tier":"27681527378179523","weekly":{"resets_at":1789948800,"used_percent":61},"window":{"resets_at":1789421006,"used_percent":93,"window_duration_mins":300}},"type":"response.subscription_usage"}
+
+event: response.completed
+data: "[DONE]"
+"#;
+        let usage = parse_muse_subscription_sse(body)
+            .expect("muse subscription usage did not parse");
+        assert_eq!(usage.tier.as_deref(), Some("27681527378179523"));
+        assert_eq!(usage.weekly_used_percent, Some(61.0));
+        assert_eq!(usage.weekly_reset_at_ms, Some(1_789_948_800_000));
+        assert_eq!(usage.window_used_percent, Some(93.0));
+        assert_eq!(usage.window_reset_at_ms, Some(1_789_421_006_000));
+        assert_eq!(usage.window_duration_mins, Some(300));
+    }
+
+    #[test]
+    fn rejects_muse_subscription_usage_without_any_percent() {
+        let missing_windows = br#"data: {"subscription":{"tier":"t"},"type":"response.subscription_usage"}
+"#;
+        assert!(parse_muse_subscription_sse(missing_windows).is_none());
+
+        let out_of_range = br#"data: {"subscription":{"weekly":{"resets_at":1789948800,"used_percent":101}},"type":"response.subscription_usage"}
+"#;
+        assert!(parse_muse_subscription_sse(out_of_range).is_none());
+
+        let wrong_type = br#"data: {"subscription":{"weekly":{"resets_at":1789948800,"used_percent":61}},"type":"response.completed"}
+"#;
+        assert!(parse_muse_subscription_sse(wrong_type).is_none());
+
+        let not_json = b"data: not json\n";
+        assert!(parse_muse_subscription_sse(not_json).is_none());
+    }
+
+    #[test]
+    fn extracts_muse_api_key_and_email_without_values() {
+        let auth = br#"{"schema_version":1,"providers":{"meta":{"api_key":"  key ","api_base_url":"https://example.invalid/v1/","user_email":" me@example.invalid "}}}"#;
+        let (base_url, api_key) =
+            muse_auth_api_key(auth).expect("muse api key did not parse");
+        assert_eq!(base_url, "https://example.invalid/v1/");
+        assert_eq!(api_key, "key");
+        assert_eq!(
+            muse_auth_user_email(auth).as_deref(),
+            Some("me@example.invalid")
+        );
+
+        let missing_key = br#"{"providers":{"meta":{"api_base_url":"https://example.invalid"}}}"#;
+        assert!(muse_auth_api_key(missing_key).is_none());
+
+        let fallback_base = br#"{"providers":{"meta":{"api_key":"key"}}}"#;
+        let (base_url, _) =
+            muse_auth_api_key(fallback_base).expect("muse base fallback did not parse");
+        assert_eq!(base_url, "https://api.meta.ai/v1");
+    }
+
+    #[test]
+    fn skips_muse_tool_outputs_and_subagent_paths() {
+        assert!(is_muse_tool_outputs_dir(Path::new(
+            "/home/u/.local/share/muse/sessions/2026/09/14/id/tool-outputs/x.txt"
+        )));
+        assert!(!is_muse_tool_outputs_dir(Path::new(
+            "/home/u/.local/share/muse/sessions/2026/09/14/id/session.jsonl"
+        )));
+        assert!(is_muse_subagent_path(Path::new(
+            "/home/u/.local/share/muse/sessions/subagent/id/session.jsonl"
+        )));
+        assert!(!is_muse_subagent_path(Path::new(
+            "/home/u/.local/share/muse/sessions/2026/09/14/id/session.jsonl"
+        )));
+    }
+
+    #[test]
+    fn derives_wsl_home_from_unc_markdown_paths() {
+        let root = infer_wsl_home_root(
+            "\\\\wsl.localhost\\Ubuntu-24.04\\home\\luka\\codex-out\\codex sessions.md",
+        )
+        .expect("wsl home did not parse");
+        assert_eq!(
+            root,
+            PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\home\\luka")
+        );
+        let legacy = infer_wsl_home_root(
+            "//wsl$/Ubuntu-24.04/home/luka/codex-out/codex sessions.md",
+        )
+        .expect("legacy wsl home did not parse");
+        assert_eq!(legacy, PathBuf::from("\\\\wsl$\\Ubuntu-24.04\\home\\luka"));
+        assert!(infer_wsl_home_root("C:\\Users\\luka\\codex sessions.md").is_none());
+        assert!(infer_wsl_home_root("").is_none());
+    }
+
+    #[test]
+    fn maps_muse_http_status_to_credential_errors() {
+        assert_eq!(
+            muse_usage_error_for_http_status(401),
+            MuseUsageError::CredentialRejected
+        );
+        assert_eq!(
+            muse_usage_error_for_http_status(403),
+            MuseUsageError::CredentialRejected
+        );
+        assert_eq!(
+            muse_usage_error_for_http_status(500),
+            MuseUsageError::Unavailable
+        );
+        assert_eq!(
+            MuseUsageError::CredentialRejected.message(),
+            MUSE_USAGE_CREDENTIAL_ERROR
+        );
     }
 
     #[test]

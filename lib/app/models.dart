@@ -1,6 +1,6 @@
 enum ConfigItemKind { group, session, groupEnd }
 
-enum SessionProvider { codex, kimi, opencode, qwen }
+enum SessionProvider { codex, kimi, opencode, qwen, muse, zcode }
 
 extension SessionProviderInfo on SessionProvider {
   String get key => name;
@@ -10,6 +10,8 @@ extension SessionProviderInfo on SessionProvider {
     SessionProvider.kimi => 'Kimi',
     SessionProvider.opencode => 'OpenCode',
     SessionProvider.qwen => 'Qwen Code',
+    SessionProvider.muse => 'Muse',
+    SessionProvider.zcode => 'ZCode',
   };
 
   static SessionProvider parse(Object? value) {
@@ -24,6 +26,16 @@ extension SessionProviderInfo on SessionProvider {
         normalized == 'qwen-code' ||
         normalized == 'qwen code') {
       return SessionProvider.qwen;
+    }
+    if (normalized == SessionProvider.muse.name ||
+        normalized == 'muse-code' ||
+        normalized == 'muse code') {
+      return SessionProvider.muse;
+    }
+    if (normalized == SessionProvider.zcode.name ||
+        normalized == 'z-code' ||
+        normalized == 'z code') {
+      return SessionProvider.zcode;
     }
     return SessionProvider.codex;
   }
@@ -86,6 +98,139 @@ class CodexAccount {
       weeklyUsedPercent != null &&
       weeklyResetAt != null &&
       effectiveWeeklyWindowSeconds > 0;
+}
+
+class MuseAccount {
+  static const defaultSlot = 'default';
+  static const defaultWeeklyWindowSeconds = 604800;
+
+  const MuseAccount({
+    required this.slot,
+    required this.name,
+    this.updatedAt,
+    this.tier,
+    this.weeklyUsedPercent,
+    this.weeklyResetAt,
+    this.windowUsedPercent,
+    this.windowResetAt,
+    this.windowDurationMins,
+    this.museError,
+  });
+
+  factory MuseAccount.fromJson(Map<String, dynamic> json) {
+    final slot =
+        _optionalTrimmedString(json['slot']) ??
+        _optionalTrimmedString(json['name']) ??
+        defaultSlot;
+    final name = _optionalTrimmedString(json['name']) ?? slot;
+    return MuseAccount(
+      slot: slot,
+      name: name,
+      updatedAt: _optionalInt(json['updated_at']),
+      tier: _optionalTrimmedString(json['tier']),
+      weeklyUsedPercent: _optionalPercent(json['weekly_used_percent']),
+      weeklyResetAt: _optionalInt(json['weekly_reset_at']),
+      windowUsedPercent: _optionalPercent(json['window_used_percent']),
+      windowResetAt: _optionalInt(json['window_reset_at']),
+      windowDurationMins: _optionalInt(json['window_duration_mins']),
+      museError: _optionalTrimmedString(json['muse_error']),
+    );
+  }
+
+  final String slot;
+  final String name;
+  final int? updatedAt;
+  final String? tier;
+  final double? weeklyUsedPercent;
+  final int? weeklyResetAt;
+  final double? windowUsedPercent;
+  final int? windowResetAt;
+  final int? windowDurationMins;
+  final String? museError;
+
+  String get displayName => name.trim().isEmpty ? slot : name.trim();
+
+  String get identityKey => slot.trim().toLowerCase();
+
+  int get effectiveWeeklyWindowSeconds => defaultWeeklyWindowSeconds;
+
+  int? get effectiveWindowSeconds {
+    final mins = windowDurationMins;
+    if (mins == null || mins <= 0) {
+      return null;
+    }
+    return mins * 60;
+  }
+
+  bool get hasWeeklyUsage =>
+      museError == null &&
+      weeklyUsedPercent != null &&
+      weeklyResetAt != null &&
+      effectiveWeeklyWindowSeconds > 0;
+
+  bool get hasWindowUsage =>
+    museError == null &&
+    windowUsedPercent != null &&
+    windowResetAt != null &&
+    (effectiveWindowSeconds ?? 0) > 0;
+}
+
+class ZcodeAccount {
+  static const defaultSlot = 'default';
+  static const defaultWindowSeconds = 18000;
+
+  const ZcodeAccount({
+    required this.slot,
+    required this.name,
+    this.updatedAt,
+    this.tier,
+    this.usedPercent,
+    this.resetAt,
+    this.windowSeconds,
+    this.zcodeError,
+  });
+
+  factory ZcodeAccount.fromJson(Map<String, dynamic> json) {
+    final slot =
+        _optionalTrimmedString(json['slot']) ??
+        _optionalTrimmedString(json['name']) ??
+        defaultSlot;
+    final name = _optionalTrimmedString(json['name']) ?? slot;
+    return ZcodeAccount(
+      slot: slot,
+      name: name,
+      updatedAt: _optionalInt(json['updated_at']),
+      tier: _optionalTrimmedString(json['tier']),
+      usedPercent: _optionalPercent(json['used_percent']),
+      resetAt: _optionalInt(json['reset_at']),
+      windowSeconds: _optionalInt(json['window_seconds']),
+      zcodeError: _optionalTrimmedString(json['zcode_error']),
+    );
+  }
+
+  final String slot;
+  final String name;
+  final int? updatedAt;
+  final String? tier;
+  final double? usedPercent;
+  final int? resetAt;
+  final int? windowSeconds;
+  final String? zcodeError;
+
+  String get displayName => name.trim().isEmpty ? slot : name.trim();
+
+  String get identityKey => slot.trim().toLowerCase();
+
+  int get effectiveWindowSeconds =>
+      windowSeconds == null || windowSeconds! <= 0
+      ? defaultWindowSeconds
+      : windowSeconds!;
+
+  bool get hasUsage =>
+      zcodeError == null &&
+      usedPercent != null &&
+      resetAt != null &&
+      effectiveWindowSeconds > 0;
 }
 
 String? _optionalTrimmedString(Object? value) {
@@ -249,6 +394,13 @@ class ConfigItem {
     }
     if (provider == SessionProvider.qwen) {
       return 'qwen --resume $commandId';
+    }
+    if (provider == SessionProvider.muse) {
+      return 'muse resume $commandId --yolo';
+    }
+    if (provider == SessionProvider.zcode) {
+      // ZCode sessions are resumed from the app by id; copy the raw id.
+      return commandId;
     }
     return 'codex resume $commandId';
   }
