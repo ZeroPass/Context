@@ -61,6 +61,15 @@ or removing a manual reset saves local metadata without waiting for the usage
 API. Refresh responses preserve newer reset edits. Without a manual override,
 each account uses its own API-reported reset.
 
+Account usage reads run concurrently (up to three at a time), after serial
+credential preparation and snapshot writes. The refresh interval remains 30
+seconds. UI updates rebuild only the affected sections; unchanged account and
+recent-session payloads are reused, and themes rebuild only when changed.
+
+Account cards highlight on hover and keyboard focus. Pressing an inactive card
+shows a subtle edge pulse while switching, followed by a short confirmation on
+success. These effects preserve the usage chart and respect reduced-motion settings.
+
 Session autosave waits 500 ms after an edit. Background refreshes do not replace
 unsaved edits, and edits made during a save remain pending for the next save.
 Saving the sessions markdown does not trigger an extra account refresh.
@@ -75,6 +84,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test_refresh.ps1
 
 This runs Rust tests, Dart formatting checks, Flutter analysis, and refresh/save
 UI tests using temporary fixtures, without live credentials or API requests.
+Coverage includes bounded usage-read concurrency, isolated request failures,
+and section rebuild isolation.
 Flutter checks use a temporary NTFS directory so the command also works from a
 WSL path. Logs, exact commands, and SHA256 evidence are written under
-`.buildlog/refresh-validation/`. Use `-FlutterDir` if your Flutter SDK is elsewhere.
+`.buildlog/refresh-validation/`. Use `-FlutterDir` if your Flutter SDK is elsewhere,
+or `-EvidenceDir` to keep a separate validation report.

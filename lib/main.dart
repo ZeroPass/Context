@@ -19,57 +19,69 @@ class ContextApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
       create: (_) => AppState()..init(),
-      child: Consumer<AppState>(
-        builder: (context, state, _) {
-          final lightScheme = ColorScheme.fromSeed(
-            seedColor: Color(state.themeSeedColorValue),
-            brightness: Brightness.light,
-          );
-          final darkScheme = ColorScheme.fromSeed(
-            seedColor: Color(state.themeSeedColorValue),
-            brightness: Brightness.dark,
-          );
-          late final Brightness brightness;
-          late final ColorScheme scheme;
-          if (state.themeAppearance == ThemeAppearance.light) {
-            brightness = Brightness.light;
-            scheme = lightScheme;
-          } else if (state.themeAppearance == ThemeAppearance.sepia) {
-            brightness = Brightness.light;
-            scheme = _buildSepiaScheme(lightScheme);
-          } else if (state.themeAppearance == ThemeAppearance.dim) {
-            brightness = Brightness.dark;
-            scheme = _buildDimScheme(lightScheme, darkScheme);
-          } else {
-            brightness = Brightness.dark;
-            scheme = darkScheme;
-          }
-          return MaterialApp(
-            title: 'Context',
-            theme: ThemeData(
-              brightness: brightness,
-              colorScheme: scheme,
-              useMaterial3: true,
-              fontFamily: 'Oxanium',
-              appBarTheme: AppBarTheme(
-                titleTextStyle: TextStyle(
-                  fontFamily: 'Oxanium',
-                  fontWeight: FontWeight.w600,
-                  fontSize: 20,
-                  color: scheme.onSurface,
-                ),
-                toolbarTextStyle: TextStyle(
-                  fontFamily: 'Oxanium',
-                  fontWeight: FontWeight.w600,
-                  fontSize: 20,
-                  color: scheme.onSurface,
-                ),
+      child: const ContextView(),
+    );
+  }
+}
+
+class ContextView extends StatelessWidget {
+  const ContextView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Selector<AppState, (int, ThemeAppearance)>(
+      selector: (_, state) =>
+          (state.themeSeedColorValue, state.themeAppearance),
+      builder: (context, theme, _) {
+        final (seedColor, appearance) = theme;
+        final lightScheme = ColorScheme.fromSeed(
+          seedColor: Color(seedColor),
+          brightness: Brightness.light,
+        );
+        final darkScheme = ColorScheme.fromSeed(
+          seedColor: Color(seedColor),
+          brightness: Brightness.dark,
+        );
+        late final Brightness brightness;
+        late final ColorScheme scheme;
+        if (appearance == ThemeAppearance.light) {
+          brightness = Brightness.light;
+          scheme = lightScheme;
+        } else if (appearance == ThemeAppearance.sepia) {
+          brightness = Brightness.light;
+          scheme = _buildSepiaScheme(lightScheme);
+        } else if (appearance == ThemeAppearance.dim) {
+          brightness = Brightness.dark;
+          scheme = _buildDimScheme(lightScheme, darkScheme);
+        } else {
+          brightness = Brightness.dark;
+          scheme = darkScheme;
+        }
+        return MaterialApp(
+          title: 'Context',
+          theme: ThemeData(
+            brightness: brightness,
+            colorScheme: scheme,
+            useMaterial3: true,
+            fontFamily: 'Oxanium',
+            appBarTheme: AppBarTheme(
+              titleTextStyle: TextStyle(
+                fontFamily: 'Oxanium',
+                fontWeight: FontWeight.w600,
+                fontSize: 20,
+                color: scheme.onSurface,
+              ),
+              toolbarTextStyle: TextStyle(
+                fontFamily: 'Oxanium',
+                fontWeight: FontWeight.w600,
+                fontSize: 20,
+                color: scheme.onSurface,
               ),
             ),
-            home: const HomeScreen(),
-          );
-        },
-      ),
+          ),
+          home: const HomeScreen(),
+        );
+      },
     );
   }
 

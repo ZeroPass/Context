@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -72,14 +73,18 @@ fn refresh_merges_a_reset_and_name_saved_during_network_work() -> Result<()> {
     let fixture = Fixture::new()?;
     let now = unix_epoch_millis()?;
     let manual = now + 86_400_000;
-    let accounts = list_codex_account_metadata_with(&fixture.accounts, |_, _, _, _| {
-        // This runs inside the fetch, before its final metadata transaction.
-        set_codex_manual_reset_at(&fixture.accounts, manual)
-            .map_err(|_| CodexUsageError::Unavailable)?;
-        set_codex_account_label(&fixture.accounts, "1", "renamed during refresh")
-            .map_err(|_| CodexUsageError::Unavailable)?;
-        Ok(query(now))
-    })?;
+    let accounts = list_codex_account_metadata_with(
+        &fixture.accounts,
+        |_, snapshot, _, _| Ok(snapshot.to_vec()),
+        |_: &[u8]| {
+            // This runs inside the fetch, before its final metadata transaction.
+            set_codex_manual_reset_at(&fixture.accounts, manual)
+                .map_err(|_| CodexUsageError::Unavailable)?;
+            set_codex_account_label(&fixture.accounts, "1", "renamed during refresh")
+                .map_err(|_| CodexUsageError::Unavailable)?;
+            Ok(query(now))
+        },
+    )?;
     assert_eq!(accounts[0].manual_reset_at, Some(manual));
     assert_eq!(accounts[0].name, "renamed during refresh");
     assert_eq!(accounts[0].weekly_reset_at, Some(now + 604_800_000));
@@ -94,14 +99,149 @@ fn refresh_does_not_restore_a_removed_reset() -> Result<()> {
     let fixture = Fixture::new()?;
     let now = unix_epoch_millis()?;
     set_codex_manual_reset_at(&fixture.accounts, now + 86_400_000)?;
-    let accounts = list_codex_account_metadata_with(&fixture.accounts, |_, _, _, _| {
-        clear_codex_manual_reset_at(&fixture.accounts).map_err(|_| CodexUsageError::Unavailable)?;
-        Ok(query(now))
-    })?;
+    let accounts = list_codex_account_metadata_with(
+        &fixture.accounts,
+        |_, snapshot, _, _| Ok(snapshot.to_vec()),
+        |_: &[u8]| {
+            clear_codex_manual_reset_at(&fixture.accounts)
+                .map_err(|_| CodexUsageError::Unavailable)?;
+            Ok(query(now))
+        },
+    )?;
     assert_eq!(accounts[0].manual_reset_at, None);
     let labels = read_codex_account_labels(&fixture.accounts)?;
     assert_eq!(labels.manual_reset_at, None);
     assert_eq!(labels.weekly_usage_state["1"].used_percent, 31.0);
+    Ok(())
+}
+
+#[test]
+fn usage_reads_overlap_with_a_bound_after_serial_credential_preparation() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let slots = ["1", "2", "3", "10", "11", "12"];
+    for slot in slots {
+        fs::write(
+            fixture.accounts.join(format!("{slot}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "tokens": { "account_id": format!("fake-account-{slot}") }
+            }))?,
+        )?;
+    }
+    let now = unix_epoch_millis()?;
+    let prepared_count = AtomicUsize::new(0);
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let (started, started_rx) = mpsc::channel();
+    let mut prepared_slots = Vec::new();
+    let accounts = std::thread::scope(|scope| -> Result<_> {
+        let refresh = scope.spawn(|| {
+            list_codex_account_metadata_with(
+                &fixture.accounts,
+                |slot, _, _, _| {
+                    prepared_slots.push(slot.to_owned());
+                    prepared_count.fetch_add(1, Ordering::SeqCst);
+                    if slot == "12" {
+                        Err(CodexUsageError::CredentialRejected)
+                    } else {
+                        Ok(slot.as_bytes().to_vec())
+                    }
+                },
+                |auth| {
+                    assert_eq!(prepared_count.load(Ordering::SeqCst), slots.len());
+                    let slot = String::from_utf8(auth.to_vec())
+                        .map_err(|_| CodexUsageError::Unavailable)?;
+                    let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(concurrent, Ordering::SeqCst);
+                    let (release, blocked) = mpsc::channel();
+                    let result = (|| {
+                        started
+                            .send((slot.clone(), release))
+                            .map_err(|_| CodexUsageError::Unavailable)?;
+                        blocked
+                            .recv_timeout(Duration::from_secs(10))
+                            .map_err(|_| CodexUsageError::Unavailable)?;
+                        if slot == "10" {
+                            return Err(CodexUsageError::Unavailable);
+                        }
+                        let mut value = query(now);
+                        value.usage.used_percent =
+                            slot.parse().map_err(|_| CodexUsageError::Unavailable)?;
+                        Ok(value)
+                    })();
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    result
+                },
+            )
+        });
+        // No request is released until all three workers are simultaneously
+        // waiting. Sequential fetching fails this check without timing a benchmark.
+        let mut first_wave = Vec::new();
+        for _ in 0..3 {
+            first_wave.push(started_rx.recv_timeout(Duration::from_secs(3))?);
+        }
+        let mut requested_slots = first_wave
+            .iter()
+            .map(|(slot, _)| slot.clone())
+            .collect::<Vec<_>>();
+        for (_, release) in first_wave {
+            release.send(())?;
+        }
+        for _ in 0..2 {
+            let (slot, release) = started_rx.recv_timeout(Duration::from_secs(3))?;
+            requested_slots.push(slot);
+            release.send(())?;
+        }
+        let accounts = refresh
+            .join()
+            .map_err(|_| anyhow!("refresh test worker panicked"))??;
+        requested_slots.sort_by(|a, b| super::compare_codex_account_slots(a, b));
+        assert_eq!(requested_slots, ["1", "2", "3", "10", "11"]);
+        Ok(accounts)
+    })?;
+    assert_eq!(prepared_slots, slots);
+    assert_eq!(peak.load(Ordering::SeqCst), 3);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|account| account.slot.as_str())
+            .collect::<Vec<_>>(),
+        slots
+    );
+    for account in accounts {
+        if account.slot == "10" || account.slot == "12" {
+            assert!(account.weekly_used_percent.is_none());
+            assert!(account.weekly_error.is_some());
+        } else {
+            assert_eq!(
+                account.weekly_used_percent,
+                Some(account.slot.parse::<f64>()?)
+            );
+            assert_eq!(account.weekly_reset_at, Some(now + 604_800_000));
+            assert!(account.weekly_error.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_and_unreadable_accounts_do_not_issue_usage_requests() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.accounts.join("1.json"), b"not valid JSON")?;
+    let accounts = list_codex_account_metadata_with(
+        &fixture.accounts,
+        |_, _, _, _| panic!("invalid snapshot must not be prepared"),
+        |_| panic!("invalid snapshot must not be fetched"),
+    )?;
+    assert_eq!(accounts.len(), 1);
+    assert!(accounts[0].weekly_error.is_some());
+    fs::remove_file(fixture.accounts.join("1.json"))?;
+    let accounts = list_codex_account_metadata_with(
+        &fixture.accounts,
+        |_, _, _, _| panic!("empty accounts must not be prepared"),
+        |_| panic!("empty accounts must not be fetched"),
+    )?;
+    assert!(accounts.is_empty());
     Ok(())
 }
 
