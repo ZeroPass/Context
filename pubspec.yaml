@@ -19,6 +19,11 @@ dependencies:
   rinf: ^8.9.1
   meta: ^1.17.0
   tuple: ^2.0.2
+  flutter_markdown_plus: ^1.0.7
+  markdown: ^7.3.0
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.7
 
 dev_dependencies:
   flutter_test:
@@ -39,6 +44,8 @@ msix_config:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/licenses/
   fonts:
     - family: Oxanium
       fonts:

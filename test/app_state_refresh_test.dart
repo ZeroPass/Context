@@ -10,9 +10,11 @@ import 'package:context/src/bindings/bindings.dart';
 import 'package:context/ui/home_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart' show FontLoader, rootBundle;
+import 'package:flutter/services.dart'
+    show FontLoader, LogicalKeyboardKey, rootBundle;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const markdownPath = '/test/codex-out/codex sessions.md';
 const snapshotKey = ValueKey('app-snapshot');
@@ -96,6 +98,7 @@ void finish(Uint64 requestId, {bool ok = true}) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  SharedPreferences.setMockInitialValues({});
   setUpAll(() async {
     // Use shipped fonts rather than the test font in the visual evidence.
     final manifest =
@@ -173,6 +176,169 @@ void main() {
       }
     });
   }
+
+  stateTest('Whiteboard toggle retains Context scroll and divider position', (
+    tester,
+  ) async {
+    emitState();
+    await tester.pump();
+    state.items = List.generate(
+      25,
+      (index) => ConfigItem.session(
+        commandId:
+            '11111111-1111-1111-1111-${index.toString().padLeft(12, '0')}',
+        name: 'Session $index',
+        provider: SessionProvider.codex,
+      ),
+    );
+    await mountApp(tester);
+    final toggle = find.byKey(const ValueKey('whiteboard-toggle'));
+    final pane = find.byKey(const ValueKey('context-pane'));
+    final divider = find.byKey(const ValueKey('whiteboard-divider'));
+    final whiteboard = find.byKey(const ValueKey('whiteboard-pane'));
+    final controller = tester
+        .widget<Scrollbar>(find.byType(Scrollbar).first)
+        .controller!;
+    controller.jumpTo(100);
+    await tester.pump();
+    expect(whiteboard, findsNothing);
+    final fullWidth = tester.getSize(pane).width;
+
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(whiteboard, findsOneWidget);
+    expect(controller.offset, 100);
+    expect(tester.getSize(pane).width, lessThan(fullWidth));
+    final originalWidth = tester.getSize(pane).width;
+    await tester.drag(divider, const Offset(150, 0));
+    await tester.pump();
+    final resizedWidth = tester.getSize(pane).width;
+    expect(resizedWidth, greaterThan(originalWidth));
+    expect(controller.offset, 100);
+
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(whiteboard, findsNothing);
+    expect(tester.getSize(pane).width, fullWidth);
+    expect(controller.offset, 100);
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(tester.getSize(pane).width, resizedWidth);
+    expect(
+      tester.widget<Scrollbar>(find.byType(Scrollbar).first).controller,
+      same(controller),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  stateTest('Whiteboard divider stays usable after resizing the window', (
+    tester,
+  ) async {
+    emitState();
+    await tester.pump();
+    await mountApp(tester);
+    final toggle = find.byKey(const ValueKey('whiteboard-toggle'));
+    final pane = find.byKey(const ValueKey('context-pane'));
+    final divider = find.byKey(const ValueKey('whiteboard-divider'));
+    await tester.tap(toggle);
+    await tester.pump();
+    await capture(tester, 'whiteboard-open');
+    await tester.drag(divider, const Offset(-1200, 0));
+    await tester.pump();
+    expect(tester.getSize(pane).width, 400);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(tester.getSize(pane).width, 424);
+    await tester.drag(divider, const Offset(1600, 0));
+    await tester.pump();
+    expect(
+      tester.getSize(find.byKey(const ValueKey('whiteboard-pane'))).width,
+      260,
+    );
+    await tester.pump(const Duration(milliseconds: 150));
+    await capture(tester, 'whiteboard-resized');
+
+    tester.view.physicalSize = const Size(700, 1000);
+    await tester.pump();
+    expect(find.text('Context'), findsOneWidget);
+    expect(find.text('Whiteboard'), findsOneWidget);
+    expect(tester.getSize(pane).width, greaterThanOrEqualTo(400));
+    expect(tester.takeException(), isNull);
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(tester.getSize(pane).width, 700);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  stateTest(
+    'narrow app uses full-width swipe screens without losing Context scroll',
+    (tester) async {
+      emitState();
+      await tester.pump();
+      state.items = List.generate(
+        25,
+        (index) => ConfigItem.session(
+          commandId:
+              '11111111-1111-1111-1111-${index.toString().padLeft(12, '0')}',
+          name: 'Session $index',
+          provider: SessionProvider.codex,
+        ),
+      );
+      await mountApp(tester);
+      final contextController = tester
+          .widget<Scrollbar>(find.byType(Scrollbar).first)
+          .controller!;
+      contextController.jumpTo(100);
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('whiteboard-toggle')));
+      await tester.pump();
+      tester.view.physicalSize = const Size(650, 1000);
+      await tester.pump();
+      await tester.pump();
+      final pages = find.byKey(const ValueKey('whiteboard-pages'));
+      expect(tester.widget<PageView>(pages).controller!.page, 1);
+      expect(find.byKey(const ValueKey('whiteboard-divider')), findsNothing);
+      expect(contextController.offset, 100);
+      await tester.tap(find.byKey(const ValueKey('workspace-page-0')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump();
+      expect(tester.widget<PageView>(pages).controller!.page, 0);
+      expect(
+        tester.getSize(find.byKey(const ValueKey('context-pane'))).width,
+        650,
+      );
+      expect(contextController.offset, 100);
+      tester.view.physicalSize = const Size(360, 1000);
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester.getSize(find.byKey(const ValueKey('context-pane'))).width,
+        360,
+      );
+      await capture(tester, 'whiteboard-compact-context');
+      await tester.tap(find.byKey(const ValueKey('workspace-page-1')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump();
+      expect(tester.widget<PageView>(pages).controller!.page, 1);
+      await capture(tester, 'whiteboard-compact');
+      expect(state.whiteboardEnabled, isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(const ValueKey('whiteboard-toggle')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(PageView), findsNothing);
+      expect(
+        tester.getSize(find.byKey(const ValueKey('context-pane'))).width,
+        360,
+      );
+      expect(contextController.offset, 100);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   stateTest(
     'account press keeps pending animation across refresh and activates on success',

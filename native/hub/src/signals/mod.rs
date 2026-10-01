@@ -2,6 +2,29 @@ use rinf::{DartSignal, RustSignal};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, DartSignal)]
+pub struct ReadWhiteboard {
+    pub request_id: u64,
+    pub sessions_markdown_path: String,
+    pub provider: String,
+    pub session_id: String,
+    pub limit: u32,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct WhiteboardResult {
+    pub request_id: u64,
+    pub payload_json: String,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct OpenWhiteboardFile {
+    pub request_id: u64,
+    pub path: String,
+    pub reveal: bool,
+}
+
+#[derive(Deserialize, DartSignal)]
 pub struct InitApp {
     pub theme_seed_color_value: i64,
     pub sessions_markdown_path: String,

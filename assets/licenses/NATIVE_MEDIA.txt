@@ -1,0 +1,33 @@
+Native media dependencies
+
+Context's own dual-license terms do not replace dependency licenses.
+
+Windows media_kit_libs_windows_video 1.0.11 supplies:
+  libmpv-2.dll (mpv and its codec dependencies)
+  libEGL.dll and libGLESv2.dll (ANGLE)
+  d3dcompiler_47.dll, vk_swiftshader.dll, vulkan-1.dll, zlib.dll
+
+libmpv source/version shipped by the plugin:
+  https://github.com/mpv-player/mpv/commit/652a1dd
+  https://github.com/media-kit/libmpv-win32-video-build/releases/tag/2023-09-24
+Build scripts and dependency recipes:
+  https://github.com/media-kit/libmpv-win32-video-build
+  https://github.com/media-kit/libmpv-win32-video-cmake
+mpv LGPL source licensing/build option:
+  https://github.com/mpv-player/mpv/blob/master/Copyright
+FFmpeg source and LGPL licensing:
+  https://github.com/FFmpeg/FFmpeg
+  https://ffmpeg.org/legal.html
+
+The upstream recipes select mpv -Dgpl=false and FFmpeg --disable-gpl,
+--disable-nonfree, --enable-version3. GNU LGPL 2.1 and 3.0 texts are included
+alongside this notice. Keep native libraries dynamically linked and replaceable;
+redistributors must retain the relevant notices and satisfy the applicable LGPL
+source/relinking requirements for the exact binaries they ship.
+
+ANGLE source/distribution:
+  https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/releases/tag/v1.0.1
+  https://github.com/google/angle
+  https://github.com/google/angle/blob/main/LICENSE
+ANGLE's accompanying third-party notices apply to the bundled implementation.
+The Flutter-generated NOTICES file also includes the package license notices.

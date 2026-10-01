@@ -59,8 +59,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   AppState() : _testRequestSender = null;
 
   @visibleForTesting
-  AppState.forTesting({required void Function(Uint64) sendRequest})
-    : _testRequestSender = sendRequest {
+  AppState.forTesting({
+    required void Function(Uint64) sendRequest,
+    SharedPreferences? preferences,
+  }) : _testRequestSender = sendRequest {
+    _prefs = preferences;
+    whiteboardEnabled = _prefs?.getBool('whiteboardEnabled') ?? false;
     _pendingRecentRefresh = false;
     _listenToRust();
   }
@@ -111,6 +115,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool busy = false;
   bool dirty = false;
   bool autosaveEnabled = true;
+  bool whiteboardEnabled = false;
   bool recentBusy = false;
   int recentRefreshRevision = 0;
   SessionProvider recentProvider = SessionProvider.codex;
@@ -139,6 +144,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String? zcodeAccountError;
   List<String> recentTabOrder = const <String>[];
   List<String> recentTabHidden = const <String>[];
+  List<String> whiteboardSearchRoots = const <String>[];
+  bool _whiteboardRootsConfigured = false;
 
   List<ConfigItem> items = const <ConfigItem>[];
   List<String> warnings = const <String>[];
@@ -200,6 +207,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _prefs?.getInt('themeSeedColorValue') ?? themeSeedColorValue;
     themeAppearance = _loadThemeAppearance();
     autosaveEnabled = _prefs?.getBool('autosaveEnabled') ?? true;
+    whiteboardEnabled = _prefs?.getBool('whiteboardEnabled') ?? false;
+    whiteboardSearchRoots =
+        _prefs?.getStringList('whiteboardSearchRoots') ?? const [];
+    _whiteboardRootsConfigured =
+        _prefs?.containsKey('whiteboardSearchRoots') ?? false;
     sessionsMarkdownPath = _resolveInitialMarkdownPath(
       _prefs?.getString('sessionsMarkdownPath'),
     );
@@ -237,6 +249,37 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _refreshLiveData();
     }
+  }
+
+  List<String> get effectiveWhiteboardRoots {
+    if (_whiteboardRootsConfigured) return whiteboardSearchRoots;
+    if (sessionsMarkdownPath.trim().isEmpty) return const [];
+    final paths = p.Context(
+      style:
+          RegExp(r'^(?:[A-Za-z]:[\\/]|\\\\|//)').hasMatch(sessionsMarkdownPath)
+          ? p.Style.windows
+          : p.Style.posix,
+    );
+    return [paths.dirname(sessionsMarkdownPath)];
+  }
+
+  void setWhiteboardSearchRoots(List<String> roots) {
+    _whiteboardRootsConfigured = true;
+    whiteboardSearchRoots = roots
+        .map((root) => root.trim())
+        .where((root) => root.isNotEmpty)
+        .toSet()
+        .take(20)
+        .toList();
+    _prefs?.setStringList('whiteboardSearchRoots', whiteboardSearchRoots);
+    notifyListeners();
+  }
+
+  Future<void> setWhiteboardEnabled(bool enabled) async {
+    whiteboardEnabled = enabled;
+    notifyListeners();
+    final prefs = _prefs ??= await SharedPreferences.getInstance();
+    await prefs.setBool('whiteboardEnabled', whiteboardEnabled);
   }
 
   void _startRecentRefreshTimer() {
@@ -727,9 +770,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         .toList(growable: false);
   }
 
-  List<SessionProvider> get hiddenRecentTabs => recentTabHidden
-      .map(SessionProviderInfo.parse)
-      .toList(growable: false);
+  List<SessionProvider> get hiddenRecentTabs =>
+      recentTabHidden.map(SessionProviderInfo.parse).toList(growable: false);
 
   void reorderRecentTab(SessionProvider provider, int targetIndex) {
     final visible = orderedRecentTabs;
@@ -1784,8 +1826,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       if (item is! Map) {
         continue;
       }
-      final account =
-          MuseAccount.fromJson(Map<String, dynamic>.from(item));
+      final account = MuseAccount.fromJson(Map<String, dynamic>.from(item));
       if (account.slot.isEmpty ||
           account.displayName.isEmpty ||
           !seen.add(account.identityKey)) {
@@ -1813,8 +1854,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       if (item is! Map) {
         continue;
       }
-      final account =
-          ZcodeAccount.fromJson(Map<String, dynamic>.from(item));
+      final account = ZcodeAccount.fromJson(Map<String, dynamic>.from(item));
       if (account.slot.isEmpty ||
           account.displayName.isEmpty ||
           !seen.add(account.identityKey)) {

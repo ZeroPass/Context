@@ -1,6 +1,7 @@
 param(
   [string]$FlutterDir = (Join-Path $env:LOCALAPPDATA "AppxKit\deps\flutter"),
-  [string]$EvidenceDir = ".buildlog\refresh-validation"
+  [string]$EvidenceDir = ".buildlog\refresh-validation",
+  [switch]$UiOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,9 +25,21 @@ $inputs = @(
   "lib\app\app_state.dart", "lib\app\models.dart", "lib\ui\home_screen.dart",
   "lib\main.dart", "test\app_state_refresh_test.dart", "scripts\test_refresh.ps1",
   "lib\ui\widgets\codex_account_card.dart", "test\codex_account_card_test.dart",
+  "lib\ui\widgets\whiteboard_workspace.dart",
+  "test\whiteboard_workspace_test.dart",
+  "lib\ui\widgets\passive_tooltip.dart", "lib\ui\widgets\recent_sessions.dart",
+  "lib\ui\widgets\whiteboard_pane.dart", "lib\app\whiteboard.dart",
+  "lib\ui\widgets\file_preview.dart", "lib\ui\widgets\video_preview.dart",
+  "test\file_preview_test.dart", "test\passive_tooltip_test.dart",
+  "lib\ui\widgets\file_location_button.dart",
+  "lib\app\file_references.dart", "test\whiteboard_test.dart",
+  "native\hub\src\actors\whiteboard.rs",
   "Cargo.lock", "pubspec.yaml", "pubspec.lock", "analysis_options.yaml"
 )
 $inputHashes = @{}
+$inputs += Get-ChildItem -LiteralPath (Join-Path $root "lib\src\bindings\signals") -File -Filter "*.dart" | ForEach-Object {
+  "lib\src\bindings\signals\$($_.Name)"
+}
 foreach ($file in $inputs) {
   $inputHashes[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root $file)).Hash
 }
@@ -51,15 +64,22 @@ Push-Location $root
 try {
   $env:CARGO_INCREMENTAL = "0"
   $env:CARGO_TARGET_DIR = Join-Path $env:TEMP "context-per-account-reset-tests"
-  Run-Check "rust-format" "cargo" @("fmt", "--manifest-path", "native/hub/Cargo.toml", "--", "--check")
-  Run-Check "rust-tests" "cargo" @("test", "--locked", "--manifest-path", "native/hub/Cargo.toml")
-  Run-Check "dart-format" $dart @("format", "--output=none", "--set-exit-if-changed", "lib/main.dart", "lib/app/app_state.dart", "lib/ui/home_screen.dart", "lib/ui/widgets/codex_account_card.dart", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart")
+  if (-not $UiOnly) {
+    Run-Check "rust-format" "cargo" @("fmt", "--manifest-path", "native/hub/Cargo.toml", "--", "--check")
+    Run-Check "rust-tests" "cargo" @("test", "--locked", "--manifest-path", "native/hub/Cargo.toml")
+  }
+  $formatFiles = if ($UiOnly) {
+    @("lib/app/app_state.dart", "lib/ui/home_screen.dart", "lib/ui/widgets/whiteboard_workspace.dart", "test/whiteboard_workspace_test.dart", "lib/ui/widgets/passive_tooltip.dart", "lib/ui/widgets/recent_sessions.dart", "test/app_state_refresh_test.dart", "lib/ui/widgets/whiteboard_pane.dart", "lib/ui/widgets/file_preview.dart", "lib/ui/widgets/video_preview.dart", "lib/app/whiteboard.dart", "lib/app/file_references.dart", "lib/ui/widgets/file_location_button.dart", "test/whiteboard_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart")
+  } else {
+    @("lib/main.dart", "lib/app/app_state.dart", "lib/ui/home_screen.dart", "lib/ui/widgets/codex_account_card.dart", "lib/ui/widgets/whiteboard_workspace.dart", "test/whiteboard_workspace_test.dart", "lib/ui/widgets/passive_tooltip.dart", "lib/ui/widgets/recent_sessions.dart", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart")
+  }
+  Run-Check "dart-format" $dart (@("format", "--output=none", "--set-exit-if-changed") + $formatFiles)
 
   # Flutter's batch launcher needs an NTFS working directory, not a WSL UNC path.
   foreach ($file in @("pubspec.yaml", "pubspec.lock", "analysis_options.yaml")) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination $work
   }
-  foreach ($dir in @("lib", "test", "assets\fonts")) {
+  foreach ($dir in @("lib", "test", "assets\fonts", "assets\licenses")) {
     & robocopy (Join-Path $root $dir) (Join-Path $work $dir) /E /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Could not stage $dir for Flutter tests." }
   }
@@ -69,7 +89,7 @@ try {
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
-    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart")
+    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart")
   } finally { Pop-Location }
 
   $report = @("UTC: $([DateTime]::UtcNow.ToString('o'))", "Result: all checks completed", "Source: $root", "Flutter staging: $work", "CARGO_TARGET_DIR: $env:CARGO_TARGET_DIR", "CARGO_INCREMENTAL: $env:CARGO_INCREMENTAL", "PUB_CACHE: $env:PUB_CACHE", "", "Commands:") + $commands.ToArray()
@@ -83,7 +103,7 @@ try {
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $log.FullName
     $report += "$($hash.Hash)  $($log.FullName)"
   }
-  foreach ($snapshot in Get-ChildItem -LiteralPath $evidence -Filter "accounts-*.png" -File) {
+  foreach ($snapshot in Get-ChildItem -LiteralPath $evidence -File | Where-Object { $_.Name -match '^(accounts|whiteboard)-.*\.png$' }) {
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $snapshot.FullName
     $report += "$($hash.Hash)  $($snapshot.FullName)"
   }

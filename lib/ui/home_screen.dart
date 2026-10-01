@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -12,6 +13,10 @@ import 'package:provider/provider.dart';
 import '../app/app_state.dart';
 import '../app/models.dart';
 import 'widgets/codex_account_card.dart';
+import 'widgets/whiteboard_workspace.dart';
+import 'widgets/whiteboard_pane.dart';
+import 'widgets/passive_tooltip.dart';
+import 'widgets/recent_sessions.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
 
@@ -432,117 +437,11 @@ Float64List _codexDitherShaderMatrix(double devicePixelRatio) {
   ]);
 }
 
-class _PassiveTooltip extends StatefulWidget {
-  const _PassiveTooltip({required this.message, required this.child});
-
-  final String message;
-  final Widget child;
-
-  @override
-  State<_PassiveTooltip> createState() => _PassiveTooltipState();
-}
-
-class _PassiveTooltipState extends State<_PassiveTooltip> {
-  bool _hovered = false;
-  Timer? _showTimer;
-
-  void _handleEnter() {
-    _showTimer?.cancel();
-    _showTimer = Timer(const Duration(milliseconds: 120), () {
-      if (!mounted) {
-        return;
-      }
-      setState(() => _hovered = true);
-    });
-  }
-
-  void _handleExit() {
-    _showTimer?.cancel();
-    if (!_hovered) {
-      return;
-    }
-    setState(() => _hovered = false);
-  }
-
-  @override
-  void dispose() {
-    _showTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hasMessage = widget.message.trim().isNotEmpty;
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    return MouseRegion(
-      onEnter: (_) => _handleEnter(),
-      onExit: (_) => _handleExit(),
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.center,
-        children: [
-          widget.child,
-          if (_hovered && hasMessage)
-            Positioned(
-              top: -46,
-              left: -48,
-              right: -48,
-              child: IgnorePointer(
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 240),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: scheme.surfaceContainerHigh.withValues(
-                            alpha: 0.88,
-                          ),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: scheme.outlineVariant.withValues(
-                              alpha: 0.38,
-                            ),
-                            width: 0.7,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.08),
-                              blurRadius: 6,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: Text(
-                          widget.message,
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurface.withValues(alpha: 0.86),
-                            fontWeight: FontWeight.w400,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
 class _RecentProviderTabBar extends StatefulWidget {
-  const _RecentProviderTabBar({required this.state});
+  const _RecentProviderTabBar({required this.state, required this.screen});
 
   final AppState state;
+  final _HomeScreenState screen;
 
   @override
   State<_RecentProviderTabBar> createState() => _RecentProviderTabBarState();
@@ -551,7 +450,7 @@ class _RecentProviderTabBar extends StatefulWidget {
 class _RecentProviderTabBarState extends State<_RecentProviderTabBar> {
   SessionProvider? _draggingProvider;
 
-  HomeScreen get _screen => const HomeScreen();
+  _HomeScreenState get _screen => widget.screen;
 
   @override
   Widget build(BuildContext context) {
@@ -642,20 +541,37 @@ class _RecentProviderTabBarState extends State<_RecentProviderTabBar> {
 
     return Row(
       children: [
-        for (var index = 0; index < tabs.length; index += 1) ...[
-          Expanded(child: tabAt(index)),
-          if (index < tabs.length - 1) const SizedBox(width: 3),
-        ],
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = math.min(
+                tabs.length,
+                math.max(1, (constraints.maxWidth / 140).floor()),
+              );
+              final width =
+                  (constraints.maxWidth - 3 * (columns - 1)) / columns;
+              return Wrap(
+                spacing: 3,
+                runSpacing: 3,
+                children: [
+                  for (var index = 0; index < tabs.length; index += 1)
+                    SizedBox(width: width, child: tabAt(index)),
+                ],
+              );
+            },
+          ),
+        ),
         const SizedBox(width: 3),
         DragTarget<SessionProvider>(
           onWillAcceptWithDetails: (_) => canHideMore,
-          onAcceptWithDetails: (details) =>
-              state.hideRecentTab(details.data),
+          onAcceptWithDetails: (details) => state.hideRecentTab(details.data),
           builder: (context, candidates, _) {
             final hovering = candidates.isNotEmpty;
             final hiddenCount = state.hiddenRecentTabs.length;
             return _screen._tooltip(
-              dragging != null && canHideMore ? 'Drop here to hide' : 'Hidden tabs',
+              dragging != null && canHideMore
+                  ? 'Drop here to hide'
+                  : 'Hidden tabs',
               MouseRegion(
                 cursor: SystemMouseCursors.click,
                 child: GestureDetector(
@@ -697,14 +613,13 @@ class _RecentProviderTabBarState extends State<_RecentProviderTabBar> {
                             const SizedBox(width: 5),
                             Text(
                               '$hiddenCount',
-                              style: Theme.of(
-                                context,
-                              ).textTheme.labelSmall?.copyWith(
-                                color: hovering
-                                    ? scheme.onErrorContainer
-                                    : scheme.onSurfaceVariant,
-                                fontWeight: FontWeight.w600,
-                              ),
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(
+                                    color: hovering
+                                        ? scheme.onErrorContainer
+                                        : scheme.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                             ),
                           ],
                         ],
@@ -751,11 +666,16 @@ class _PanelScrollbarState extends State<_PanelScrollbar> {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
   Widget _tooltip(String message, Widget child) {
-    return _PassiveTooltip(message: message, child: child);
+    return PassiveTooltip(message: message, child: child);
   }
 
   Future<void> _showError(BuildContext context, Object error) async {
@@ -1989,6 +1909,16 @@ class HomeScreen extends StatelessWidget {
                             },
                     ),
                     const Divider(height: 28),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Whiteboard file locations'),
+                      subtitle: const Text(
+                        'Fallback folders for paths in responses.',
+                      ),
+                      trailing: const Icon(Icons.folder_open_rounded, size: 18),
+                      onTap: () => showWhiteboardLocations(context, state),
+                    ),
+                    const Divider(height: 28),
                     Text(
                       'Appearance',
                       style: Theme.of(context).textTheme.labelMedium?.copyWith(
@@ -2257,27 +2187,6 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  String _formatRecentAge(int timestampMs) {
-    if (timestampMs <= 0) {
-      return 'recent';
-    }
-    final updated = DateTime.fromMillisecondsSinceEpoch(timestampMs);
-    final elapsed = DateTime.now().difference(updated);
-    if (elapsed.isNegative || elapsed.inMinutes < 1) {
-      return 'now';
-    }
-    if (elapsed.inHours < 1) {
-      return '${elapsed.inMinutes}m';
-    }
-    if (elapsed.inDays < 1) {
-      return '${elapsed.inHours}h';
-    }
-    if (elapsed.inDays < 7) {
-      return '${elapsed.inDays}d';
-    }
-    return '${updated.day}.${updated.month}.';
-  }
-
   String _recentResumeCommand(RecentContext item) {
     return switch (item.provider) {
       SessionProvider.codex => 'codex resume ${item.id}',
@@ -2307,79 +2216,14 @@ class HomeScreen extends StatelessWidget {
     SessionProvider provider,
     int count, {
     bool highlighted = false,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    final selected = state.recentProvider == provider;
-    final providerColor = _providerColor(scheme, provider);
-
-    return InkWell(
-      onTap: () => state.setRecentProvider(provider),
-      borderRadius: BorderRadius.circular(9),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: selected
-              ? providerColor.withValues(alpha: 0.16)
-              : highlighted
-              ? providerColor.withValues(alpha: 0.08)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(9),
-          border: Border.all(
-            color: selected
-                ? providerColor.withValues(alpha: 0.55)
-                : highlighted
-                ? providerColor.withValues(alpha: 0.45)
-                : Colors.transparent,
-            width: 0.8,
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              switch (provider) {
-                SessionProvider.codex => Icons.terminal_rounded,
-                SessionProvider.kimi => Icons.nights_stay_outlined,
-                SessionProvider.opencode => Icons.code_rounded,
-                SessionProvider.qwen => Icons.auto_awesome_rounded,
-                SessionProvider.muse => Icons.bolt_rounded,
-                SessionProvider.zcode => Icons.smart_toy_outlined,
-              },
-              size: 15,
-              color: selected ? providerColor : scheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: 7),
-            Text(
-              provider.label,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Container(
-              constraints: const BoxConstraints(minWidth: 20),
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: selected
-                    ? providerColor.withValues(alpha: 0.22)
-                    : scheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                '$count',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  }) => RecentProviderTab(
+    provider: provider,
+    count: count,
+    selected: state.recentProvider == provider,
+    highlighted: highlighted,
+    color: _providerColor(Theme.of(context).colorScheme, provider),
+    onTap: () => state.setRecentProvider(provider),
+  );
 
   Future<void> _showHiddenTabsDialog(
     BuildContext context,
@@ -2388,7 +2232,11 @@ class HomeScreen extends StatelessWidget {
     final hidden = state.hiddenRecentTabs;
     if (hidden.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No hidden tabs. Drag a tab onto the hide area to hide it.')),
+        const SnackBar(
+          content: Text(
+            'No hidden tabs. Drag a tab onto the hide area to hide it.',
+          ),
+        ),
       );
       return;
     }
@@ -2414,8 +2262,7 @@ class HomeScreen extends StatelessWidget {
                             dense: true,
                             leading: Icon(
                               switch (provider) {
-                                SessionProvider.codex =>
-                                  Icons.terminal_rounded,
+                                SessionProvider.codex => Icons.terminal_rounded,
                                 SessionProvider.kimi =>
                                   Icons.nights_stay_outlined,
                                 SessionProvider.opencode => Icons.code_rounded,
@@ -2433,8 +2280,7 @@ class HomeScreen extends StatelessWidget {
                             ),
                             title: Text(provider.label),
                             trailing: TextButton(
-                              onPressed: () =>
-                                  state.unhideRecentTab(provider),
+                              onPressed: () => state.unhideRecentTab(provider),
                               child: const Text('Unhide'),
                             ),
                           ),
@@ -2456,7 +2302,6 @@ class HomeScreen extends StatelessWidget {
       ),
     );
   }
-
 
   Widget _buildCodexAccountSection(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
@@ -2731,11 +2576,7 @@ class HomeScreen extends StatelessWidget {
           onActivate: switchEnabled && !selected
               ? () => _switchCodexAccount(context, state, account.slot)
               : null,
-          usage: _buildCodexWeeklyUsage(
-            context,
-            account.weeklyError,
-            usage,
-          ),
+          usage: _buildCodexWeeklyUsage(context, account.weeklyError, usage),
           usageBackground: usage == null
               ? null
               : Semantics(
@@ -2798,10 +2639,7 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Future<void> _setMuseManualReset(
-    BuildContext context,
-    AppState state,
-  ) async {
+  Future<void> _setMuseManualReset(BuildContext context, AppState state) async {
     final account = state.activeMuseAccount;
     final apiResetAt = account?.weeklyResetAt == null
         ? null
@@ -2830,10 +2668,7 @@ class HomeScreen extends StatelessWidget {
       if (!context.mounted) {
         return;
       }
-      await _showError(
-        context,
-        StateError('Choose a future Muse reset time.'),
-      );
+      await _showError(context, StateError('Choose a future Muse reset time.'));
       return;
     }
 
@@ -2856,9 +2691,7 @@ class HomeScreen extends StatelessWidget {
       return null;
     }
 
-    final apiWindow = Duration(
-      seconds: account.effectiveWeeklyWindowSeconds,
-    );
+    final apiWindow = Duration(seconds: account.effectiveWeeklyWindowSeconds);
     if (apiWindow.inMilliseconds <= 0) {
       return null;
     }
@@ -2940,11 +2773,7 @@ class HomeScreen extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.bolt_rounded,
-                  size: 17,
-                  color: providerColor,
-                ),
+                Icon(Icons.bolt_rounded, size: 17, color: providerColor),
                 const SizedBox(width: 7),
                 Text(
                   'Muse account',
@@ -2955,9 +2784,7 @@ class HomeScreen extends StatelessWidget {
                 const SizedBox(width: 8),
                 Flexible(
                   child: Text(
-                    account == null
-                        ? 'Not checked yet'
-                        : account.displayName,
+                    account == null ? 'Not checked yet' : account.displayName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -2982,8 +2809,7 @@ class HomeScreen extends StatelessWidget {
                       ? 'Edit manual reset'
                       : 'Set manual reset',
                   child: IconButton(
-                    onPressed:
-                        state.busy || apiResetAt == null
+                    onPressed: state.busy || apiResetAt == null
                         ? null
                         : () => unawaited(_setMuseManualReset(context, state)),
                     icon: Icon(
@@ -3109,7 +2935,11 @@ class HomeScreen extends StatelessWidget {
     required DateTime? manualResetAt,
   }) {
     final scheme = Theme.of(context).colorScheme;
-    final usage = _museWeeklyUsageFor(account, now, manualResetAt: manualResetAt);
+    final usage = _museWeeklyUsageFor(
+      account,
+      now,
+      manualResetAt: manualResetAt,
+    );
     final underTargetColor = scheme.brightness == Brightness.dark
         ? const Color(0xFF6AD697)
         : const Color(0xFF138A4B);
@@ -3150,11 +2980,7 @@ class HomeScreen extends StatelessWidget {
           usage: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _buildCodexWeeklyUsage(
-                context,
-                account.museError,
-                usage,
-              ),
+              _buildCodexWeeklyUsage(context, account.museError, usage),
               _buildMuseWindowUsage(context, account),
             ],
           ),
@@ -3213,9 +3039,9 @@ class HomeScreen extends StatelessWidget {
               'Current window ${_formatCodexPercent(percent)}% used · resets ${_formatCodexResetLabel(DateTime.fromMillisecondsSinceEpoch(resetAt))}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ),
         ],
@@ -3223,10 +3049,7 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  _CodexWeeklyUsage? _zcodeWeeklyUsageFor(
-    ZcodeAccount account,
-    DateTime now,
-  ) {
+  _CodexWeeklyUsage? _zcodeWeeklyUsageFor(ZcodeAccount account, DateTime now) {
     if (account.zcodeError != null ||
         account.usedPercent == null ||
         account.resetAt == null) {
@@ -3240,10 +3063,9 @@ class HomeScreen extends StatelessWidget {
     final resetAt = DateTime.fromMillisecondsSinceEpoch(account.resetAt!);
     final cycleStart = resetAt.subtract(window);
     final elapsedMilliseconds = now.difference(cycleStart).inMilliseconds;
-    final expectedPercent =
-        (elapsedMilliseconds / window.inMilliseconds * 100)
-            .clamp(0, 100)
-            .toDouble();
+    final expectedPercent = (elapsedMilliseconds / window.inMilliseconds * 100)
+        .clamp(0, 100)
+        .toDouble();
     final actualPercent = account.usedPercent!.clamp(0, 100).toDouble();
 
     return _CodexWeeklyUsage(
@@ -3289,11 +3111,7 @@ class HomeScreen extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.smart_toy_outlined,
-                  size: 17,
-                  color: providerColor,
-                ),
+                Icon(Icons.smart_toy_outlined, size: 17, color: providerColor),
                 const SizedBox(width: 7),
                 Text(
                   'ZCode account',
@@ -3304,9 +3122,7 @@ class HomeScreen extends StatelessWidget {
                 const SizedBox(width: 8),
                 Flexible(
                   child: Text(
-                    account == null
-                        ? 'Not checked yet'
-                        : account.displayName,
+                    account == null ? 'Not checked yet' : account.displayName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -3447,11 +3263,7 @@ class HomeScreen extends StatelessWidget {
           accentColor: underTargetColor,
           outlineColor: neutralQuotaOutlineColor,
           onActivate: null,
-          usage: _buildCodexWeeklyUsage(
-            context,
-            account.zcodeError,
-            usage,
-          ),
+          usage: _buildCodexWeeklyUsage(context, account.zcodeError, usage),
           usageBackground: usage == null
               ? null
               : Semantics(
@@ -3721,73 +3533,16 @@ class HomeScreen extends StatelessWidget {
         '${months[value.month - 1]} ${value.year} at $hour:$minute';
   }
 
-  Widget _buildRecentSectionHeader(BuildContext context, AppState state) {
-    final scheme = Theme.of(context).colorScheme;
-    final providerColor = _providerColor(scheme, state.recentProvider);
-    final recentSubtitle = _recentSubtitle(state);
-
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
-          child: Row(
-            children: [
-              Container(
-                width: 7,
-                height: 22,
-                decoration: BoxDecoration(
-                  color: providerColor,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Recent sessions',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (recentSubtitle.isNotEmpty)
-                      Text(
-                        recentSubtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 11,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              _tooltip(
-                'Refresh recent sessions',
-                IconButton(
-                  onPressed: state.recentBusy
-                      ? null
-                      : () => state.refreshRecent(queueIfBusy: true),
-                  icon: state.recentBusy
-                      ? SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: providerColor,
-                          ),
-                        )
-                      : const Icon(Icons.refresh_rounded, size: 18),
-                ),
-              ),
-            ],
-          ),
+  Widget _buildRecentSectionHeader(BuildContext context, AppState state) =>
+      RecentSectionHeader(
+        color: _providerColor(
+          Theme.of(context).colorScheme,
+          state.recentProvider,
         ),
-      ],
-    );
-  }
+        subtitle: _recentSubtitle(state),
+        busy: state.recentBusy,
+        onRefresh: () => state.refreshRecent(queueIfBusy: true),
+      );
 
   String _recentSubtitle(AppState state) {
     if (state.recentBusy) {
@@ -3827,7 +3582,7 @@ class HomeScreen extends StatelessWidget {
                 color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
                 borderRadius: BorderRadius.circular(11),
               ),
-              child: _RecentProviderTabBar(state: state),
+              child: _RecentProviderTabBar(state: state, screen: this),
             ),
           ),
           if (state.recentProvider == SessionProvider.codex ||
@@ -3836,237 +3591,102 @@ class HomeScreen extends StatelessWidget {
             accountSection,
           _buildRecentSectionHeader(context, state),
           Padding(
-              padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
-              child: recent.isEmpty
-                  ? Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 14,
-                      ),
-                      decoration: BoxDecoration(
-                        color: scheme.surfaceContainerLowest.withValues(
-                          alpha: 0.42,
-                        ),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        state.recentBusy
-                            ? 'Reading recent sessions...'
-                            : 'No recent sessions found.',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    )
-                  : Column(
-                      children: recent
-                          .map((item) {
-                            final alreadySaved = state.hasSession(
-                              item.provider,
-                              item.id,
-                            );
-                            final displayTitle = _configuredSessionTitle(
-                              state,
-                              item.provider,
-                              item.id,
-                              item.displayTitle,
-                            );
-                            final itemColor = _providerColor(
-                              scheme,
-                              item.provider,
-                            );
-                            return Container(
-                              margin: const EdgeInsets.only(bottom: 6),
-                              padding: const EdgeInsets.fromLTRB(9, 7, 6, 7),
-                              decoration: BoxDecoration(
-                                color: scheme.surfaceContainerLowest.withValues(
-                                  alpha: 0.62,
-                                ),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: scheme.outlineVariant.withValues(
-                                    alpha: 0.8,
-                                  ),
-                                  width: 0.55,
-                                ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: _tooltip(
-                                      item.provider == SessionProvider.zcode
-                                          ? 'Click card to copy session id'
-                                          : 'Click card to copy resume command',
-                                      Material(
-                                        color: Colors.transparent,
-                                        child: InkWell(
-                                          borderRadius: BorderRadius.circular(
-                                            8,
-                                          ),
-                                          onTap: () {
-                                            _copyCommand(
-                                              context,
-                                              _recentResumeCommand(item),
-                                              'Resume',
-                                            );
-                                          },
-                                          child: Row(
-                                            children: [
-                                              Container(
-                                                constraints:
-                                                    const BoxConstraints(
-                                                      minWidth: 72,
-                                                    ),
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 8,
-                                                      vertical: 5,
-                                                    ),
-                                                decoration: BoxDecoration(
-                                                  color: itemColor.withValues(
-                                                    alpha: 0.14,
-                                                  ),
-                                                  borderRadius:
-                                                      BorderRadius.circular(8),
-                                                ),
-                                                child: Text(
-                                                  item.shortId,
-                                                  textAlign: TextAlign.center,
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: Theme.of(context)
-                                                      .textTheme
-                                                      .labelSmall
-                                                      ?.copyWith(
-                                                        color: scheme.onSurface,
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                      ),
-                                                ),
-                                              ),
-                                              const SizedBox(width: 9),
-                                              Expanded(
-                                                child: Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    Row(
-                                                      children: [
-                                                        Flexible(
-                                                          child: Text(
-                                                            displayTitle,
-                                                            maxLines: 1,
-                                                            overflow:
-                                                                TextOverflow
-                                                                    .ellipsis,
-                                                            style: Theme.of(context)
-                                                                .textTheme
-                                                                .bodyMedium
-                                                                ?.copyWith(
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w500,
-                                                                ),
-                                                          ),
-                                                        ),
-                                                        if (item.isForked) ...[
-                                                          const SizedBox(
-                                                            width: 5,
-                                                          ),
-                                                          _tooltip(
-                                                            'Forked session',
-                                                            Icon(
-                                                              Icons
-                                                                  .call_split_rounded,
-                                                              size: 13,
-                                                              color: itemColor,
-                                                            ),
-                                                          ),
-                                                        ],
-                                                      ],
-                                                    ),
-                                                    Text(
-                                                      [
-                                                        _formatRecentAge(
-                                                          item.updatedAt,
-                                                        ),
-                                                        if (item.workDir
-                                                                ?.trim()
-                                                                .isNotEmpty ==
-                                                            true)
-                                                          item.workDir!.trim(),
-                                                      ].join('  ·  '),
-                                                      maxLines: 1,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      style: Theme.of(context)
-                                                          .textTheme
-                                                          .bodySmall
-                                                          ?.copyWith(
-                                                            color: scheme
-                                                                .onSurfaceVariant,
-                                                            fontSize: 10.5,
-                                                          ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 7),
-                                  if (item.provider == SessionProvider.zcode)
-                                    _tooltip(
-                                      'Copy session id',
-                                      IconButton.filledTonal(
-                                        visualDensity: VisualDensity.compact,
-                                        onPressed: () => _copyCommand(
-                                          context,
-                                          item.id,
-                                          'Session id',
-                                        ),
-                                        icon: const Icon(
-                                          Icons.copy_rounded,
-                                          size: 17,
-                                        ),
-                                      ),
-                                    )
-                                  else
-                                    _tooltip(
-                                      alreadySaved
-                                          ? 'Already saved'
-                                          : 'Add to Context',
-                                      IconButton.filledTonal(
-                                        visualDensity: VisualDensity.compact,
-                                        onPressed: alreadySaved || state.busy
-                                            ? null
-                                            : () => _saveRecentContext(
-                                                context,
-                                                state,
-                                                item,
-                                              ),
-                                        icon: Icon(
-                                          alreadySaved
-                                              ? Icons.check_rounded
-                                              : Icons.add_rounded,
-                                          size: 17,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            );
-                          })
-                          .toList(growable: false),
+            padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
+            child: recent.isEmpty
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 14,
                     ),
-            ),
-          ],
-        ),
-      );
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerLowest.withValues(
+                        alpha: 0.42,
+                      ),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      state.recentBusy
+                          ? 'Reading recent sessions...'
+                          : 'No recent sessions found.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                : Column(
+                    children: recent
+                        .map((item) {
+                          final alreadySaved = state.hasSession(
+                            item.provider,
+                            item.id,
+                          );
+                          final displayTitle = _configuredSessionTitle(
+                            state,
+                            item.provider,
+                            item.id,
+                            item.displayTitle,
+                          );
+                          final itemColor = _providerColor(
+                            scheme,
+                            item.provider,
+                          );
+                          return RecentSessionCard(
+                            session: item,
+                            title: displayTitle,
+                            color: itemColor,
+                            tip: item.provider == SessionProvider.zcode
+                                ? 'Click card to copy session id'
+                                : 'Click card to copy resume command',
+                            onTap: () => _copyCommand(
+                              context,
+                              _recentResumeCommand(item),
+                              'Resume',
+                            ),
+                            trailing: item.provider == SessionProvider.zcode
+                                ? _tooltip(
+                                    'Copy session id',
+                                    IconButton.filledTonal(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () => _copyCommand(
+                                        context,
+                                        item.id,
+                                        'Session id',
+                                      ),
+                                      icon: const Icon(
+                                        Icons.copy_rounded,
+                                        size: 17,
+                                      ),
+                                    ),
+                                  )
+                                : _tooltip(
+                                    alreadySaved
+                                        ? 'Already saved'
+                                        : 'Add to Context',
+                                    IconButton.filledTonal(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: alreadySaved || state.busy
+                                          ? null
+                                          : () => _saveRecentContext(
+                                              context,
+                                              state,
+                                              item,
+                                            ),
+                                      icon: Icon(
+                                        alreadySaved
+                                            ? Icons.check_rounded
+                                            : Icons.add_rounded,
+                                        size: 17,
+                                      ),
+                                    ),
+                                  ),
+                          );
+                        })
+                        .toList(growable: false),
+                  ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildContextPanel(
@@ -4081,7 +3701,7 @@ class HomeScreen extends StatelessWidget {
       children: [
         Expanded(
           child: Container(
-            margin: const EdgeInsets.fromLTRB(12, 12, 0, 12),
+            margin: const EdgeInsets.fromLTRB(12, contextPanelTopInset, 0, 12),
             clipBehavior: Clip.antiAlias,
             decoration: BoxDecoration(
               color: scheme.surfaceContainerLowest.withValues(alpha: 0.28),
@@ -4103,91 +3723,91 @@ class HomeScreen extends StatelessWidget {
               child: CustomScrollView(
                 controller: scrollController,
                 slivers: [
-                SliverToBoxAdapter(
-                  child: Selector<AppState, Object>(
-                    selector: (_, state) => (
-                      state.items,
-                      state.busy,
-                      state.dirty,
-                      state.filterQuery,
-                      state.status,
-                      state.sessionsMarkdownPath,
+                  SliverToBoxAdapter(
+                    child: Selector<AppState, Object>(
+                      selector: (_, state) => (
+                        state.items,
+                        state.busy,
+                        state.dirty,
+                        state.filterQuery,
+                        state.status,
+                        state.sessionsMarkdownPath,
+                      ),
+                      builder: (context, _, _) =>
+                          _buildPanelHeader(context, state),
                     ),
-                    builder: (context, _, _) =>
-                        _buildPanelHeader(context, state),
                   ),
-                ),
-                Selector<AppState, Object>(
-                  selector: (_, state) =>
-                      (state.items, state.busy, state.filterQuery),
-                  builder: (context, _, _) =>
-                      _buildSessionSliver(context, state),
-                ),
-                SliverToBoxAdapter(
-                  child: Selector<AppState, Object>(
-                    selector: (_, state) => (
-                      state.recentProvider,
-                      state.recentBusy,
-                      state.recentRefreshRevision,
-                      state.recentStatus,
-                      state.items,
-                      state.busy,
-                      state.recentCodex,
-                      state.recentKimi,
-                      state.recentOpencode,
-                      state.recentQwen,
-                      state.recentMuse,
-                      state.recentZcode,
-                      state.recentTabOrder,
-                      state.recentTabHidden,
-                    ),
-                    // Keep account widgets stable while recent sessions refresh.
+                  Selector<AppState, Object>(
+                    selector: (_, state) =>
+                        (state.items, state.busy, state.filterQuery),
+                    builder: (context, _, _) =>
+                        _buildSessionSliver(context, state),
+                  ),
+                  SliverToBoxAdapter(
                     child: Selector<AppState, Object>(
                       selector: (_, state) => (
                         state.recentProvider,
-                        state.codexAccounts,
-                        state.codexActiveAccount,
-                        state.codexAccountBusy,
-                        state.codexAccountRefreshRevision,
-                        state.codexManualResetBusy,
-                        state.codexAccountStatus,
-                        state.codexAccountError,
-                        state.museAccounts,
-                        state.museActiveAccount,
-                        state.museAccountBusy,
-                        state.museAccountRefreshRevision,
-                        state.museManualResetAt,
-                        state.museAccountStatus,
-                        state.museAccountError,
-                        state.zcodeAccounts,
-                        state.zcodeAccountBusy,
-                        state.zcodeAccountRefreshRevision,
-                        state.zcodeAccountStatus,
-                        state.zcodeAccountError,
+                        state.recentBusy,
+                        state.recentRefreshRevision,
+                        state.recentStatus,
+                        state.items,
                         state.busy,
+                        state.recentCodex,
+                        state.recentKimi,
+                        state.recentOpencode,
+                        state.recentQwen,
+                        state.recentMuse,
+                        state.recentZcode,
+                        state.recentTabOrder,
+                        state.recentTabHidden,
                       ),
-                      builder: (context, _, _) =>
-                          state.recentProvider == SessionProvider.muse
-                          ? _buildMuseAccountSection(context, state)
-                          : state.recentProvider == SessionProvider.zcode
-                          ? _buildZcodeAccountSection(context, state)
-                          : _buildCodexAccountSection(context, state),
-                    ),
-                    builder: (context, _, accounts) => _buildRecentContexts(
-                      context,
-                      state,
-                      accountSection: accounts!,
+                      // Keep account widgets stable while recent sessions refresh.
+                      child: Selector<AppState, Object>(
+                        selector: (_, state) => (
+                          state.recentProvider,
+                          state.codexAccounts,
+                          state.codexActiveAccount,
+                          state.codexAccountBusy,
+                          state.codexAccountRefreshRevision,
+                          state.codexManualResetBusy,
+                          state.codexAccountStatus,
+                          state.codexAccountError,
+                          state.museAccounts,
+                          state.museActiveAccount,
+                          state.museAccountBusy,
+                          state.museAccountRefreshRevision,
+                          state.museManualResetAt,
+                          state.museAccountStatus,
+                          state.museAccountError,
+                          state.zcodeAccounts,
+                          state.zcodeAccountBusy,
+                          state.zcodeAccountRefreshRevision,
+                          state.zcodeAccountStatus,
+                          state.zcodeAccountError,
+                          state.busy,
+                        ),
+                        builder: (context, _, _) =>
+                            state.recentProvider == SessionProvider.muse
+                            ? _buildMuseAccountSection(context, state)
+                            : state.recentProvider == SessionProvider.zcode
+                            ? _buildZcodeAccountSection(context, state)
+                            : _buildCodexAccountSection(context, state),
+                      ),
+                      builder: (context, _, accounts) => _buildRecentContexts(
+                        context,
+                        state,
+                        accountSection: accounts!,
+                      ),
                     ),
                   ),
-                ),
-                const SliverToBoxAdapter(child: SizedBox(height: 16)),
-              ],
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                ],
+              ),
             ),
-          ),
           ),
         ),
         // Gutter outside the panel frame where the scrollbar thumb lives.
-        const SizedBox(width: 13),
+        const SizedBox(width: contextPanelGutterWidth),
       ],
     );
   }
@@ -4663,7 +4283,12 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.read<AppState>();
+    final whiteboardVisible = context.select<AppState, bool>(
+      (state) => state.whiteboardEnabled,
+    );
     final scheme = Theme.of(context).colorScheme;
+    final compactHeader = MediaQuery.sizeOf(context).width < 720;
+    final narrowHeader = MediaQuery.sizeOf(context).width < 480;
 
     return Scaffold(
       appBar: AppBar(
@@ -4684,6 +4309,7 @@ class HomeScreen extends StatelessWidget {
         title: Text(
           'Context',
           style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            fontSize: 21,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.3,
           ),
@@ -4694,17 +4320,43 @@ class HomeScreen extends StatelessWidget {
             builder: (context, busy, _) => Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                FilledButton.tonalIcon(
-                  onPressed: busy ? null : () => _addSession(context, state),
-                  icon: const Icon(Icons.add_link_rounded, size: 17),
-                  label: const Text('Add Entry'),
-                ),
+                if (compactHeader)
+                  _tooltip(
+                    'Add Entry',
+                    IconButton(
+                      onPressed: busy
+                          ? null
+                          : () => _addSession(context, state),
+                      icon: const Icon(Icons.add_link_rounded, size: 20),
+                    ),
+                  )
+                else
+                  FilledButton.tonalIcon(
+                    onPressed: busy ? null : () => _addSession(context, state),
+                    icon: const Icon(Icons.add_link_rounded, size: 17),
+                    label: const Text('Add Entry'),
+                  ),
                 const SizedBox(width: 6),
-                TextButton.icon(
-                  onPressed: busy ? null : () => _addGroup(context, state),
-                  icon: const Icon(Icons.create_new_folder_outlined, size: 17),
-                  label: const Text('Add Group'),
-                ),
+                if (compactHeader)
+                  _tooltip(
+                    'Add Group',
+                    IconButton(
+                      onPressed: busy ? null : () => _addGroup(context, state),
+                      icon: const Icon(
+                        Icons.create_new_folder_outlined,
+                        size: 20,
+                      ),
+                    ),
+                  )
+                else
+                  TextButton.icon(
+                    onPressed: busy ? null : () => _addGroup(context, state),
+                    icon: const Icon(
+                      Icons.create_new_folder_outlined,
+                      size: 17,
+                    ),
+                    label: const Text('Add Group'),
+                  ),
               ],
             ),
           ),
@@ -4715,7 +4367,46 @@ class HomeScreen extends StatelessWidget {
               icon: const Icon(Icons.settings_outlined, size: 20),
             ),
           ),
-          const SizedBox(width: 4),
+          SizedBox(
+            height: 24,
+            child: VerticalDivider(width: 17, color: scheme.outlineVariant),
+          ),
+          _tooltip(
+            whiteboardVisible ? 'Hide Whiteboard' : 'Show Whiteboard',
+            Semantics(
+              toggled: whiteboardVisible,
+              child: TextButton(
+                key: const ValueKey('whiteboard-toggle'),
+                onPressed: () => state.setWhiteboardEnabled(!whiteboardVisible),
+                style: TextButton.styleFrom(
+                  foregroundColor: whiteboardVisible
+                      ? scheme.primary
+                      : scheme.onSurfaceVariant,
+                  backgroundColor: whiteboardVisible
+                      ? scheme.primary.withValues(alpha: 0.09)
+                      : Colors.transparent,
+                  minimumSize: const Size(40, 40),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      whiteboardVisible
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded,
+                      size: 19,
+                    ),
+                    if (!narrowHeader) ...[
+                      const SizedBox(width: 7),
+                      const Text('Whiteboard'),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
         ],
       ),
       body: Container(
@@ -4727,20 +4418,24 @@ class HomeScreen extends StatelessWidget {
           ),
         ),
         child: _CodexDither(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Selector<AppState, Object>(
-                selector: (_, state) => (state.lastError, state.warnings),
-                builder: (context, _, _) => _buildWarnings(context, state),
-              ),
-              Expanded(
-                child: _PanelScrollbar(
-                  builder: (controller) =>
-                      _buildContextPanel(context, state, controller),
+          child: WhiteboardWorkspace(
+            visible: whiteboardVisible,
+            whiteboardPane: WhiteboardPane(appState: state),
+            contextPane: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Selector<AppState, Object>(
+                  selector: (_, state) => (state.lastError, state.warnings),
+                  builder: (context, _, _) => _buildWarnings(context, state),
                 ),
-              ),
-            ],
+                Expanded(
+                  child: _PanelScrollbar(
+                    builder: (controller) =>
+                        _buildContextPanel(context, state, controller),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

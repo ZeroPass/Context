@@ -11,6 +11,66 @@ Context session manager for Codex, Kimi Code, OpenCode, and Qwen Code. Offers ac
 - Codex recent sessions from `~/.codex/state_5.sqlite`
 - Kimi recent sessions from `~/.kimi-code/session_index.jsonl`
 
+## Whiteboard
+
+Enable Whiteboard in the header to view it alongside Context; its on/off state
+is remembered across restarts. Drag the subtle
+divider to resize either pane. By default Whiteboard gets two-thirds of the
+available width, while
+Context keeps at least 400 px in the split layout. Below 678 px the panes become
+full-width screens: swipe horizontally or use the compact Context/Whiteboard
+navigation buttons. Pane state and scroll positions survive layout changes;
+a manually adjusted divider stays adjusted when Whiteboard is reopened.
+
+Whiteboard has one scroll area for previews, answers, and recent sessions;
+sections use their content height instead of fixed viewport fractions. Embedded
+previews grow with their content, up to a square matching the pane's width.
+Long Markdown documents scroll inside that cap; app-wide expansion is unchanged.
+Its Codex tab shows the three most recent
+top-level sessions, with an on-demand expansion to ten. Selecting a row shows
+the latest completed answer directly above the recent list, not a resume command.
+The latest session opens automatically when Whiteboard is enabled; selecting
+another row replaces the response. Expand **Last 3** beside the
+copy button to load
+the previous two completed answers. Other Whiteboard provider tabs remain hidden
+until their response readers are implemented; the Context provider tabs are unchanged.
+
+Answers retain Markdown structure without thinking traces or tool output.
+Named file links keep their real filename and extension visible; hover tips
+distinguish Context previews and browser links. Only websites and files Context
+can preview have clickable link styling. Other file references remain ordinary
+text and never launch an external application on a normal click.
+File references have a folder button to reveal their location. Right-click it
+to open the file in its default app; the same menu is available in all previews.
+Markdown files, raster images, and videos open in a full-width viewer
+above the response, without replacing it. Markdown follows the same styling as
+answers and resolves links relative to the opened document. Images support
+zoom/pan, with a live zoom percentage in the toolbar that resets to 100% when
+clicked. Inline response images use compact thumbnails. Video has playback,
+seeking, mute, and volume controls. **Expand to app**
+covers the application's content area, not the monitor; the exit button or Escape
+restores both panes. Video remains the same player when expanded and is released
+when the preview is closed. To open any local file in its default application,
+use the folder icon's right-click menu. Website links open in the browser.
+Linux paths are translated to the WSL share indicated by the markdown location;
+line-number suffixes are removed. Relative paths are checked against the session
+working directory, then the folders in **Settings > Whiteboard file locations**.
+The default fallback is the folder containing the sessions markdown. Only exact
+candidate paths are checked, never recursive searches; ambiguous matches offer
+a chooser and missing files offer a link to add locations.
+
+While visible, the Whiteboard refreshes every 30 seconds. Reads are independent
+of account refreshes, use read-only SQLite access, and cache unchanged response
+logs. Log reads are bounded to the most recent 32 MiB; history outside that window
+is explicitly identified as unavailable. Responses are not saved into the
+sessions markdown or uploaded. Generated signal bindings must be regenerated
+after updating to this source version (`rinf gen`).
+
+Video uses [media_kit](https://github.com/media-kit/media-kit); the Windows APPX
+bundles its native player dependencies, so a separate player installation is not
+required. Third-party notices and LGPL texts are included under `assets/licenses/`.
+Markdown previews are limited to 8 MiB and use asynchronous reads.
+
 ## Run (Linux dev)
 
 ```bash
