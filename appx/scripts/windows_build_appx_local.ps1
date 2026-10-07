@@ -210,6 +210,8 @@ $excludeDirs = @(
   (Join-Path $src "build"),
   (Join-Path $src ".dart_tool"),
   (Join-Path $src ".git"),
+  (Join-Path $src ".buildlog"),
+  (Join-Path $src ".codex"),
   "ephemeral",
   ".plugin_symlinks"
 )
@@ -229,6 +231,7 @@ foreach ($d in $ExtraExcludeDirs) {
 }
 
 $rcArgs = @($src, $dst, "/E", "/XJ", "/R:2", "/W:1", "/NP", "/XD") + $excludeDirs
+$rcArgs += @("/XF", "codex sessions.md", "context.md", "whiteboard.md", "wb.md", "whiteboard.md.lock", ".whiteboard.*.tmp", "auth.json")
 
 & robocopy @rcArgs | Out-Host
 $robocopyExit = $LASTEXITCODE

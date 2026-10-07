@@ -4,6 +4,12 @@ mod codex_refresh;
 #[path = "whiteboard.rs"]
 mod whiteboard;
 
+#[path = "recent_cache.rs"]
+mod recent_cache;
+
+#[path = "kimi_index.rs"]
+mod kimi_index;
+
 #[cfg(test)]
 #[path = "context_refresh_tests.rs"]
 mod context_refresh_tests;
@@ -1556,10 +1562,11 @@ fn load_recent_qwen_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> 
 
     for runtime_base in infer_qwen_runtime_bases(markdown_path) {
         let projects_dir = runtime_base.join("projects");
+        recent_cache::track(&projects_dir);
         let Ok(projects) = fs::read_dir(&projects_dir) else {
             continue;
         };
-        for project in projects.flatten() {
+        for project in projects.flatten().take(4096) {
             let project_path = project.path();
             if !project_path.is_dir() {
                 continue;
@@ -1571,9 +1578,14 @@ fn load_recent_qwen_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> 
         }
     }
 
+    session_files.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    for (path, _) in session_files.iter().take(192) {
+        recent_cache::track(path);
+    }
     let mut recent = session_files
         .into_iter()
         .filter_map(|(path, modified_at)| read_qwen_context_file(&path, modified_at))
+        .take(RECENT_CANDIDATE_LIMIT)
         .collect::<Vec<_>>();
     recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
 
@@ -1655,6 +1667,7 @@ fn load_recent_zcode_contexts(markdown_path: &str) -> Result<Vec<RecentContext>>
     let mut recent = Vec::<RecentContext>::new();
     for root in zcode_home_roots(markdown_path) {
         let db_path = zcode_db_path_for_root(&root);
+        recent_cache::track_database(&db_path);
         if !db_path.is_file() {
             continue;
         }
@@ -1673,6 +1686,7 @@ fn load_recent_zcode_contexts(markdown_path: &str) -> Result<Vec<RecentContext>>
 }
 
 fn load_recent_zcode_database(db_path: &PathBuf) -> Result<Vec<RecentContext>> {
+    recent_cache::track_database(db_path);
     match query_recent_zcode_contexts(db_path) {
         Ok(items) => Ok(items),
         Err(error) if is_locked_sqlite_error(&error) => {
@@ -2372,6 +2386,7 @@ fn infer_muse_sessions_roots(markdown_path: &str) -> Vec<PathBuf> {
 }
 
 fn collect_muse_session_files(root: &Path, files: &mut Vec<PathBuf>) {
+    recent_cache::track(root);
     if is_muse_subagent_path(root) {
         return;
     }
@@ -2388,6 +2403,7 @@ fn collect_muse_session_files(root: &Path, files: &mut Vec<PathBuf>) {
     let mut visited_dirs = 0usize;
     let mut stack = vec![root.to_owned()];
     while let Some(dir) = stack.pop() {
+        recent_cache::track(&dir);
         visited_dirs += 1;
         if visited_dirs > 4000 {
             break;
@@ -2461,6 +2477,7 @@ fn is_muse_session_file(path: &Path) -> bool {
 }
 
 fn read_muse_context_file(path: &Path) -> Option<RecentContext> {
+    recent_cache::track(path);
     let id = path.parent()?.file_name()?.to_str()?.trim().to_owned();
     if id.is_empty() {
         return None;
@@ -2688,10 +2705,11 @@ fn expand_qwen_path(raw_path: &str, markdown_path: &str) -> PathBuf {
 }
 
 fn collect_qwen_session_files(chats_dir: &Path, files: &mut Vec<(PathBuf, i64)>) {
+    recent_cache::track(chats_dir);
     let Ok(entries) = fs::read_dir(chats_dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    for entry in entries.flatten().take(4096) {
         let path = entry.path();
         if !path.is_file() || qwen_session_id_from_path(&path).is_none() {
             continue;
@@ -2714,6 +2732,7 @@ fn qwen_session_id_from_path(path: &Path) -> Option<String> {
 }
 
 fn read_qwen_context_file(path: &Path, modified_at: i64) -> Option<RecentContext> {
+    recent_cache::track(path);
     let file_id = qwen_session_id_from_path(path)?;
     let file = fs::File::open(path).ok()?;
     let mut session_id = None;
@@ -2895,6 +2914,9 @@ fn normalize_qwen_title(value: &str) -> String {
 }
 
 fn load_recent_opencode_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> {
+    if let Some(db_path) = infer_opencode_db_path(markdown_path) {
+        recent_cache::track_database(&db_path);
+    }
     if let Some(db_path) = infer_opencode_db_path(markdown_path)
         && db_path.is_file()
     {
@@ -3100,16 +3122,17 @@ fn infer_wsl_distro(markdown_path: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn infer_wsl_opencode_path(markdown_path: &str) -> Option<String> {
-    let normalized = markdown_path.replace('\\', "/");
+    let normalized = infer_wsl_home_root(markdown_path)?
+        .to_string_lossy()
+        .replace('\\', "/");
     let path = normalized
         .strip_prefix("//wsl.localhost/")
         .or_else(|| normalized.strip_prefix("//wsl$/"))?;
     let (_, home_path) = path.split_once('/')?;
-    let home_path = home_path.strip_suffix("/codex-out/codex sessions.md")?;
     if home_path.is_empty() {
         return None;
     }
-    Some(format!("{home_path}/.opencode/bin/opencode"))
+    Some(format!("/{home_path}/.opencode/bin/opencode"))
 }
 
 fn parse_opencode_session_list(text: &str) -> Result<Vec<RecentContext>> {
@@ -3387,66 +3410,12 @@ fn load_recent_kimi_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> 
     let Some(kimi_home) = infer_kimi_home(markdown_path) else {
         return Ok(Vec::new());
     };
+    recent_cache::track(&kimi_home);
     if !kimi_home.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut entries = std::collections::HashMap::<String, KimiIndexEntry>::new();
-    let mut deleted = std::collections::HashSet::<String>::new();
-    let index_path = kimi_home.join("session_index.jsonl");
-    if index_path.is_file() {
-        let file = fs::File::open(&index_path)
-            .with_context(|| format!("Failed to open {}", index_path.display()))?;
-        for line in BufReader::new(file).lines() {
-            let Ok(line) = line else {
-                continue;
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                continue;
-            };
-            let Some(id) = value
-                .get("sessionId")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                continue;
-            };
-            if value.get("deleted").and_then(serde_json::Value::as_bool) == Some(true) {
-                entries.remove(id);
-                deleted.insert(id.to_owned());
-                continue;
-            }
-            let Some(raw_session_dir) = value
-                .get("sessionDir")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                continue;
-            };
-            let session_dir = resolve_kimi_session_dir(&kimi_home, raw_session_dir);
-            deleted.remove(id);
-            let work_dir = value
-                .get("workDir")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned);
-            entries.insert(
-                id.to_owned(),
-                KimiIndexEntry {
-                    id: id.to_owned(),
-                    session_dir,
-                    work_dir,
-                },
-            );
-        }
-    }
+    let (mut entries, deleted) = kimi_index::read(&kimi_home)?;
 
     for discovered in discover_kimi_session_dirs(&kimi_home) {
         if !deleted.contains(&discovered.id) {
@@ -3454,9 +3423,21 @@ fn load_recent_kimi_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> 
         }
     }
 
+    let mut candidates: Vec<_> = entries
+        .into_values()
+        .map(|entry| {
+            let updated = modified_at_ms(&entry.session_dir.join("state.json"));
+            (entry, updated)
+        })
+        .collect();
+    candidates.sort_by_key(|(_, updated)| std::cmp::Reverse(*updated));
+    for (entry, _) in candidates.iter().take(192) {
+        recent_cache::track(&entry.session_dir.join("state.json"));
+    }
     let mut recent = Vec::new();
-    for entry in entries.into_values() {
+    for (entry, _) in candidates {
         let state_path = entry.session_dir.join("state.json");
+        recent_cache::track(&state_path);
         if !state_path.is_file() {
             continue;
         }
@@ -3512,6 +3493,9 @@ fn load_recent_kimi_contexts(markdown_path: &str) -> Result<Vec<RecentContext>> 
             forked_from_id,
             work_dir,
         });
+        if recent.len() >= RECENT_CANDIDATE_LIMIT {
+            break;
+        }
     }
 
     recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
@@ -3544,20 +3528,22 @@ fn resolve_kimi_session_dir(kimi_home: &Path, raw_session_dir: &str) -> PathBuf 
 
 fn discover_kimi_session_dirs(kimi_home: &Path) -> Vec<KimiIndexEntry> {
     let sessions_root = kimi_home.join("sessions");
+    recent_cache::track(&sessions_root);
     let Ok(buckets) = fs::read_dir(&sessions_root) else {
         return Vec::new();
     };
 
     let mut entries = Vec::new();
-    for bucket in buckets.flatten() {
+    for bucket in buckets.flatten().take(4096) {
         let bucket_path = bucket.path();
         if !bucket_path.is_dir() {
             continue;
         }
+        recent_cache::track(&bucket_path);
         let Ok(sessions) = fs::read_dir(bucket_path) else {
             continue;
         };
-        for session in sessions.flatten() {
+        for session in sessions.flatten().take(4096) {
             let session_dir = session.path();
             if !session_dir.is_dir() {
                 continue;
@@ -3788,14 +3774,22 @@ fn infer_user_home_root(markdown_path: &str) -> Option<PathBuf> {
     let trimmed = markdown_path.trim();
     let normalized = trimmed.replace('\\', "/");
 
-    if !normalized.is_empty()
-        && let Some(prefix) = normalized.strip_suffix("/codex sessions.md")
-        && let Some(home_root) = prefix.strip_suffix("/codex-out")
-    {
+    if let Some((home_root, _)) = normalized.split_once("/codex-out/") {
         if trimmed.contains('\\') {
             return Some(PathBuf::from(home_root.replace('/', "\\")));
         }
         return Some(PathBuf::from(home_root));
+    }
+
+    if normalized.starts_with("//wsl.localhost/") || normalized.starts_with("//wsl$/") {
+        return infer_wsl_home_root(markdown_path);
+    }
+    for prefix in ["/home/", "/Users/"] {
+        if let Some(rest) = normalized.strip_prefix(prefix)
+            && let Some(user) = rest.split('/').next().filter(|value| !value.is_empty())
+        {
+            return Some(PathBuf::from(format!("{prefix}{user}")));
+        }
     }
 
     std::env::var_os("HOME")
@@ -5767,7 +5761,7 @@ mod tests {
         PROVIDER_CODEX, PROVIDER_KIMI, PROVIDER_OPENCODE, PROVIDER_QWEN, WeeklyUsage,
         apply_codex_weekly_usage_history, codex_auth_account_key,
         codex_usage_error_for_http_status, delete_codex_account_file, deserialize_items,
-        infer_wsl_home_root, is_muse_subagent_path, is_muse_tool_outputs_dir,
+        infer_user_home_root, infer_wsl_home_root, is_muse_subagent_path, is_muse_tool_outputs_dir,
         is_valid_codex_account_key, list_codex_account_metadata, load_recent_kimi_contexts,
         load_recent_opencode_contexts, load_recent_qwen_contexts, muse_auth_api_key,
         muse_auth_user_email, muse_usage_error_for_http_status, parse_iso8601_utc_ms,
@@ -6404,6 +6398,29 @@ data: "[DONE]"
         assert_eq!(legacy, PathBuf::from("\\\\wsl$\\Ubuntu-24.04\\home\\luka"));
         assert!(infer_wsl_home_root("C:\\Users\\luka\\codex sessions.md").is_none());
         assert!(infer_wsl_home_root("").is_none());
+    }
+
+    #[test]
+    fn moved_session_file_keeps_provider_and_account_home() {
+        let path =
+            "\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\codex-out\\Context\\codex sessions.md";
+        assert_eq!(
+            infer_user_home_root(path),
+            Some(PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\home\\user"))
+        );
+        assert_eq!(
+            infer_user_home_root("/home/user/codex-out/Context/custom.md"),
+            Some(PathBuf::from("/home/user"))
+        );
+        assert_eq!(
+            infer_user_home_root("/home/user/projects/sessions.md"),
+            Some(PathBuf::from("/home/user"))
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            super::infer_wsl_opencode_path(path).as_deref(),
+            Some("/home/user/.opencode/bin/opencode")
+        );
     }
 
     #[test]

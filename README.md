@@ -11,6 +11,46 @@ Context session manager for Codex, Kimi Code, OpenCode, and Qwen Code. Offers ac
 - Codex recent sessions from `~/.codex/state_5.sqlite`
 - Kimi recent sessions from `~/.kimi-code/session_index.jsonl`
 
+## Adding and Recent Sessions
+
+**Add Entry** has a single-line coding-agent picker, with the name first and
+session ID or command second. Adding from a recent card's **+** prefills its
+agent, name, and ID; only that agent is shown, with **Change** available.
+
+Recent sessions load for the selected Context provider, not all providers in
+sequence. Other tabs keep their loaded cards and refresh when selected. Context
+keeps provider-specific caches.
+Automatic session checks run only while the window is focused and foregrounded,
+pause when inactive, and check again on return. Checks run every two seconds,
+but unchanged cards are not rebuilt and the loading indicator is reserved for
+initial or manual loads. Failed refreshes retain the existing cards and back off
+automatic retries for 30 seconds; manual refresh can retry immediately.
+
+The Rust cache validates exact database/WAL, index, directory, and candidate-file
+metadata rather than reparsing unchanged stores. It keeps at most eight provider
+results and watches at most 256 exact paths per result, including at most 64
+directories. A 30-second rediscovery covers changes outside that bounded set.
+No background filesystem watcher or persistent CLI process is needed. Kimi index
+reads reuse unchanged records and consume appended records, keeping incomplete
+trailing records pending; truncated or replaced indices are reread. Qwen and Kimi
+parse the newest candidates rather than every historical session. Account usage
+refresh behavior is unchanged. The main local file is `Context/codex sessions.md`;
+saved legacy default paths migrate when the relocated file exists. Provider homes
+and credentials remain under the original user home. Create example uses the
+selected folder/default Context folder, never the Windows launch directory.
+
+## Copying
+
+Clipboard actions verify that the copied text is actually on the clipboard
+before showing a success message. Windows uses a native, checked Unicode-text
+writer. Brief clipboard contention is retried at most three times; a persistent
+failure shows an error rather than a false "copied" message. Rapid clicks are
+serialized, with the latest queued request winning, and old copy messages are
+replaced instead of building up in a queue. This applies to resume/fork commands
+and Whiteboard response copying. To run the native clipboard checks without
+changing your own clipboard, use
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test_clipboard.ps1`.
+
 ## Whiteboard
 
 Enable Whiteboard in the header to view it alongside Context; its on/off state
@@ -22,18 +62,42 @@ full-width screens: swipe horizontally or use the compact Context/Whiteboard
 navigation buttons. Pane state and scroll positions survive layout changes;
 a manually adjusted divider stays adjusted when Whiteboard is reopened.
 
-Whiteboard has one scroll area for previews, answers, and recent sessions;
+Whiteboard is a push feed in `whiteboard.md` beside the session file. `wb.md` is
+an alias for that file and a request to publish, not another filename. Permanent
+HTML comments at its beginning instruct agents. The local workspace `AGENTS.md`
+points to it: `wb.md` alone means publish the preceding completed answer. Only
+the requested final Markdown goes there, not thinking or tool traces.
+
+Use the helper rather than editing message blocks by hand:
+
+```bash
+Context/scripts/publish-whiteboard --title "Report" --provider codex <<'OUTPUT'
+# Final output
+Publish the actual requested report here.
+OUTPUT
+```
+
+Inside Context, use `scripts/publish-whiteboard`. It builds the small Rust helper
+when needed (Rust 1.89+) and defaults to this project's `whiteboard.md`. Windows
+agents can pipe output into `scripts/publish-whiteboard.ps1 -Title Report -Provider
+codex`. The APPX also bundles `context-whiteboard.exe` for direct use with `--file`.
+The helper records the time/working directory, serializes writers with a file
+lock, and atomically publishes the newest three entries. It removes **all**
+surplus older entries and unframed debris, not merely the fourth entry. Surviving
+output and the instruction header are preserved. `--init` creates the header if
+missing; `--prune` cleans without adding output. Input/files are capped at 8 MiB;
+oversized input fails without replacing the board. Live files and locks/temp
+files are excluded from Git and Windows build staging.
+
+Whiteboard has one scroll area for previews, outputs, and published entries;
 sections use their content height instead of fixed viewport fractions. Embedded
 previews grow with their content, up to a square matching the pane's width.
 Long Markdown documents scroll inside that cap; app-wide expansion is unchanged.
-Its Codex tab shows the three most recent
-top-level sessions, with an on-demand expansion to ten. Selecting a row shows
-the latest completed answer directly above the recent list, not a resume command.
-The latest session opens automatically when Whiteboard is enabled; selecting
-another row replaces the response. Expand **Last 3** beside the
-copy button to load
-the previous two completed answers. Other Whiteboard provider tabs remain hidden
-until their response readers are implemented; the Context provider tabs are unchanged.
+It shows at most three published entries and automatically opens the newest.
+Selecting an older entry pins it while publications arrive; a pruned entry cannot
+remain selected. The right pane has no provider tabs, session-log pulls, expansion
+to ten, or per-session Last 3 control. Context's provider tabs and recents on the
+left are unchanged.
 
 Answers retain Markdown structure without thinking traces or tool output.
 Named file links keep their real filename and extension visible; hover tips
@@ -53,18 +117,21 @@ restores both panes. Video remains the same player when expanded and is released
 when the preview is closed. To open any local file in its default application,
 use the folder icon's right-click menu. Website links open in the browser.
 Linux paths are translated to the WSL share indicated by the markdown location;
-line-number suffixes are removed. Relative paths are checked against the session
+line-number suffixes are removed. Relative paths are checked against the publisher's
 working directory, then the folders in **Settings > Whiteboard file locations**.
-The default fallback is the folder containing the sessions markdown. Only exact
+The default fallback stays `codex-out` when the session file is in its Context
+subfolder; custom locations use the selected folder. Only exact
 candidate paths are checked, never recursive searches; ambiguous matches offer
 a chooser and missing files offer a link to add locations.
 
-While visible, the Whiteboard refreshes every 30 seconds. Reads are independent
-of account refreshes, use read-only SQLite access, and cache unchanged response
-logs. Log reads are bounded to the most recent 32 MiB; history outside that window
-is explicitly identified as unavailable. Responses are not saved into the
-sessions markdown or uploaded. Generated signal bindings must be regenerated
-after updating to this source version (`rinf gen`).
+While visible and focused, Whiteboard watches its containing directory for file
+replacement, with a 20 ms event debounce. WSL UNC shares also check one file's
+metadata every 250 ms because Linux-side notifications may be absent; unchanged
+files are not reread/reparsed. Checks never overlap. Watching/checking stops while
+hidden or unfocused and refreshes on return. Event bursts coalesce without losing
+the final update during an active read. No session database or answer-log scan is
+used by the Whiteboard pane. Existing previews and the subtle arrival fade remain.
+Nothing is uploaded.
 
 Video uses [media_kit](https://github.com/media-kit/media-kit); the Windows APPX
 bundles its native player dependencies, so a separate player installation is not

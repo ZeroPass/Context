@@ -27,6 +27,8 @@ class FakeReader implements WhiteboardReader {
   final delayed = <String, Completer<ResponseHistory>>{};
   String answer = 'A completed response.\n\n- One result\n- Another result';
   int? recentCount;
+  List<RecentContext>? sessions;
+  Completer<List<RecentContext>>? recentWait;
   @override
   List<SessionProvider> get providers => const [SessionProvider.codex];
   @override
@@ -36,6 +38,8 @@ class FakeReader implements WhiteboardReader {
     int limit,
   ) async {
     limits.add(limit);
+    if (recentWait != null) return recentWait!.future;
+    if (sessions != null) return sessions!.take(limit).toList();
     return List.generate(
       recentCount ?? limit,
       (n) => RecentContext(
@@ -407,7 +411,7 @@ void main() {
       expect(decoration.borderRadius, BorderRadius.circular(10));
       final originalHeight = tester.getSize(section).height;
       reader.recentCount = 1;
-      await tester.tap(tip('Refresh recent sessions and response'));
+      await tester.tap(tip('Refresh recent sessions'));
       await tester.pump();
       await tester.pump();
       expect(tester.getSize(section).height, lessThan(originalHeight));
@@ -908,7 +912,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      await tester.tap(tip('Refresh recent sessions and response'));
+      await tester.tap(tip('Refresh recent sessions'));
       await tester.pump();
       await tester.pump();
       expect(reader.histories.last, ('session-1-1234', 1));
@@ -929,12 +933,312 @@ void main() {
     await mount(tester, app, reader);
     expect(reader.histories, isEmpty);
     reader.recentCount = 1;
-    await tester.tap(tip('Refresh recent sessions and response'));
+    await tester.tap(tip('Refresh recent sessions'));
     await tester.pump();
     await tester.pump();
     expect(reader.histories, [('session-0-1234', 1)]);
     expect(find.text('Last response'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  RecentContext session(String id, int updatedAt) => RecentContext(
+    provider: SessionProvider.codex,
+    id: id,
+    title: 'Session $id',
+    updatedAt: updatedAt,
+  );
+
+  testWidgets('two second updates reorder recents and follow the newest', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader()..sessions = [session('a', 2), session('b', 1)];
+    await mount(tester, app, reader);
+    expect(reader.histories.last, ('a', 1));
+    reader.sessions = [session('b', 3), session('a', 2)];
+    reader.answer = 'Fresh answer';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(reader.histories.last, ('b', 1));
+    expect(find.text('Fresh answer', findRichText: true), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('whiteboard-session-b'))).dy,
+      lessThan(
+        tester
+            .getTopLeft(find.byKey(const ValueKey('whiteboard-session-a')))
+            .dy,
+      ),
+    );
+    expect(find.text('Latest'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  testWidgets('older selection stays pinned while new cards move above it', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader()..sessions = [session('a', 2), session('b', 1)];
+    await mount(tester, app, reader);
+    await tester.tap(find.byKey(const ValueKey('whiteboard-session-b')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    reader.sessions = [session('c', 3), session('a', 2), session('b', 1)];
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(reader.histories.last, ('b', 1));
+    expect(find.text('Pinned'), findsOneWidget);
+    expect(find.byKey(const ValueKey('whiteboard-answer-b:0')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('whiteboard-follow-latest')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(reader.histories.last, ('c', 1));
+    expect(find.text('Latest'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  testWidgets('answer polling runs while metadata refresh is blocked', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader();
+    await mount(tester, app, reader);
+    reader.recentWait = Completer<List<RecentContext>>();
+    reader.answer = 'Reply without a global refresh';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(
+      find.text('Reply without a global refresh', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    reader.recentWait!.complete(const []);
+    await tester.pump();
+    app.dispose();
+  });
+
+  testWidgets('list and answer refresh controls are independent', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader();
+    await mount(tester, app, reader);
+    final lists = reader.limits.length;
+    final replies = reader.histories.length;
+    await tester.tap(find.byKey(const ValueKey('whiteboard-response-refresh')));
+    await tester.pump();
+    await tester.pump();
+    expect(reader.limits.length, lists);
+    expect(reader.histories.length, replies + 1);
+    await tester.tap(tip('Refresh recent sessions'));
+    await tester.pump();
+    await tester.pump();
+    expect(reader.limits.length, lists + 1);
+    expect(reader.histories.length, replies + 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  testWidgets('cached selection appears immediately while it is revalidated', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader();
+    await mount(tester, app, reader);
+    await tester.tap(
+      find.byKey(const ValueKey('whiteboard-session-session-1-1234')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    reader.delayed['session-0-1234'] = Completer<ResponseHistory>();
+    await tester.tap(
+      find.byKey(const ValueKey('whiteboard-session-session-0-1234')),
+    );
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('whiteboard-answer-session-0-1234:0')),
+      findsOneWidget,
+    );
+    expect(find.text('Reading last response...'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    reader.delayed['session-0-1234']!.complete(
+      const ResponseHistory([], null, false),
+    );
+    await tester.pump();
+    app.dispose();
+  });
+
+  testWidgets(
+    'unchanged background checks keep Markdown and scrolling intact',
+    (tester) async {
+      final app = AppState.forTesting(sendRequest: (_) {});
+      final reader = FakeReader()
+        ..answer = List.generate(50, (n) => 'Paragraph $n').join('\n\n');
+      await mount(tester, app, reader, height: 600);
+      final markdown = tester.widget<MarkdownBody>(find.byType(MarkdownBody));
+      final controller = tester
+          .widget<SingleChildScrollView>(
+            find.byKey(const ValueKey('whiteboard-scroll')),
+          )
+          .controller!;
+      controller.jumpTo(100);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      expect(
+        identical(
+          markdown,
+          tester.widget<MarkdownBody>(find.byType(MarkdownBody)),
+        ),
+        isTrue,
+      );
+      expect(controller.offset, 100);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+    },
+  );
+
+  testWidgets(
+    'offscreen Whiteboard stops polling and refreshes when revealed',
+    (tester) async {
+      final app = AppState.forTesting(sendRequest: (_) {});
+      final reader = FakeReader();
+      await mount(tester, app, reader);
+      Future<void> show(bool visible) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: TickerMode(
+                enabled: visible,
+                child: WhiteboardPane(appState: app, reader: reader),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+
+      await show(false);
+      final lists = reader.limits.length;
+      final replies = reader.histories.length;
+      await tester.pump(const Duration(seconds: 6));
+      expect(reader.limits.length, lists);
+      expect(reader.histories.length, replies);
+      await show(true);
+      expect(reader.limits.length, greaterThan(lists));
+      expect(reader.histories.length, greaterThan(replies));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+    },
+  );
+
+  testWidgets('following a new session preserves the open preview', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final root = Directory.systemTemp.createTempSync('context-follow-preview-');
+    final notes = File('${root.path}/notes.md')
+      ..writeAsStringSync('# Keep open');
+    final reader = FakeReader()
+      ..sessions = [session('a', 1)]
+      ..answer = '[notes](${notes.path.replaceAll('\\', '/')})';
+    await mount(tester, app, reader);
+    await flushReferences(tester);
+    await tester.tap(find.text('notes.md'));
+    await flushReferences(tester);
+    final preview = tester
+        .widget<WhiteboardFilePreview>(find.byType(WhiteboardFilePreview))
+        .controller;
+    reader.sessions = [session('b', 2), session('a', 1)];
+    reader.answer = 'New session answer';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(reader.histories.last, ('b', 1));
+    expect(
+      identical(
+        preview,
+        tester
+            .widget<WhiteboardFilePreview>(find.byType(WhiteboardFilePreview))
+            .controller,
+      ),
+      isTrue,
+    );
+    expect(preview.markdown, contains('Keep open'));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+    root.deleteSync(recursive: true);
+  });
+
+  testWidgets('manual answer refresh retries newly available files', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final root = Directory.systemTemp.createTempSync('context-retry-file-');
+    final notes = File('${root.path}/notes.md');
+    final reader = FakeReader()
+      ..answer = '[notes](${notes.path.replaceAll('\\', '/')})';
+    await mount(tester, app, reader);
+    await flushReferences(tester);
+    expect(find.text('Not found · add location'), findsOneWidget);
+    notes.writeAsStringSync('# Newly available');
+    await tester.tap(find.byKey(const ValueKey('whiteboard-response-refresh')));
+    await tester.pump();
+    await flushReferences(tester);
+    expect(find.text('Not found · add location'), findsNothing);
+    expect(tip('Open in Context'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+    root.deleteSync(recursive: true);
+  });
+
+  testWidgets('response controls fit the minimum Whiteboard width', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader();
+    await mount(tester, app, reader, width: 235);
+    expect(
+      find.byKey(const ValueKey('whiteboard-response-refresh')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('whiteboard-follow-latest')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
+
+  testWidgets('empty recent lists remain quiet after the initial load', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    final reader = FakeReader()..recentCount = 0;
+    await mount(tester, app, reader);
+    expect(find.text('No recent sessions found.'), findsOneWidget);
+    reader.recentWait = Completer<List<RecentContext>>();
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(find.text('Refreshing...'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    reader.recentWait!.complete(const []);
+    await tester.pump();
     app.dispose();
   });
 

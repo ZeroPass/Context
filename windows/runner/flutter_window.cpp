@@ -1,7 +1,9 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <flutter/standard_method_codec.h>
 
+#include "clipboard_writer.h"
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -25,6 +27,32 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  clipboard_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "context/clipboard",
+          &flutter::StandardMethodCodec::GetInstance());
+  clipboard_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() != "writeText") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* text = call.arguments() == nullptr
+                               ? nullptr
+                               : std::get_if<std::string>(call.arguments());
+        if (text == nullptr) {
+          result->Error("Clipboard error", "Expected clipboard text.");
+          return;
+        }
+        const DWORD error = WriteClipboardText(GetHandle(), *text);
+        if (error != ERROR_SUCCESS) {
+          result->Error("Clipboard error", "Windows clipboard could not be updated.",
+                        flutter::EncodableValue(static_cast<int32_t>(error)));
+          return;
+        }
+        result->Success();
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +68,10 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (clipboard_channel_) {
+    clipboard_channel_->SetMethodCallHandler(nullptr);
+    clipboard_channel_.reset();
+  }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

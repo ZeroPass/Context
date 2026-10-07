@@ -12,11 +12,14 @@ import 'package:provider/provider.dart';
 
 import '../app/app_state.dart';
 import '../app/models.dart';
+import '../app/workspace_paths.dart';
+import 'copy_feedback.dart';
 import 'widgets/codex_account_card.dart';
 import 'widgets/whiteboard_workspace.dart';
 import 'widgets/whiteboard_pane.dart';
 import 'widgets/passive_tooltip.dart';
 import 'widgets/recent_sessions.dart';
+import 'widgets/add_session_dialog.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
 
@@ -770,15 +773,7 @@ class _HomeScreenState extends State<HomeScreen> {
     BuildContext context,
     String command,
     String label,
-  ) async {
-    await Clipboard.setData(ClipboardData(text: command));
-    if (!context.mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$label copied.')));
-  }
+  ) => copyWithFeedback(context, command, '$label copied.');
 
   Future<void> _renameItem(
     BuildContext context,
@@ -842,137 +837,31 @@ class _HomeScreenState extends State<HomeScreen> {
     String? initialName,
     SessionProvider initialProvider = SessionProvider.codex,
   }) async {
-    final commandController = TextEditingController(
-      text: initialSessionInput ?? '',
-    );
-    final nameController = TextEditingController(text: initialName ?? '');
-    var selectedProvider = initialProvider;
-
     try {
-      final accepted = await showDialog<bool>(
+      final accepted = await showDialog<SessionDraft>(
         context: context,
-        builder: (dialogContext) => StatefulBuilder(
-          builder: (context, setDialogState) => AlertDialog(
-            title: const Text('Add Session'),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  SegmentedButton<SessionProvider>(
-                    showSelectedIcon: false,
-                    segments: const [
-                      ButtonSegment(
-                        value: SessionProvider.codex,
-                        icon: Icon(Icons.terminal_rounded, size: 16),
-                        label: Text('Codex'),
-                      ),
-                      ButtonSegment(
-                        value: SessionProvider.kimi,
-                        icon: Icon(Icons.nights_stay_outlined, size: 16),
-                        label: Text('Kimi'),
-                      ),
-                      ButtonSegment(
-                        value: SessionProvider.opencode,
-                        icon: Icon(Icons.code_rounded, size: 16),
-                        label: Text('OpenCode'),
-                      ),
-                      ButtonSegment(
-                        value: SessionProvider.qwen,
-                        icon: Icon(Icons.auto_awesome_rounded, size: 16),
-                        label: Text('Qwen'),
-                      ),
-                      ButtonSegment(
-                        value: SessionProvider.muse,
-                        icon: Icon(Icons.bolt_rounded, size: 16),
-                        label: Text('Muse'),
-                      ),
-                    ],
-                    selected: <SessionProvider>{selectedProvider},
-                    onSelectionChanged: (selection) => setDialogState(
-                      () => selectedProvider = selection.first,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: nameController,
-                    autofocus: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Name',
-                      hintText: 'Optional display name',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: commandController,
-                    decoration: InputDecoration(
-                      labelText: 'Session id or resume command',
-                      hintText: switch (selectedProvider) {
-                        SessionProvider.codex => 'codex resume <id>',
-                        SessionProvider.kimi => 'kimi --session <id>',
-                        SessionProvider.opencode => 'opencode --session <id>',
-                        SessionProvider.qwen => 'qwen --resume <id>',
-                        SessionProvider.muse => 'muse resume <id> --yolo',
-                        SessionProvider.zcode => '<session id>',
-                      },
-                    ),
-                    onChanged: (value) {
-                      try {
-                        final parsed = state.parseSessionInput(
-                          value,
-                          fallback: selectedProvider,
-                        );
-                        final lower = value.toLowerCase();
-                        if ((lower.contains('codex ') ||
-                                lower.contains('kimi ') ||
-                                lower.contains('opencode ') ||
-                                lower.contains('muse ') ||
-                                lower.contains('qwen ')) &&
-                            parsed.provider != selectedProvider) {
-                          setDialogState(
-                            () => selectedProvider = parsed.provider,
-                          );
-                        }
-                      } on FormatException {
-                        // Incomplete commands are expected while typing.
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(false),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(dialogContext).pop(true),
-                child: const Text('Add'),
-              ),
-            ],
-          ),
+        builder: (_) => AddSessionDialog(
+          appState: state,
+          initialInput: initialSessionInput,
+          initialName: initialName,
+          initialProvider: initialProvider,
         ),
       );
 
-      if (accepted != true) {
+      if (accepted == null) {
         return;
       }
 
       state.addSession(
-        sessionInput: commandController.text,
-        title: nameController.text,
-        provider: selectedProvider,
+        sessionInput: accepted.input,
+        title: accepted.name,
+        provider: accepted.provider,
       );
     } catch (error) {
       if (!context.mounted) {
         return;
       }
       await _showError(context, error);
-    } finally {
-      commandController.dispose();
-      nameController.dispose();
     }
   }
 
@@ -1843,6 +1732,11 @@ class _HomeScreenState extends State<HomeScreen> {
                             : state.sessionsMarkdownPath,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                    ),
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      'wb.md → ${whiteboardFilePath(state.sessionsMarkdownPath)}',
+                      style: Theme.of(context).textTheme.bodySmall,
                     ),
                     const SizedBox(height: 10),
                     Wrap(

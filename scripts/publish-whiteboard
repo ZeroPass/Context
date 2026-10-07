@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+binary="$root/.buildlog/whiteboard-writer/release/context-whiteboard"
+cargo build --quiet --release --locked --manifest-path "$root/native/whiteboard_writer/Cargo.toml" --target-dir "$root/.buildlog/whiteboard-writer"
+exec "$binary" --file "$root/whiteboard.md" "$@"

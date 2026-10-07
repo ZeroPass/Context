@@ -169,10 +169,10 @@ class MuseAccount {
       effectiveWeeklyWindowSeconds > 0;
 
   bool get hasWindowUsage =>
-    museError == null &&
-    windowUsedPercent != null &&
-    windowResetAt != null &&
-    (effectiveWindowSeconds ?? 0) > 0;
+      museError == null &&
+      windowUsedPercent != null &&
+      windowResetAt != null &&
+      (effectiveWindowSeconds ?? 0) > 0;
 }
 
 class ZcodeAccount {
@@ -221,8 +221,7 @@ class ZcodeAccount {
 
   String get identityKey => slot.trim().toLowerCase();
 
-  int get effectiveWindowSeconds =>
-      windowSeconds == null || windowSeconds! <= 0
+  int get effectiveWindowSeconds => windowSeconds == null || windowSeconds! <= 0
       ? defaultWindowSeconds
       : windowSeconds!;
 
@@ -286,6 +285,15 @@ class RecentContext {
   final int updatedAt;
   final String? forkedFromId;
   final String? workDir;
+
+  Map<String, dynamic> toJson() => {
+    'provider': provider.key,
+    'id': id,
+    'title': title,
+    'updated_at': updatedAt,
+    'forked_from_id': forkedFromId,
+    'work_dir': workDir,
+  };
 
   String get identityKey => '${provider.key}:${id.trim().toLowerCase()}';
 

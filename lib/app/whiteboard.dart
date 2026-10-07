@@ -54,6 +54,7 @@ abstract class WhiteboardReader {
 }
 
 class LocalWhiteboardReader implements WhiteboardReader {
+  static final _recentReads = <String, Future<List<RecentContext>>>{};
   LocalWhiteboardReader() {
     _subscription = WhiteboardResult.rustSignalStream.listen((pack) {
       final pending = _pending.remove(pack.message.requestId);
@@ -104,6 +105,23 @@ class LocalWhiteboardReader implements WhiteboardReader {
 
   @override
   Future<List<RecentContext>> recent(
+    String path,
+    SessionProvider provider,
+    int limit,
+  ) async {
+    final key = '$path\u0000${provider.key}\u0000$limit';
+    final existing = _recentReads[key];
+    if (existing != null) return existing;
+    final pending = _readRecent(path, provider, limit);
+    _recentReads[key] = pending;
+    try {
+      return await pending;
+    } finally {
+      if (identical(_recentReads[key], pending)) _recentReads.remove(key);
+    }
+  }
+
+  Future<List<RecentContext>> _readRecent(
     String path,
     SessionProvider provider,
     int limit,

@@ -126,6 +126,7 @@ class RecentSectionHeader extends StatelessWidget {
     required this.busy,
     required this.onRefresh,
     this.refreshTip = 'Refresh recent sessions',
+    this.title = 'Recent sessions',
     this.action,
   });
   final Color color;
@@ -133,6 +134,7 @@ class RecentSectionHeader extends StatelessWidget {
   final bool busy;
   final VoidCallback onRefresh;
   final String refreshTip;
+  final String title;
   final Widget? action;
 
   @override
@@ -157,7 +159,7 @@ class RecentSectionHeader extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Recent sessions',
+                  title,
                   style: theme.textTheme.bodyMedium?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),
@@ -208,6 +210,7 @@ class RecentSessionCard extends StatelessWidget {
     required this.tip,
     this.trailing,
     this.selected = false,
+    this.badgeLabel,
   });
   final RecentContext session;
   final String title;
@@ -216,6 +219,7 @@ class RecentSessionCard extends StatelessWidget {
   final String tip;
   final Widget? trailing;
   final bool selected;
+  final String? badgeLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -259,7 +263,7 @@ class RecentSessionCard extends StatelessWidget {
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
-                            session.shortId,
+                            badgeLabel ?? session.shortId,
                             textAlign: TextAlign.center,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,

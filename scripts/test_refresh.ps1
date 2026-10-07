@@ -1,7 +1,8 @@
 param(
   [string]$FlutterDir = (Join-Path $env:LOCALAPPDATA "AppxKit\deps\flutter"),
   [string]$EvidenceDir = ".buildlog\refresh-validation",
-  [switch]$UiOnly
+  [switch]$UiOnly,
+  [switch]$WhiteboardWslProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +35,20 @@ $inputs = @(
   "lib\ui\widgets\file_location_button.dart",
   "lib\app\file_references.dart", "test\whiteboard_test.dart",
   "native\hub\src\actors\whiteboard.rs",
+  "native\hub\src\actors\recent_cache.rs", "native\hub\src\actors\kimi_index.rs",
+  "lib\ui\widgets\session_agent_picker.dart",
+  "lib\ui\widgets\add_session_dialog.dart",
+  "lib\app\clipboard_writer.dart", "lib\ui\copy_feedback.dart",
+  "test\clipboard_writer_test.dart", "test\session_copy_test.dart",
+  "windows\runner\clipboard_writer.cpp", "windows\runner\clipboard_writer.h",
+  "windows\runner\flutter_window.cpp", "windows\runner\flutter_window.h",
+  "windows\runner\CMakeLists.txt",
+  "scripts\test_clipboard.ps1", "test\windows_clipboard_smoke.cpp",
+  "lib\app\whiteboard_file.dart", "lib\app\workspace_paths.dart", "test\whiteboard_file_test.dart",
+  "native\whiteboard_writer\src\main.rs", "native\whiteboard_writer\Cargo.toml",
+  "assets\templates\whiteboard.instructions.md", "scripts\publish-whiteboard", "scripts\publish-whiteboard.ps1",
+  "scripts\appx_hook.ps1", "appx\scripts\windows_build_appx_local.ps1",
+  "test\whiteboard_wsl_probe_test.dart",
   "Cargo.lock", "pubspec.yaml", "pubspec.lock", "analysis_options.yaml"
 )
 $inputHashes = @{}
@@ -48,6 +63,7 @@ $oldPubCache = $env:PUB_CACHE
 $oldTarget = $env:CARGO_TARGET_DIR
 $oldIncremental = $env:CARGO_INCREMENTAL
 $oldUiEvidence = $env:CONTEXT_UI_EVIDENCE_DIR
+$oldWhiteboardProbe = $env:CONTEXT_WHITEBOARD_WSL_PROBE
 
 function Run-Check([string]$Name, [string]$Exe, [string[]]$Arguments) {
   $commands.Add(("{0}: {1} {2}" -f $Name, $Exe, ($Arguments -join " ")))
@@ -67,12 +83,15 @@ try {
   if (-not $UiOnly) {
     Run-Check "rust-format" "cargo" @("fmt", "--manifest-path", "native/hub/Cargo.toml", "--", "--check")
     Run-Check "rust-tests" "cargo" @("test", "--locked", "--manifest-path", "native/hub/Cargo.toml")
+    Run-Check "whiteboard-writer-tests" "cargo" @("test", "--locked", "--manifest-path", "native/whiteboard_writer/Cargo.toml")
   }
   $formatFiles = if ($UiOnly) {
     @("lib/app/app_state.dart", "lib/ui/home_screen.dart", "lib/ui/widgets/whiteboard_workspace.dart", "test/whiteboard_workspace_test.dart", "lib/ui/widgets/passive_tooltip.dart", "lib/ui/widgets/recent_sessions.dart", "test/app_state_refresh_test.dart", "lib/ui/widgets/whiteboard_pane.dart", "lib/ui/widgets/file_preview.dart", "lib/ui/widgets/video_preview.dart", "lib/app/whiteboard.dart", "lib/app/file_references.dart", "lib/ui/widgets/file_location_button.dart", "test/whiteboard_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart")
   } else {
     @("lib/main.dart", "lib/app/app_state.dart", "lib/ui/home_screen.dart", "lib/ui/widgets/codex_account_card.dart", "lib/ui/widgets/whiteboard_workspace.dart", "test/whiteboard_workspace_test.dart", "lib/ui/widgets/passive_tooltip.dart", "lib/ui/widgets/recent_sessions.dart", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart")
   }
+  $formatFiles += @("lib/app/clipboard_writer.dart", "lib/ui/copy_feedback.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart")
+  $formatFiles += @("lib/app/whiteboard_file.dart", "lib/app/workspace_paths.dart", "test/whiteboard_file_test.dart", "lib/ui/widgets/whiteboard_pane.dart")
   Run-Check "dart-format" $dart (@("format", "--output=none", "--set-exit-if-changed") + $formatFiles)
 
   # Flutter's batch launcher needs an NTFS working directory, not a WSL UNC path.
@@ -85,11 +104,14 @@ try {
   }
   $env:PUB_CACHE = Join-Path $env:LOCALAPPDATA "AppxKit\deps\pub-cache"
   $env:CONTEXT_UI_EVIDENCE_DIR = $evidence
+  if ($WhiteboardWslProbe) {
+    $env:CONTEXT_WHITEBOARD_WSL_PROBE = Join-Path $root ".buildlog\whiteboard-push\wsl-fixture"
+  }
   Push-Location $work
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
-    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart")
+    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart", "test/whiteboard_file_test.dart", "test/whiteboard_wsl_probe_test.dart")
   } finally { Pop-Location }
 
   $report = @("UTC: $([DateTime]::UtcNow.ToString('o'))", "Result: all checks completed", "Source: $root", "Flutter staging: $work", "CARGO_TARGET_DIR: $env:CARGO_TARGET_DIR", "CARGO_INCREMENTAL: $env:CARGO_INCREMENTAL", "PUB_CACHE: $env:PUB_CACHE", "", "Commands:") + $commands.ToArray()
@@ -115,5 +137,6 @@ try {
   $env:CARGO_TARGET_DIR = $oldTarget
   $env:CARGO_INCREMENTAL = $oldIncremental
   $env:CONTEXT_UI_EVIDENCE_DIR = $oldUiEvidence
+  $env:CONTEXT_WHITEBOARD_WSL_PROBE = $oldWhiteboardProbe
   Remove-Item -LiteralPath $work -Recurse -Force
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -5,6 +6,10 @@ import 'dart:ui' as ui;
 
 import 'package:context/app/app_state.dart';
 import 'package:context/app/models.dart';
+import 'package:context/app/whiteboard.dart';
+import 'package:context/ui/widgets/session_agent_picker.dart';
+import 'package:context/ui/widgets/add_session_dialog.dart';
+import 'package:context/ui/widgets/passive_tooltip.dart';
 import 'package:context/main.dart';
 import 'package:context/src/bindings/bindings.dart';
 import 'package:context/ui/home_screen.dart';
@@ -18,6 +23,45 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const markdownPath = '/test/codex-out/codex sessions.md';
 const snapshotKey = ValueKey('app-snapshot');
+
+class FakeRecentReader implements WhiteboardReader {
+  final calls = <SessionProvider>[];
+  final pending = <SessionProvider, Completer<List<RecentContext>>>{};
+  final pendingPaths = <String, Completer<List<RecentContext>>>{};
+  bool fail = false;
+  bool empty = false;
+  @override
+  List<SessionProvider> get providers => const [SessionProvider.codex];
+  @override
+  Future<List<RecentContext>> recent(
+    String path,
+    SessionProvider provider,
+    int limit,
+  ) async {
+    calls.add(provider);
+    if (pendingPaths[path] case final wait?) return wait.future;
+    if (fail) throw StateError('offline');
+    if (empty) return const [];
+    if (pending[provider] case final wait?) return wait.future;
+    return [
+      RecentContext(
+        provider: provider,
+        id: '${provider.key}-recent',
+        title: 'Loaded ${provider.label}',
+        updatedAt: 1,
+      ),
+    ];
+  }
+
+  @override
+  Future<ResponseHistory> history(
+    String path,
+    RecentContext session,
+    int limit,
+  ) async => const ResponseHistory([], null, false);
+  @override
+  void dispose() {}
+}
 
 void emitState({
   String path = markdownPath,
@@ -176,6 +220,324 @@ void main() {
       }
     });
   }
+
+  testWidgets(
+    'agent picker fits narrow widths and prefilled entries stay compact',
+    (tester) async {
+      var selected = SessionProvider.opencode;
+      Future<void> show({bool prefilled = false}) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Center(
+                child: SizedBox(
+                  width: 200,
+                  child: SessionAgentPicker(
+                    provider: selected,
+                    prefilled: prefilled,
+                    onChanged: (value) => selected = value,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+      }
+
+      await show();
+      expect(find.text('OpenCode'), findsOneWidget);
+      expect(
+        find.byType(DropdownButtonFormField<SessionProvider>),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await show(prefilled: true);
+      expect(
+        find.byType(DropdownButtonFormField<SessionProvider>),
+        findsNothing,
+      );
+      expect(find.text('OpenCode'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('session-agent-change')));
+      await tester.pump();
+      expect(
+        find.byType(DropdownButtonFormField<SessionProvider>),
+        findsOneWidget,
+      );
+      await tester.tap(find.byType(DropdownButton<SessionProvider>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Kimi').last);
+      await tester.pumpAndSettle();
+      expect(selected, SessionProvider.kimi);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  stateTest('recent plus prefills just its agent and name in the add dialog', (
+    tester,
+  ) async {
+    emitState(recentTitle: 'Recent');
+    await tester.pump();
+    state.setRecentProvider(SessionProvider.opencode);
+    await mountApp(tester);
+    final add = find.byWidgetPredicate(
+      (widget) =>
+          widget is PassiveTooltip && widget.message == 'Add to Context',
+    );
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    expect(find.text('Add Session'), findsOneWidget);
+    expect(find.byType(DropdownButtonFormField<SessionProvider>), findsNothing);
+    expect(find.text('Change'), findsOneWidget);
+    await capture(tester, 'whiteboard-add-prefilled');
+    final fields = tester
+        .widgetList<TextField>(find.byType(TextField))
+        .toList();
+    expect(
+      fields
+          .where((field) => field.decoration?.labelText == 'Name')
+          .single
+          .controller!
+          .text,
+      'Recent opencode',
+    );
+    expect(
+      fields
+          .where(
+            (field) =>
+                field.decoration?.labelText == 'Session id or resume command',
+          )
+          .single
+          .controller!
+          .text,
+      'opencode-recent',
+    );
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'new-session dialog fits a narrow window and detects pasted commands',
+    (tester) async {
+      final app = AppState.forTesting(sendRequest: (_) {});
+      SessionDraft? result;
+      tester.view.physicalSize = const Size(360, 600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: snapshotKey,
+          child: MaterialApp(
+            theme: ThemeData(fontFamily: 'Oxanium'),
+            home: Scaffold(
+              body: Center(
+                child: TextButton(
+                  onPressed: () async {
+                    result = await showDialog<SessionDraft>(
+                      context: tester.element(find.text('Open')),
+                      builder: (_) => AddSessionDialog(appState: app),
+                    );
+                  },
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(DropdownButtonFormField<SessionProvider>),
+        findsOneWidget,
+      );
+      final name = find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == 'Name',
+      );
+      final input = find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Session id or resume command',
+      );
+      expect(tester.getTopLeft(name).dy, lessThan(tester.getTopLeft(input).dy));
+      await tester.enterText(name, 'My session');
+      await tester.enterText(
+        input,
+        'opencode -s ses_03b11dd04fferK1QCoy177s8pu',
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('OpenCode'), findsOneWidget);
+      await capture(tester, 'whiteboard-add-new');
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Add'));
+      await tester.pumpAndSettle();
+      expect(result?.provider, SessionProvider.opencode);
+      expect(result?.name, 'My session');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+    },
+  );
+
+  testWidgets(
+    'selected provider loads independently and native states cannot erase its cards',
+    (tester) async {
+      final reader = FakeRecentReader();
+      final app = AppState.forTesting(sendRequest: (_) {}, recentReader: reader)
+        ..sessionsMarkdownPath = markdownPath;
+      await app.refreshRecent();
+      expect(reader.calls, [SessionProvider.codex]);
+      final old = app.recentCodex;
+      emitState();
+      await tester.pump();
+      expect(app.recentCodex, same(old));
+      reader.pending[SessionProvider.kimi] = Completer<List<RecentContext>>();
+      app.setRecentProvider(SessionProvider.kimi);
+      await tester.pump();
+      expect(app.recentBusy, isTrue);
+      app.setRecentProvider(SessionProvider.qwen);
+      await tester.pump();
+      expect(app.visibleRecent.single.provider, SessionProvider.qwen);
+      expect(app.recentBusy, isFalse);
+      expect(reader.calls, [
+        SessionProvider.codex,
+        SessionProvider.kimi,
+        SessionProvider.qwen,
+      ]);
+      reader.pending[SessionProvider.kimi]!.complete(const []);
+      await tester.pump();
+      expect(app.visibleRecent.single.provider, SessionProvider.qwen);
+      app.dispose();
+    },
+  );
+
+  testWidgets(
+    'quiet recent checks preserve identities and errors retain cards',
+    (tester) async {
+      final reader = FakeRecentReader();
+      final app = AppState.forTesting(sendRequest: (_) {}, recentReader: reader)
+        ..sessionsMarkdownPath = markdownPath;
+      await app.refreshRecent();
+      final cards = app.recentCodex;
+      var notifications = 0;
+      app.addListener(() => notifications++);
+      await app.refreshRecent(background: true);
+      expect(app.recentCodex, same(cards));
+      expect(notifications, 0);
+      reader.fail = true;
+      await app.refreshRecent(background: true);
+      expect(app.recentCodex, same(cards));
+      expect(app.recentStatus, contains('showing last loaded'));
+      final attempts = reader.calls.length;
+      await app.refreshRecent(background: true);
+      expect(reader.calls.length, attempts);
+      reader.fail = false;
+      await app.refreshRecent(queueIfBusy: true);
+      expect(reader.calls.length, attempts + 1);
+      expect(app.recentStatus, '1 loaded');
+      reader.empty = true;
+      await app.refreshRecent();
+      notifications = 0;
+      await app.refreshRecent(background: true);
+      expect(notifications, 0);
+      expect(app.recentBusy, isFalse);
+      app.dispose();
+    },
+  );
+
+  testWidgets(
+    'recent loading waits for markdown and ignores old-path results',
+    (tester) async {
+      final reader = FakeRecentReader();
+      final app = AppState.forTesting(
+        sendRequest: (_) {},
+        recentReader: reader,
+        sessionsReady: false,
+      )..sessionsMarkdownPath = markdownPath;
+      await app.refreshRecent();
+      emitState();
+      await tester.pump();
+      expect(reader.calls, isEmpty);
+      emitState(busy: true);
+      await tester.pump();
+      emitState();
+      await tester.pump();
+      expect(reader.calls, [SessionProvider.codex]);
+      reader.pendingPaths[markdownPath] = Completer<List<RecentContext>>();
+      final old = app.refreshRecent();
+      app.sessionsMarkdownPath = '/other/codex-out/codex sessions.md';
+      await app.refreshRecent();
+      expect(app.visibleRecent.single.title, 'Loaded Codex');
+      reader.pendingPaths[markdownPath]!.complete([
+        const RecentContext(
+          provider: SessionProvider.codex,
+          id: 'old',
+          title: 'Wrong source',
+          updatedAt: 0,
+        ),
+      ]);
+      await old;
+      expect(app.visibleRecent.single.title, 'Loaded Codex');
+      app.dispose();
+    },
+  );
+
+  testWidgets(
+    'platform focus loss stops session polling without lifecycle changes',
+    (tester) async {
+      final reader = FakeRecentReader();
+      final app = AppState.forTesting(sendRequest: (_) {}, recentReader: reader)
+        ..sessionsMarkdownPath = markdownPath;
+      await app.refreshRecent();
+      app.didChangeViewFocus(
+        ui.ViewFocusEvent(
+          viewId: tester.view.viewId,
+          state: ui.ViewFocusState.unfocused,
+          direction: ui.ViewFocusDirection.undefined,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 10));
+      await app.refreshRecent(background: true);
+      expect(reader.calls, [SessionProvider.codex]);
+      app.didChangeViewFocus(
+        ui.ViewFocusEvent(
+          viewId: tester.view.viewId,
+          state: ui.ViewFocusState.focused,
+          direction: ui.ViewFocusDirection.undefined,
+        ),
+      );
+      await tester.pump();
+      expect(reader.calls, [SessionProvider.codex, SessionProvider.codex]);
+      app.dispose();
+    },
+  );
+
+  testWidgets(
+    'inactive session checks stop and resume once without duplicate reads',
+    (tester) async {
+      final reader = FakeRecentReader();
+      final app = AppState.forTesting(sendRequest: (_) {}, recentReader: reader)
+        ..sessionsMarkdownPath = markdownPath;
+      await app.refreshRecent();
+      app.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      await tester.pump(const Duration(seconds: 10));
+      expect(reader.calls, [SessionProvider.codex]);
+      reader.pending[SessionProvider.codex] = Completer<List<RecentContext>>();
+      app.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      expect(reader.calls, [SessionProvider.codex, SessionProvider.codex]);
+      app.dispose();
+      reader.pending[SessionProvider.codex]!.complete(const []);
+      await tester.pump();
+    },
+  );
 
   stateTest('Whiteboard toggle retains Context scroll and divider position', (
     tester,

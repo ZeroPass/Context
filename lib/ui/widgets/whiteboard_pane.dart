@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 
@@ -10,6 +9,8 @@ import '../../app/app_state.dart';
 import '../../app/file_references.dart';
 import '../../app/models.dart';
 import '../../app/whiteboard.dart';
+import '../../app/whiteboard_file.dart';
+import '../copy_feedback.dart';
 import 'passive_tooltip.dart';
 import 'recent_sessions.dart';
 import 'file_preview.dart';
@@ -32,11 +33,15 @@ class WhiteboardPane extends StatefulWidget {
   State<WhiteboardPane> createState() => _WhiteboardPaneState();
 }
 
-class _WhiteboardPaneState extends State<WhiteboardPane> {
+class _WhiteboardPaneState extends State<WhiteboardPane>
+    with WidgetsBindingObserver {
   late final WhiteboardReader _reader;
   late final WhiteboardPreviewController _previewController;
   final _paneScroll = ScrollController();
   Timer? _timer;
+  StreamSubscription<void>? _fileChanges;
+  bool get _pushMode => _reader is FileWhiteboardReader;
+  final _historyCache = <String, ResponseHistory>{};
   List<RecentContext> _recent = const [];
   RecentContext? _selected;
   ResponseHistory? _history;
@@ -51,7 +56,13 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
   bool _moreResponses = false;
   bool _recentBusy = false;
   bool _responseBusy = false;
+  bool _recentReading = false;
+  bool _recentAttempted = false;
+  bool _responseReading = false;
   bool _repeatRecent = false;
+  bool _repeatHistory = false;
+  bool _followLatest = true;
+  bool _visible = true;
   int _listGeneration = 0;
   int _responseGeneration = 0;
   SessionProvider _provider = SessionProvider.codex;
@@ -59,7 +70,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
   @override
   void initState() {
     super.initState();
-    _reader = widget.reader ?? LocalWhiteboardReader();
+    _reader = widget.reader ?? FileWhiteboardReader();
     _previewController = WhiteboardPreviewController(
       resolverFor: (file) => FileReferenceResolver(
         markdownPath: file,
@@ -69,37 +80,109 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
       videoFactory: widget.videoFactory,
     );
     widget.appState.addListener(_appChanged);
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _appChanged());
-    _timer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
-          !_recentBusy) {
-        unawaited(_refresh());
+  }
+
+  bool get _canPoll =>
+      _visible &&
+      widget.appState.sessionWindowActive &&
+      widget.appState.sessionsReady &&
+      (WidgetsBinding.instance.lifecycleState == null ||
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed);
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final wasVisible = _visible;
+    _visible = TickerMode.valuesOf(context).enabled;
+    _schedulePolling();
+    if (_visible && !wasVisible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _poll();
+      });
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _schedulePolling();
+    if (state == AppLifecycleState.resumed) _poll();
+  }
+
+  void _schedulePolling() {
+    if (_pushMode) {
+      _timer?.cancel();
+      _timer = null;
+      if (!_canPoll || _path.isEmpty) {
+        unawaited(_fileChanges?.cancel());
+        _fileChanges = null;
+      } else {
+        _fileChanges ??= (_reader as FileWhiteboardReader)
+            .changes(_path)
+            .listen((_) => _poll());
       }
-    });
+      return;
+    }
+    if (_canPoll && _timer != null) return;
+    _timer?.cancel();
+    _timer = null;
+    if (_canPoll) {
+      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
+    }
+  }
+
+  void _poll() {
+    if (!mounted || !_canPoll || _path.isEmpty) return;
+    if (!_recentReading) {
+      unawaited(_refresh(background: _recentAttempted));
+    } else if (_pushMode) {
+      _repeatRecent = true;
+    }
+    if (_selected != null && !_responseReading) {
+      unawaited(_loadHistory(background: true));
+    } else if (_pushMode && _responseReading) {
+      _repeatHistory = true;
+    }
   }
 
   void _appChanged() {
     if (!mounted) return;
+    final wasPolling = _timer != null || _fileChanges != null;
+    _schedulePolling();
     final path = widget.appState.sessionsMarkdownPath;
     final roots = widget.appState.effectiveWhiteboardRoots.join('\n');
     final changed =
         path != _path ||
         roots != _rootsKey ||
         !identical(_savedItems, widget.appState.items);
-    if (!changed) return;
+    if (!changed) {
+      if (_canPoll && !wasPolling) _poll();
+      return;
+    }
     _savedItems = widget.appState.items;
     if (path != _path) {
+      unawaited(_fileChanges?.cancel());
+      _fileChanges = null;
       _path = path;
       _listGeneration++;
       _responseGeneration++;
       _recentBusy = false;
       _responseBusy = false;
+      _recentReading = false;
+      _recentAttempted = false;
+      _responseReading = false;
+      _repeatRecent = false;
+      _repeatHistory = false;
+      _followLatest = true;
+      _historyCache.clear();
       _recent = const [];
       _selected = null;
       _history = null;
       _preview = null;
       _previewController.close();
-      unawaited(_refresh());
+      _schedulePolling();
+      if (_canPoll) unawaited(_refresh());
     }
     if (roots != _rootsKey) {
       _rootsKey = roots;
@@ -116,17 +199,36 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
     );
   }
 
-  Future<void> _refresh() async {
+  bool _sameRecent(List<RecentContext> items) {
+    if (items.length != _recent.length) return false;
+    for (var i = 0; i < items.length; i++) {
+      final a = items[i];
+      final b = _recent[i];
+      if (a.identityKey != b.identityKey ||
+          a.updatedAt != b.updatedAt ||
+          a.title != b.title ||
+          a.workDir != b.workDir) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<void> _refresh({bool background = false}) async {
     if (_path.isEmpty) return;
-    if (_recentBusy) {
-      _repeatRecent = true;
+    if (_recentReading) {
+      if (!background) _repeatRecent = true;
       return;
     }
     final generation = ++_listGeneration;
-    setState(() {
-      _recentBusy = true;
-      _recentError = null;
-    });
+    _recentReading = true;
+    _recentAttempted = true;
+    if (!background) {
+      setState(() {
+        _recentBusy = true;
+        _recentError = null;
+      });
+    }
     try {
       final items = await _reader.recent(
         _path,
@@ -134,17 +236,39 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
         _moreSessions ? 10 : 3,
       );
       if (!mounted || generation != _listGeneration) return;
-      setState(() {
-        _recent = items;
-      });
+      if (!_sameRecent(items) || _recentError != null) {
+        setState(() {
+          _recent = items;
+          _recentError = null;
+        });
+      }
       if (_selected == null && items.isNotEmpty) {
-        _select(items.first);
-      } else if (_selected != null && !_responseBusy) {
+        _select(items.first, userInitiated: false);
+      } else if ((_followLatest ||
+              (_pushMode &&
+                  !items.any(
+                    (s) => s.identityKey == _selected?.identityKey,
+                  ))) &&
+          items.isNotEmpty &&
+          items.first.identityKey != _selected?.identityKey) {
+        _select(items.first, userInitiated: false);
+      } else if (_selected != null) {
         final updated = items
             .where((s) => s.identityKey == _selected!.identityKey)
             .firstOrNull;
         if (updated != null) _selected = updated;
-        unawaited(_loadHistory());
+      }
+      if (_pushMode) {
+        final retained = items.map((s) => s.identityKey).toSet();
+        _historyCache.removeWhere((key, _) => !retained.contains(key));
+        if (items.isEmpty && _selected != null) {
+          _previewController.close();
+          setState(() {
+            _selected = null;
+            _history = null;
+            _preview = null;
+          });
+        }
       }
     } catch (error) {
       if (mounted && generation == _listGeneration) {
@@ -152,52 +276,110 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
       }
     } finally {
       if (mounted && generation == _listGeneration) {
-        setState(() => _recentBusy = false);
+        _recentReading = false;
+        if (_recentBusy) setState(() => _recentBusy = false);
         if (_repeatRecent) {
           _repeatRecent = false;
-          unawaited(_refresh());
+          unawaited(_refresh(background: _pushMode));
         }
       }
     }
   }
 
-  void _select(RecentContext session) {
-    _previewController.close();
+  void _select(RecentContext session, {bool userInitiated = true}) {
+    if (userInitiated) _previewController.close();
+    final cached = _historyCache.remove(session.identityKey);
+    if (cached != null) _historyCache[session.identityKey] = cached;
     setState(() {
+      if (userInitiated) {
+        _followLatest = _recent.firstOrNull?.identityKey == session.identityKey;
+        _preview = null;
+        _moreResponses = false;
+      }
       _selected = session;
-      _history = null;
-      _preview = null;
-      _moreResponses = false;
+      _history = cached;
       _responseError = null;
+      _responseReading = false;
+      _responseBusy = false;
+      _repeatHistory = false;
     });
     _makeResolver();
-    if (_paneScroll.hasClients) _paneScroll.jumpTo(0);
-    unawaited(_loadHistory());
+    if (userInitiated && _paneScroll.hasClients) _paneScroll.jumpTo(0);
+    unawaited(_loadHistory(background: cached != null));
   }
 
-  Future<void> _loadHistory() async {
+  bool _sameHistory(ResponseHistory result) {
+    final previous = _history;
+    if (previous == null ||
+        previous.workDir != result.workDir ||
+        previous.bounded != result.bounded ||
+        previous.responses.length != result.responses.length) {
+      return false;
+    }
+    for (var i = 0; i < result.responses.length; i++) {
+      final a = previous.responses[i];
+      final b = result.responses[i];
+      if (a.turnId != b.turnId ||
+          a.timestamp != b.timestamp ||
+          a.text != b.text) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _cacheHistory(String key, ResponseHistory history) {
+    _historyCache.remove(key);
+    _historyCache[key] = history;
+    int bytes() => _historyCache.values.fold(
+      0,
+      (sum, value) =>
+          sum + value.responses.fold(0, (n, r) => n + r.text.length * 2),
+    );
+    while (_historyCache.length > 10 || bytes() > 8 * 1024 * 1024) {
+      _historyCache.remove(_historyCache.keys.first);
+    }
+  }
+
+  Future<void> _loadHistory({bool background = false}) async {
     final session = _selected;
     if (session == null) return;
+    if (_responseReading) {
+      if (!background) _repeatHistory = true;
+      return;
+    }
     final generation = ++_responseGeneration;
     final limit = _moreResponses ? 3 : 1;
-    setState(() {
-      _responseBusy = true;
-      _responseError = null;
-    });
+    _responseReading = true;
+    if (!background) {
+      setState(() {
+        _responseBusy = true;
+        _responseError = null;
+      });
+    }
     try {
       final result = await _reader.history(_path, session, limit);
       if (!mounted || generation != _responseGeneration) return;
-      setState(() {
-        _history = result;
-        _makeResolver();
-      });
+      _cacheHistory(session.identityKey, result);
+      if (!background || !_sameHistory(result) || _responseError != null) {
+        setState(() {
+          _history = result;
+          _responseError = null;
+          _makeResolver();
+        });
+      }
     } catch (error) {
       if (mounted && generation == _responseGeneration) {
         setState(() => _responseError = '$error');
       }
     } finally {
       if (mounted && generation == _responseGeneration) {
-        setState(() => _responseBusy = false);
+        _responseReading = false;
+        if (_responseBusy) setState(() => _responseBusy = false);
+        if (_repeatHistory) {
+          _repeatHistory = false;
+          unawaited(_loadHistory(background: _pushMode));
+        }
       }
     }
   }
@@ -217,7 +399,9 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
   @override
   void dispose() {
     widget.appState.removeListener(_appChanged);
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
+    unawaited(_fileChanges?.cancel());
     _paneScroll.dispose();
     _previewController.dispose();
     if (widget.reader == null) _reader.dispose();
@@ -402,6 +586,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     return MarkdownBody(
+      key: ObjectKey(resolver),
       data: text,
       selectable: true,
       styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
@@ -462,6 +647,12 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
         if (_moreResponses) unawaited(_loadHistory());
         if (_paneScroll.hasClients) _paneScroll.jumpTo(0);
       },
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        minimumSize: const Size(0, 30),
+        visualDensity: VisualDensity.compact,
+        textStyle: Theme.of(context).textTheme.bodySmall,
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -477,45 +668,153 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
     ),
   );
 
-  Widget _answer(SessionResponse response, int index) {
-    final theme = Theme.of(context);
-    return Padding(
-      key: ValueKey('whiteboard-answer-${response.turnId}'),
-      padding: const EdgeInsets.fromLTRB(14, 6, 8, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  index == 0 ? 'Last response' : 'Earlier response',
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
+  void _toggleLatest() {
+    setState(() => _followLatest = !_followLatest);
+    if (_followLatest && _recent.isNotEmpty) {
+      if (_selected?.identityKey != _recent.first.identityKey) {
+        _select(_recent.first, userInitiated: false);
+      } else {
+        unawaited(_loadHistory());
+      }
+    }
+  }
+
+  Widget _latestToggle({bool compact = false}) {
+    final scheme = Theme.of(context).colorScheme;
+    final icon = AnimatedSwitcher(
+      duration: const Duration(milliseconds: 160),
+      child: Icon(
+        _followLatest ? Icons.dynamic_feed_rounded : Icons.push_pin_outlined,
+        key: ValueKey(_followLatest),
+        size: 14,
+      ),
+    );
+    return PassiveTooltip(
+      message: _followLatest
+          ? (_pushMode
+                ? 'Following the newest published entry.'
+                : 'Following the newest session. Click to keep this session.')
+          : (_pushMode
+                ? 'Keep this entry selected. Click to follow the newest.'
+                : 'Keep this session selected. Click to follow the newest.'),
+      child: compact
+          ? IconButton(
+              key: const ValueKey('whiteboard-follow-latest'),
+              isSelected: _followLatest,
+              onPressed: _toggleLatest,
+              visualDensity: VisualDensity.compact,
+              icon: icon,
+              style: IconButton.styleFrom(
+                foregroundColor: _followLatest
+                    ? scheme.primary
+                    : scheme.onSurfaceVariant,
+                backgroundColor: _followLatest
+                    ? scheme.primary.withValues(alpha: 0.07)
+                    : Colors.transparent,
               ),
-              _icon('Copy response', Icons.content_copy_rounded, () {
-                Clipboard.setData(ClipboardData(text: response.text));
-                _message('Response copied');
-              }),
-              if (index == 0) _historyToggle(),
-            ],
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: _markdown(response.text, _resolver!),
-          ),
-          if (_responseTime(response.timestamp).isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Text(
-              _responseTime(response.timestamp),
+            )
+          : TextButton.icon(
+              key: const ValueKey('whiteboard-follow-latest'),
+              onPressed: _toggleLatest,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                minimumSize: const Size(0, 30),
+                visualDensity: VisualDensity.compact,
+                foregroundColor: _followLatest
+                    ? scheme.primary
+                    : scheme.onSurfaceVariant,
+                backgroundColor: _followLatest
+                    ? scheme.primary.withValues(alpha: 0.07)
+                    : Colors.transparent,
+                textStyle: Theme.of(context).textTheme.bodySmall,
+              ),
+              icon: icon,
+              label: Text(_followLatest ? 'Latest' : 'Pinned'),
+            ),
+    );
+  }
+
+  Widget _answerHeader({SessionResponse? response, bool latest = true}) {
+    final theme = Theme.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) => Row(
+        children: [
+          Expanded(
+            child: Text(
+              _pushMode
+                  ? 'Published output'
+                  : latest
+                  ? 'Last response'
+                  : 'Earlier response',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: theme.textTheme.labelSmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
+          ),
+          if (latest) ...[
+            _latestToggle(compact: constraints.maxWidth < 320),
+            PassiveTooltip(
+              message: 'Refresh this response',
+              child: IconButton(
+                key: const ValueKey('whiteboard-response-refresh'),
+                onPressed: () => unawaited(_loadHistory()),
+                visualDensity: VisualDensity.compact,
+                icon: _responseBusy
+                    ? const SizedBox(
+                        width: 15,
+                        height: 15,
+                        child: CircularProgressIndicator(strokeWidth: 1.5),
+                      )
+                    : const Icon(Icons.refresh_rounded, size: 17),
+              ),
+            ),
           ],
+          if (response != null)
+            _icon('Copy response', Icons.content_copy_rounded, () {
+              unawaited(
+                copyWithFeedback(context, response.text, 'Response copied'),
+              );
+            }),
+          if (latest && !_pushMode) _historyToggle(),
         ],
+      ),
+    );
+  }
+
+  Widget _answer(SessionResponse response, int index) {
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('whiteboard-arrival-${response.turnId}'),
+      tween: Tween(
+        begin: MediaQuery.disableAnimationsOf(context) ? 1 : 0.45,
+        end: 1,
+      ),
+      duration: const Duration(milliseconds: 180),
+      builder: (context, opacity, child) =>
+          Opacity(opacity: opacity, child: child),
+      child: Padding(
+        key: ValueKey('whiteboard-answer-${response.turnId}'),
+        padding: const EdgeInsets.fromLTRB(14, 6, 8, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _answerHeader(response: response, latest: index == 0),
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: _markdown(response.text, _resolver!),
+            ),
+            if (_responseTime(response.timestamp).isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                _responseTime(response.timestamp),
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -545,7 +844,11 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
             .toList()
             .reversed
             .map((entry) => _answer(entry.$2, entry.$1)),
-        if (responses.isEmpty)
+        if (responses.isEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 6, 8, 0),
+            child: _answerHeader(),
+          ),
           Padding(
             padding: const EdgeInsets.all(14),
             child: Text(
@@ -558,6 +861,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
+        ],
         if (_responseError != null && responses.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(14),
@@ -603,69 +907,75 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
-            child: Container(
-              padding: const EdgeInsets.all(3),
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
-                borderRadius: BorderRadius.circular(11),
-              ),
-              child: Row(
-                children: [
-                  for (final provider in _reader.providers)
-                    Expanded(
-                      child: RecentProviderTab(
-                        provider: provider,
-                        count: _provider == provider ? _recent.length : 0,
-                        selected: _provider == provider,
-                        color: scheme.primary,
-                        onTap: () {
-                          if (_provider == provider) return;
-                          setState(() {
-                            _provider = provider;
-                            _selected = null;
-                            _history = null;
-                            _preview = null;
-                          });
-                          _responseGeneration++;
-                          _previewController.close();
-                          unawaited(_refresh());
-                        },
+          if (!_pushMode)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: Row(
+                  children: [
+                    for (final provider in _reader.providers)
+                      Expanded(
+                        child: RecentProviderTab(
+                          provider: provider,
+                          count: _provider == provider ? _recent.length : 0,
+                          selected: _provider == provider,
+                          color: scheme.primary,
+                          onTap: () {
+                            if (_provider == provider) return;
+                            setState(() {
+                              _provider = provider;
+                              _selected = null;
+                              _history = null;
+                              _preview = null;
+                            });
+                            _responseGeneration++;
+                            _previewController.close();
+                            unawaited(_refresh());
+                          },
+                        ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
           RecentSectionHeader(
+            title: _pushMode ? 'Published entries' : 'Recent sessions',
             color: scheme.primary,
             subtitle: _recentBusy
                 ? 'Refreshing...'
                 : _recentError != null
                 ? 'Refresh unavailable'
-                : '${_recent.length} loaded',
+                : '${_recent.length} ${_pushMode ? 'published' : 'loaded'}',
             busy: _recentBusy,
-            refreshTip: 'Refresh recent sessions and response',
+            refreshTip: _pushMode
+                ? 'Refresh whiteboard.md'
+                : 'Refresh recent sessions',
             onRefresh: () => _refresh(),
-            action: PassiveTooltip(
-              message: _moreSessions
-                  ? 'Show the three most recent sessions'
-                  : 'Load up to ten recent sessions',
-              child: IconButton(
-                key: const ValueKey('whiteboard-recent-toggle'),
-                onPressed: () {
-                  setState(() => _moreSessions = !_moreSessions);
-                  unawaited(_refresh());
-                },
-                icon: Icon(
-                  _moreSessions
-                      ? Icons.expand_less_rounded
-                      : Icons.expand_more_rounded,
-                  size: 18,
-                ),
-              ),
-            ),
+            action: _pushMode
+                ? null
+                : PassiveTooltip(
+                    message: _moreSessions
+                        ? 'Show the three most recent sessions'
+                        : 'Load up to ten recent sessions',
+                    child: IconButton(
+                      key: const ValueKey('whiteboard-recent-toggle'),
+                      onPressed: () {
+                        setState(() => _moreSessions = !_moreSessions);
+                        unawaited(_refresh());
+                      },
+                      icon: Icon(
+                        _moreSessions
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                        size: 18,
+                      ),
+                    ),
+                  ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
@@ -688,9 +998,13 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
                     child: Text(
                       _recentError ??
                           (_recentBusy
-                              ? 'Reading recent sessions...'
+                              ? (_pushMode
+                                    ? 'Reading whiteboard.md...'
+                                    : 'Reading recent sessions...')
                               : _path.isEmpty
                               ? 'Choose a sessions markdown file in Settings.'
+                              : _pushMode
+                              ? 'No published entries yet. Ask an agent: wb.md'
                               : 'No recent sessions found.'),
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
@@ -701,10 +1015,13 @@ class _WhiteboardPaneState extends State<WhiteboardPane> {
                   RecentSessionCard(
                     key: ValueKey('whiteboard-session-${session.id}'),
                     session: session,
+                    badgeLabel: _pushMode ? 'WB' : null,
                     title: _title(session),
                     color: scheme.primary,
                     selected: _selected?.identityKey == session.identityKey,
-                    tip: 'Click card to view the last response',
+                    tip: _pushMode
+                        ? 'Click to view this published output'
+                        : 'Click card to view the last response',
                     onTap: () => _select(session),
                   ),
               ],

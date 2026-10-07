@@ -42,6 +42,10 @@ config.txt
 # Local user/session data
 /context.md
 /codex sessions.md
+/whiteboard.md
+/wb.md
+/whiteboard.md.lock
+/.whiteboard.*.tmp
 /auth.json
 /.codex/context-accounts/
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show ViewFocusEvent, ViewFocusState;
 
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
@@ -9,6 +10,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../src/bindings/bindings.dart';
 import 'models.dart';
+import 'whiteboard.dart';
+import 'workspace_paths.dart';
 
 enum _PendingOpKind {
   load,
@@ -62,7 +65,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   AppState.forTesting({
     required void Function(Uint64) sendRequest,
     SharedPreferences? preferences,
+    WhiteboardReader? recentReader,
+    bool sessionsReady = true,
   }) : _testRequestSender = sendRequest {
+    _recentReader = recentReader;
+    _sessionConfigReady = sessionsReady;
     _prefs = preferences;
     whiteboardEnabled = _prefs?.getBool('whiteboardEnabled') ?? false;
     _pendingRecentRefresh = false;
@@ -95,10 +102,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<RustSignalPack<OpFinished>>? _opFinishedSub;
   Timer? _autosaveTimer;
   Timer? _recentRefreshTimer;
+  Timer? _sessionCheckTimer;
+  WhiteboardReader? _recentReader;
+  bool _disposed = false;
+  bool _sessionConfigReady = false;
+  bool _viewFocused = true;
+  final _providerReads = <SessionProvider, String>{};
+  final _providerStatuses = <SessionProvider, String>{};
+  final _providerFollowups = <SessionProvider>{};
+  final _providerRetryAfter = <SessionProvider, DateTime>{};
   Timer? _museRefreshTimer;
   Timer? _zcodeRefreshTimer;
   bool _pendingRecentRefresh = true;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
+
+  bool get sessionWindowActive =>
+      _viewFocused && _lifecycleState == AppLifecycleState.resumed;
+  bool get sessionsReady => _sessionConfigReady && !busy && lastError == null;
 
   static const _recentRefreshInterval = Duration(seconds: 30);
   static const _museRefreshInterval = Duration(hours: 24);
@@ -180,9 +200,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _autosaveTimer?.cancel();
     _recentRefreshTimer?.cancel();
+    _sessionCheckTimer?.cancel();
+    _recentReader?.dispose();
     _museRefreshTimer?.cancel();
     _zcodeRefreshTimer?.cancel();
     _uiStateSub?.cancel();
@@ -201,6 +224,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> init() async {
     WidgetsBinding.instance.addObserver(this);
     _listenToRust();
+    _recentReader = LocalWhiteboardReader();
+    _lifecycleState =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
     _prefs = await SharedPreferences.getInstance();
     themeSeedColorValue =
@@ -215,6 +241,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     sessionsMarkdownPath = _resolveInitialMarkdownPath(
       _prefs?.getString('sessionsMarkdownPath'),
     );
+    await _prefs?.setString('sessionsMarkdownPath', sessionsMarkdownPath);
     recentProvider = SessionProviderInfo.parse(
       _prefs?.getString('recentProvider'),
     );
@@ -246,21 +273,38 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
+    _scheduleSessionChecks();
     if (state == AppLifecycleState.resumed) {
       _refreshLiveData();
+    }
+    notifyListeners();
+  }
+
+  @override
+  void didChangeViewFocus(ViewFocusEvent event) {
+    final focused = event.state == ViewFocusState.focused;
+    if (_viewFocused == focused) return;
+    _viewFocused = focused;
+    _scheduleSessionChecks();
+    if (sessionWindowActive) unawaited(refreshRecent());
+    notifyListeners();
+  }
+
+  void _scheduleSessionChecks() {
+    _sessionCheckTimer?.cancel();
+    _sessionCheckTimer = null;
+    if (sessionWindowActive && _recentReader != null && !_disposed) {
+      _sessionCheckTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => unawaited(refreshRecent(background: true)),
+      );
     }
   }
 
   List<String> get effectiveWhiteboardRoots {
     if (_whiteboardRootsConfigured) return whiteboardSearchRoots;
     if (sessionsMarkdownPath.trim().isEmpty) return const [];
-    final paths = p.Context(
-      style:
-          RegExp(r'^(?:[A-Za-z]:[\\/]|\\\\|//)').hasMatch(sessionsMarkdownPath)
-          ? p.Style.windows
-          : p.Style.posix,
-    );
-    return [paths.dirname(sessionsMarkdownPath)];
+    return [sessionWorkspaceRoot(sessionsMarkdownPath)];
   }
 
   void setWhiteboardSearchRoots(List<String> roots) {
@@ -283,11 +327,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _startRecentRefreshTimer() {
+    _scheduleSessionChecks();
     _recentRefreshTimer?.cancel();
-    _recentRefreshTimer = Timer.periodic(
-      _recentRefreshInterval,
-      (_) => _refreshLiveData(),
-    );
+    _recentRefreshTimer = Timer.periodic(_recentRefreshInterval, (_) {
+      if (_recentReader == null) unawaited(refreshRecent());
+      unawaited(loadCodexAccounts());
+    });
   }
 
   void _startMuseRefreshTimer() {
@@ -382,6 +427,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   String _resolveInitialMarkdownPath(String? savedPath) {
     final saved = (savedPath ?? '').trim();
+    final migrated = migratedSessionPath(saved);
+    if (migrated != saved && _fileExists(migrated)) return migrated;
     if (_fileExists(saved)) {
       return saved;
     }
@@ -414,14 +461,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (Platform.isLinux || Platform.isMacOS) {
       final home = (Platform.environment['HOME'] ?? '').trim();
       if (home.isNotEmpty) {
-        addCandidate(p.join(home, 'codex-out', 'codex sessions.md'));
+        addCandidate(p.join(home, 'codex-out', 'Context', 'codex sessions.md'));
       }
     }
 
-    addCandidate(p.join(Directory.current.path, 'codex sessions.md'));
-    addCandidate(
-      p.normalize(p.join(Directory.current.path, '..', 'codex sessions.md')),
-    );
+    if (p.basename(Directory.current.path).toLowerCase() == 'context') {
+      addCandidate(p.join(Directory.current.path, 'codex sessions.md'));
+    }
 
     for (final candidate in candidates) {
       if (_fileExists(candidate)) {
@@ -442,10 +488,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       for (final distro in distros) {
         for (final user in linuxUsers) {
           candidates.add(
-            '\\\\wsl.localhost\\$distro\\home\\$user\\codex-out\\codex sessions.md',
+            '\\\\wsl.localhost\\$distro\\home\\$user\\codex-out\\Context\\codex sessions.md',
           );
           candidates.add(
-            '\\\\wsl\$\\$distro\\home\\$user\\codex-out\\codex sessions.md',
+            '\\\\wsl\$\\$distro\\home\\$user\\codex-out\\Context\\codex sessions.md',
           );
         }
       }
@@ -454,7 +500,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (Platform.isLinux || Platform.isMacOS) {
       final home = (Platform.environment['HOME'] ?? '').trim();
       if (home.isNotEmpty) {
-        candidates.add(p.join(home, 'codex-out', 'codex sessions.md'));
+        candidates.add(
+          p.join(home, 'codex-out', 'Context', 'codex sessions.md'),
+        );
       }
     }
 
@@ -479,6 +527,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
             final candidate = p.join(
               userDir.path,
               'codex-out',
+              'Context',
               'codex sessions.md',
             );
             if (_fileExists(candidate)) {
@@ -571,6 +620,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     recentProvider = value;
+    if (_recentReader != null) {
+      recentBusy = _providerReads[value] == sessionsMarkdownPath;
+      recentStatus = _providerStatuses[value];
+      unawaited(refreshRecent(queueIfBusy: true));
+    }
     _prefs?.setString('recentProvider', value.key);
     notifyListeners();
     if (value == SessionProvider.codex) {
@@ -1118,10 +1172,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> loadConfig({String? markdownPath}) async {
     _autosaveTimer?.cancel();
+    if (_recentReader != null) _sessionConfigReady = false;
     final requestedPath = (markdownPath ?? sessionsMarkdownPath).trim();
     if (markdownPath != null) {
       if (requestedPath != sessionsMarkdownPath) {
         codexAccounts = const <CodexAccount>[];
+        recentCodex = const [];
+        recentKimi = const [];
+        recentOpencode = const [];
+        recentQwen = const [];
+        recentMuse = const [];
+        recentZcode = const [];
+        _providerStatuses.clear();
+        _providerRetryAfter.clear();
+        recentBusy = false;
+        recentStatus = null;
       }
       sessionsMarkdownPath = requestedPath;
       _prefs?.setString('sessionsMarkdownPath', requestedPath);
@@ -1138,12 +1203,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     });
   }
 
-  Future<void> refreshRecent({bool queueIfBusy = false}) async {
-    if (_lifecycleState != AppLifecycleState.resumed ||
-        sessionsMarkdownPath.trim().isEmpty) {
+  Future<void> refreshRecent({
+    bool queueIfBusy = false,
+    bool background = false,
+  }) async {
+    if (!sessionWindowActive || sessionsMarkdownPath.trim().isEmpty) {
       return;
     }
 
+    if (_recentReader != null) {
+      if (busy || !_sessionConfigReady) {
+        _pendingRecentRefresh = true;
+        return;
+      }
+      return _refreshProviderRecent(
+        background: background,
+        queueIfBusy: queueIfBusy,
+      );
+    }
     if (busy || recentBusy) {
       if (queueIfBusy) {
         _pendingRecentRefresh = true;
@@ -1157,6 +1234,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _sendRecentRefresh() {
+    if (_recentReader != null) {
+      unawaited(refreshRecent());
+      return;
+    }
     final requestId = Uint64.fromBigInt(BigInt.zero);
     if (_testRequestSender != null) {
       _testRequestSender(requestId);
@@ -1166,6 +1247,106 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       requestId: requestId,
       sessionsMarkdownPath: sessionsMarkdownPath,
     ).sendSignalToRust();
+  }
+
+  Future<void> _refreshProviderRecent({
+    bool background = false,
+    bool queueIfBusy = false,
+  }) async {
+    final provider = recentProvider;
+    final path = sessionsMarkdownPath;
+    if (background &&
+        (_providerRetryAfter[provider]?.isAfter(DateTime.now()) ?? false)) {
+      return;
+    }
+    if (_providerReads[provider] == path) {
+      if (queueIfBusy) _providerFollowups.add(provider);
+      return;
+    }
+    _providerReads[provider] = path;
+    _pendingRecentRefresh = false;
+    final visibleLoading =
+        !background || !_providerStatuses.containsKey(provider);
+    final before = visibleRecent;
+    final previousStatus = recentStatus;
+    if (visibleLoading) {
+      recentBusy = true;
+      recentStatus = 'Refreshing recent sessions...';
+      notifyListeners();
+    }
+    try {
+      final items = await _recentReader!.recent(path, provider, 3);
+      if (_disposed || path != sessionsMarkdownPath) return;
+      final encoded = jsonEncode(items.map((item) => item.toJson()).toList());
+      final next = switch (provider) {
+        SessionProvider.codex => _recentCodexCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
+        SessionProvider.kimi => _recentKimiCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
+        SessionProvider.opencode => _recentOpencodeCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
+        SessionProvider.qwen => _recentQwenCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
+        SessionProvider.muse => _recentMuseCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
+        SessionProvider.zcode => _recentZcodeCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
+      };
+      switch (provider) {
+        case SessionProvider.codex:
+          recentCodex = next;
+        case SessionProvider.kimi:
+          recentKimi = next;
+        case SessionProvider.opencode:
+          recentOpencode = next;
+        case SessionProvider.qwen:
+          recentQwen = next;
+        case SessionProvider.muse:
+          recentMuse = next;
+        case SessionProvider.zcode:
+          recentZcode = next;
+      }
+      _providerStatuses[provider] = '${items.length} loaded';
+      _providerRetryAfter.remove(provider);
+    } catch (error) {
+      if (_disposed || path != sessionsMarkdownPath) return;
+      _providerStatuses[provider] =
+          'Refresh unavailable; showing last loaded sessions. $error';
+      _providerRetryAfter[provider] = DateTime.now().add(
+        const Duration(seconds: 30),
+      );
+    } finally {
+      if (_providerReads[provider] == path) _providerReads.remove(provider);
+      if (!_disposed &&
+          path == sessionsMarkdownPath &&
+          provider == recentProvider) {
+        recentBusy = false;
+        recentStatus = _providerStatuses[provider];
+        if (visibleLoading ||
+            !identical(before, visibleRecent) ||
+            previousStatus != recentStatus) {
+          recentRefreshRevision++;
+          notifyListeners();
+        }
+      }
+      if (!_disposed &&
+          (_providerFollowups.remove(provider) || _pendingRecentRefresh) &&
+          sessionWindowActive) {
+        unawaited(refreshRecent());
+      }
+    }
   }
 
   Future<void> saveConfig() async {
@@ -1182,7 +1363,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<String> createExampleMarkdownFile({String? markdownPath}) async {
-    final targetPath = (markdownPath ?? sessionsMarkdownPath).trim();
+    final targetPath =
+        (markdownPath ??
+                (sessionsMarkdownPath.trim().isEmpty
+                    ? _defaultMarkdownPath()
+                    : migratedSessionPath(sessionsMarkdownPath)))
+            .trim();
     if (targetPath.isEmpty) {
       throw Exception('Pick a markdown path first.');
     }
@@ -1633,12 +1819,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     busy = state.busy;
     status = state.status;
     lastError = state.lastError;
+    if (wasBusy && !busy) _sessionConfigReady = lastError == null;
     // Time-based labels must update even if begin/end share a single UI frame.
-    if (recentBusy && !state.recentBusy) {
+    if (_recentReader == null && recentBusy && !state.recentBusy) {
       recentRefreshRevision += 1;
     }
-    recentBusy = state.recentBusy;
-    recentStatus = state.recentStatus;
+    if (_recentReader == null) {
+      recentBusy = state.recentBusy;
+      recentStatus = state.recentStatus;
+    }
     codexAccounts = _accountsCache.decode(
       state.codexAccountsJson,
       _decodeCodexAccounts,
@@ -1693,6 +1882,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     zcodeAccountBusy = state.zcodeAccountBusy || _zcodeAccountRequestInFlight;
     zcodeAccountStatus = state.zcodeAccountStatus;
     zcodeAccountError = state.zcodeAccountError;
+    if (_recentReader != null &&
+        sessionsMarkdownPath != state.sessionsMarkdownPath) {
+      recentCodex = const [];
+      recentKimi = const [];
+      recentOpencode = const [];
+      recentQwen = const [];
+      recentMuse = const [];
+      recentZcode = const [];
+      _providerStatuses.clear();
+      _providerRetryAfter.clear();
+      recentBusy = false;
+      recentStatus = null;
+      _pendingRecentRefresh = true;
+    }
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     final reloadingItems =
         !busy &&
@@ -1711,35 +1914,38 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _lastItemsJson = state.itemsJson;
     }
     warnings = _warningsCache.decode(state.warningsJson, _decodeWarnings);
-    recentCodex = _recentCodexCache.decode(
-      state.recentCodexJson,
-      _decodeRecentContexts,
-    );
-    recentKimi = _recentKimiCache.decode(
-      state.recentKimiJson,
-      _decodeRecentContexts,
-    );
-    recentOpencode = _recentOpencodeCache.decode(
-      state.recentOpencodeJson,
-      _decodeRecentContexts,
-    );
-    recentQwen = _recentQwenCache.decode(
-      state.recentQwenJson,
-      _decodeRecentContexts,
-    );
-    recentMuse = _recentMuseCache.decode(
-      state.recentMuseJson,
-      _decodeRecentContexts,
-    );
-    recentZcode = _recentZcodeCache.decode(
-      state.recentZcodeJson,
-      _decodeRecentContexts,
-    );
+    if (_recentReader == null) {
+      recentCodex = _recentCodexCache.decode(
+        state.recentCodexJson,
+        _decodeRecentContexts,
+      );
+      recentKimi = _recentKimiCache.decode(
+        state.recentKimiJson,
+        _decodeRecentContexts,
+      );
+      recentOpencode = _recentOpencodeCache.decode(
+        state.recentOpencodeJson,
+        _decodeRecentContexts,
+      );
+      recentQwen = _recentQwenCache.decode(
+        state.recentQwenJson,
+        _decodeRecentContexts,
+      );
+      recentMuse = _recentMuseCache.decode(
+        state.recentMuseJson,
+        _decodeRecentContexts,
+      );
+      recentZcode = _recentZcodeCache.decode(
+        state.recentZcodeJson,
+        _decodeRecentContexts,
+      );
+    }
     final shouldStartPendingRecentRefresh =
         _pendingRecentRefresh &&
         !busy &&
         lastError == null &&
         !recentBusy &&
+        sessionWindowActive &&
         sessionsMarkdownPath.trim().isNotEmpty;
     if (shouldStartPendingRecentRefresh) {
       _pendingRecentRefresh = false;
