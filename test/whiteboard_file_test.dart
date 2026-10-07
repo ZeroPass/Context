@@ -8,6 +8,7 @@ import 'package:context/app/whiteboard_file.dart';
 import 'package:context/app/workspace_paths.dart';
 import 'package:context/ui/widgets/whiteboard_pane.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 String entry(int id, {String? body}) {
@@ -34,6 +35,35 @@ class ExampleState extends AppState {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('publishing prompt has the dynamic full location and no embedded rules', () {
+    expect(
+      whiteboardPublishPrompt('/home/alex/My Context/sessions.md'),
+      'Read `/home/alex/My Context/whiteboard.md` and follow its instructions to publish your last final answer.',
+    );
+    expect(
+      whiteboardPublishPrompt(r'D:\Apps\Context\sessions.md'),
+      r'Read `D:\Apps\Context\whiteboard.md` and follow its instructions to publish your last final answer.',
+    );
+    final wsl = whiteboardPublishPrompt(
+      r'\\wsl.localhost\Debian\home\alex\My Context\sessions.md',
+    );
+    expect(wsl, contains('`/home/alex/My Context/whiteboard.md`'));
+    expect(
+      wsl,
+      contains(
+        r'Windows: `\\wsl.localhost\Debian\home\alex\My Context\whiteboard.md`',
+      ),
+    );
+    expect(
+      whiteboardPublishPrompt('//wsl\$/Ubuntu/home/bob/Context/sessions.md'),
+      contains('`/home/bob/Context/whiteboard.md`'),
+    );
+    expect(whiteboardPublishPrompt(''), isEmpty);
+    expect(
+      whiteboardFilePath('//wsl\$/Ubuntu/home/bob/Context/sessions.md'),
+      r'\\wsl$\Ubuntu\home\bob\Context\whiteboard.md',
+    );
+  });
   test(
     'parser keeps newest three and ignores debris without changing Markdown',
     () {
@@ -167,6 +197,19 @@ void main() {
   testWidgets('push pane shows newest output, no session tabs or pull controls', (
     tester,
   ) async {
+    var clipboard = '';
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        clipboard = (call.arguments as Map)['text'] as String;
+      }
+      if (call.method == 'Clipboard.getData') return {'text': clipboard};
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
     final root = Directory.systemTemp.createTempSync('context-push-pane-');
     final state = AppState.forTesting(sendRequest: (_) {})
       ..sessionsMarkdownPath = '${root.path}/codex sessions.md';
@@ -189,6 +232,15 @@ void main() {
       await tester.pump(const Duration(milliseconds: 30));
     }
     expect(find.text('Published entries'), findsOneWidget);
+    final copyPrompt = find.byKey(const ValueKey('whiteboard-copy-prompt'));
+    expect(copyPrompt, findsOneWidget);
+    await tester.tap(copyPrompt);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(clipboard, whiteboardPublishPrompt(state.sessionsMarkdownPath));
+    expect(
+      find.text('First prompt copied. Paste it to your agent.'),
+      findsOneWidget,
+    );
     expect(find.text('Output 2'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
     expect(find.text('Last 3'), findsNothing);

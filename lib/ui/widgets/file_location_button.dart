@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'passive_tooltip.dart';
+import 'preview_context_menu.dart';
 
 class FileLocationButton extends StatelessWidget {
   const FileLocationButton({
@@ -31,15 +32,18 @@ class FileLocationButton extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-    onSecondaryTapUp: (event) => _menu(context, event.globalPosition),
-    child: PassiveTooltip(
-      message: 'Open file location (right-click for more)',
-      preferBelow: true,
-      child: IconButton(
-        onPressed: onReveal,
-        visualDensity: VisualDensity.compact,
-        icon: const Icon(Icons.folder_open_rounded, size: 17),
+  Widget build(BuildContext context) => Listener(
+    onPointerDown: claimPreviewSecondary,
+    child: GestureDetector(
+      onSecondaryTapUp: (event) => _menu(context, event.globalPosition),
+      child: PassiveTooltip(
+        message: 'Open file location (right-click for more)',
+        preferBelow: true,
+        child: IconButton(
+          onPressed: onReveal,
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.folder_open_rounded, size: 17),
+        ),
       ),
     ),
   );

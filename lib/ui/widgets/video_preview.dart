@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -17,6 +18,9 @@ abstract class PreviewVideoSession extends ChangeNotifier {
   Future<void> pause();
   Future<void> seek(Duration position);
   Future<void> setVolume(double volume);
+  Future<Uint8List> snapshot() => Future.error(
+    UnsupportedError('Snapshots are unavailable for this video player.'),
+  );
 }
 
 class NativePreviewVideoSession extends PreviewVideoSession {
@@ -75,6 +79,19 @@ class NativePreviewVideoSession extends PreviewVideoSession {
   Future<void> seek(Duration position) => _player.seek(position);
   @override
   Future<void> setVolume(double volume) => _player.setVolume(volume);
+
+  @override
+  Future<Uint8List> snapshot() async {
+    await _controller.waitUntilFirstFrameRendered.timeout(
+      const Duration(seconds: 8),
+    );
+    if (_disposed) throw StateError('Video preview was closed.');
+    final bytes = await _player
+        .screenshot(format: 'image/png')
+        .timeout(const Duration(seconds: 5));
+    if (bytes == null) throw StateError('Video frame unavailable.');
+    return bytes;
+  }
 
   @override
   void dispose() {

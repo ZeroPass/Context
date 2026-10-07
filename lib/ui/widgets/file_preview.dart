@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/file_references.dart';
+import '../../app/preview_actions.dart';
 import 'file_location_button.dart';
 import 'passive_tooltip.dart';
+import 'preview_context_menu.dart';
 import 'video_preview.dart';
 
 enum WhiteboardPreviewKind { markdown, image, video }
@@ -119,6 +121,7 @@ class WhiteboardFilePreview extends StatefulWidget {
     required this.onOpenExternal,
     required this.onReveal,
     this.embedded = false,
+    this.actions,
   });
   final WhiteboardPreviewController controller;
   final Widget Function(String, FileReferenceResolver) markdownBuilder;
@@ -126,6 +129,7 @@ class WhiteboardFilePreview extends StatefulWidget {
   final VoidCallback onOpenExternal;
   final VoidCallback onReveal;
   final bool embedded;
+  final PreviewActions? actions;
 
   @override
   State<WhiteboardFilePreview> createState() => _WhiteboardFilePreviewState();
@@ -306,7 +310,7 @@ class _WhiteboardFilePreviewState extends State<WhiteboardFilePreview>
         child: Padding(padding: const EdgeInsets.all(14), child: Text(error)),
       );
     }
-    return switch (_controller.kind) {
+    final content = switch (_controller.kind) {
       WhiteboardPreviewKind.markdown => Scrollbar(
         controller: _markdownScroll,
         child: SingleChildScrollView(
@@ -339,6 +343,16 @@ class _WhiteboardFilePreviewState extends State<WhiteboardFilePreview>
             : _controller.video?.buildVideo() ?? const SizedBox.expand(),
       null => const SizedBox.expand(),
     };
+    final path = _controller.path;
+    if (path == null) return content;
+    return PreviewContextMenu(
+      key: const ValueKey('whiteboard-preview-menu'),
+      path: path,
+      markdown: _controller.markdown,
+      snapshot: _controller.video?.snapshot,
+      actions: widget.actions,
+      child: content,
+    );
   }
 
   void _videoAction(Future<void> Function() action) {

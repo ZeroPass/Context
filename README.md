@@ -68,6 +68,11 @@ HTML comments at its beginning instruct agents. The local workspace `AGENTS.md`
 points to it: `wb.md` alone means publish the preceding completed answer. Only
 the requested final Markdown goes there, not thinking or tool traces.
 
+The **Copy first prompt** icon beside **Published entries** copies a short first-contact prompt
+with the full active Whiteboard path. WSL locations include both Linux and
+Windows paths; the detailed publishing rules stay in the file's header.
+Paste it to an agent the first time to introduce your Whiteboard.
+
 Use the helper rather than editing message blocks by hand:
 
 ```bash
@@ -116,6 +121,13 @@ covers the application's content area, not the monitor; the exit button or Escap
 restores both panes. Video remains the same player when expanded and is released
 when the preview is closed. To open any local file in its default application,
 use the folder icon's right-click menu. Website links open in the browser.
+Right-click an image, Markdown document, or video preview for **Copy** and
+**Save as**. Images copy the full-resolution bitmap, Markdown copies its text,
+and videos copy the file for pasting into Explorer or compatible apps.
+Video's **Copy snapshot** copies the current frame. Images and video references
+inside Markdown have their own menus; a snapshot opens a referenced video in
+Context if necessary and captures its first frame. Save as preserves the original
+file bytes. These menus also work when a preview is expanded to the full app.
 Linux paths are translated to the WSL share indicated by the markdown location;
 line-number suffixes are removed. Relative paths are checked against the publisher's
 working directory, then the folders in **Settings > Whiteboard file locations**.

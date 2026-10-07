@@ -38,16 +38,56 @@ class ClipboardWriter {
   final ClipboardTextWriter _write;
   final ClipboardTextReader _read;
   final Future<void> Function(Duration) _delay;
-  ({int request, String text, Completer<bool> completion})? _queued;
+  ({
+    int request,
+    Future<bool> Function(int) action,
+    Completer<bool> completion,
+  })?
+  _queued;
   bool _running = false;
   int _latest = 0;
 
   // Serialize writes and skip superseded clicks, including their retries.
   Future<bool> copy(String text) {
+    return _enqueue((request) => _copy(request, text));
+  }
+
+  Future<bool> copyPreparedText(Future<String> Function() prepare) =>
+      _enqueue((request) async => _copy(request, await prepare()));
+
+  // Media preparation is part of the same queue as text copying. A newer
+  // click cancels publication even when decoding an image takes a while.
+  Future<bool> copyMedia(
+    Future<Object> Function() prepare,
+    String method,
+  ) => _enqueue((request) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
+      throw UnsupportedError('Media copying is supported on Windows.');
+    }
+    final payload = await prepare();
+    const waits = [20, 60, 120];
+    for (var attempt = 0; attempt <= waits.length; attempt++) {
+      if (request != _latest) return false;
+      try {
+        // The native writer verifies the published binary/file payload while
+        // holding the clipboard lock, unlike Flutter's text-only reader.
+        await _windowsClipboard.invokeMethod<void>(method, payload);
+        return request == _latest;
+      } catch (_) {
+        if (request != _latest) return false;
+      }
+      if (attempt < waits.length) {
+        await _delay(Duration(milliseconds: waits[attempt]));
+      }
+    }
+    throw const ClipboardCopyException();
+  });
+
+  Future<bool> _enqueue(Future<bool> Function(int) action) {
     final request = ++_latest;
     final completion = Completer<bool>();
     _queued?.completion.complete(false);
-    _queued = (request: request, text: text, completion: completion);
+    _queued = (request: request, action: action, completion: completion);
     if (!_running) unawaited(_drain());
     return completion.future;
   }
@@ -58,7 +98,7 @@ class ClipboardWriter {
       final pending = _queued!;
       _queued = null;
       try {
-        pending.completion.complete(await _copy(pending.request, pending.text));
+        pending.completion.complete(await pending.action(pending.request));
       } catch (error, stack) {
         pending.completion.completeError(error, stack);
       }

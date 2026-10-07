@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -8,13 +9,16 @@ import 'package:markdown/markdown.dart' as md;
 import '../../app/app_state.dart';
 import '../../app/file_references.dart';
 import '../../app/models.dart';
+import '../../app/preview_actions.dart';
 import '../../app/whiteboard.dart';
 import '../../app/whiteboard_file.dart';
+import '../../app/workspace_paths.dart';
 import '../copy_feedback.dart';
 import 'passive_tooltip.dart';
 import 'recent_sessions.dart';
 import 'file_preview.dart';
 import 'file_location_button.dart';
+import 'preview_context_menu.dart';
 import 'video_preview.dart';
 
 class WhiteboardPane extends StatefulWidget {
@@ -24,11 +28,13 @@ class WhiteboardPane extends StatefulWidget {
     this.reader,
     this.videoFactory = NativePreviewVideoSession.new,
     this.openFile = openReference,
+    this.previewActions,
   });
   final AppState appState;
   final WhiteboardReader? reader;
   final PreviewVideoSession Function() videoFactory;
   final ReferenceOpener openFile;
+  final PreviewActions? previewActions;
   @override
   State<WhiteboardPane> createState() => _WhiteboardPaneState();
 }
@@ -485,6 +491,25 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     context,
   ).showSnackBar(SnackBar(content: Text(message)));
 
+  Future<Uint8List> _snapshot(String path) async {
+    if (!mounted) throw StateError('Whiteboard was closed.');
+    if (_previewController.path != path) {
+      setState(() => _preview = path);
+      await _previewController.open(path);
+      if (!mounted) throw StateError('Whiteboard was closed.');
+      // A video referenced in Markdown opens inline, never in an external app.
+      // Its first frame is used unless this video is already being previewed.
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    final video = _previewController.path == path
+        ? _previewController.video
+        : null;
+    if (video == null) {
+      throw StateError('Open the video before copying a snapshot.');
+    }
+    return video.snapshot();
+  }
+
   Widget _icon(String tip, IconData icon, VoidCallback? onPressed) =>
       PassiveTooltip(
         message: tip,
@@ -538,7 +563,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
                 : TextDecoration.none,
           ),
         );
-        return Wrap(
+        final reference = Wrap(
           crossAxisAlignment: WrapCrossAlignment.center,
           spacing: 2,
           children: [
@@ -578,17 +603,31 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
             ],
           ],
         );
+        if (path == null || snapshot.data?.paths.length != 1 || !preview) {
+          return reference;
+        }
+        // Keep the folder's existing external-open menu independent.
+        return PreviewContextMenu(
+          path: path,
+          snapshot: isPreviewVideo(path) ? () => _snapshot(path) : null,
+          actions: widget.previewActions,
+          child: reference,
+        );
       },
     );
   }
 
-  Widget _markdown(String text, FileReferenceResolver resolver) {
+  Widget _markdown(
+    String text,
+    FileReferenceResolver resolver, {
+    bool preview = false,
+  }) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return MarkdownBody(
+    final body = MarkdownBody(
       key: ObjectKey(resolver),
       data: text,
-      selectable: true,
+      selectable: !preview,
       styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
         p: theme.textTheme.bodySmall?.copyWith(height: 1.6),
         h1: theme.textTheme.titleMedium,
@@ -632,7 +671,15 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
           onOpenExternal: () =>
               _activate(uri.toString(), external: true, resolver: resolver),
         ),
+        previewActions: widget.previewActions,
       ),
+    );
+    if (!preview) return body;
+    // Keep text selection and Ctrl+C, but let the document/media menus handle
+    // secondary clicks rather than opening a second text-only toolbar.
+    return SelectionArea(
+      contextMenuBuilder: (_, _) => const SizedBox.shrink(),
+      child: body,
     );
   }
 
@@ -882,7 +929,9 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     key: const ValueKey('whiteboard-file-preview'),
     embedded: true,
     controller: _previewController,
-    markdownBuilder: _markdown,
+    markdownBuilder: (text, resolver) =>
+        _markdown(text, resolver, preview: true),
+    actions: widget.previewActions,
     onClose: () {
       _previewController.close();
       setState(() => _preview = null);
@@ -957,7 +1006,24 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
                 : 'Refresh recent sessions',
             onRefresh: () => _refresh(),
             action: _pushMode
-                ? null
+                ? PassiveTooltip(
+                    message:
+                        'Copy first prompt\nPaste to an agent the first time to introduce this whiteboard.',
+                    child: IconButton(
+                      key: const ValueKey('whiteboard-copy-prompt'),
+                      onPressed: _path.trim().isEmpty
+                          ? null
+                          : () => unawaited(
+                              copyWithFeedback(
+                                context,
+                                whiteboardPublishPrompt(_path),
+                                'First prompt copied. Paste it to your agent.',
+                              ),
+                            ),
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.content_copy_rounded, size: 18),
+                    ),
+                  )
                 : PassiveTooltip(
                     message: _moreSessions
                         ? 'Show the three most recent sessions'
@@ -1146,12 +1212,14 @@ class _ResponseImage extends StatelessWidget {
     required this.onTap,
     required this.fallback,
     required this.actions,
+    this.previewActions,
   });
   final String source;
   final FileReferenceResolver resolver;
   final VoidCallback onTap;
   final Widget fallback;
   final Widget actions;
+  final PreviewActions? previewActions;
   @override
   Widget build(BuildContext context) => FutureBuilder<ResolvedReference>(
     future: resolver.resolve(source),
@@ -1162,19 +1230,25 @@ class _ResponseImage extends StatelessWidget {
         builder: (context, constraints) => Wrap(
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            InkWell(
-              onTap: onTap,
-              child: ConstrainedBox(
-                key: const ValueKey('whiteboard-response-thumbnail'),
-                constraints: BoxConstraints(maxWidth: constraints.maxWidth / 2),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.file(
-                    File(paths.first),
-                    height: 90,
-                    fit: BoxFit.contain,
-                    cacheWidth: 400,
-                    errorBuilder: (_, _, _) => fallback,
+            PreviewContextMenu(
+              path: paths.first,
+              actions: previewActions,
+              child: InkWell(
+                onTap: onTap,
+                child: ConstrainedBox(
+                  key: const ValueKey('whiteboard-response-thumbnail'),
+                  constraints: BoxConstraints(
+                    maxWidth: constraints.maxWidth / 2,
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.file(
+                      File(paths.first),
+                      height: 90,
+                      fit: BoxFit.contain,
+                      cacheWidth: 400,
+                      errorBuilder: (_, _, _) => fallback,
+                    ),
                   ),
                 ),
               ),

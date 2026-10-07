@@ -1,6 +1,7 @@
 #include "clipboard_writer.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <iostream>
 #include <string>
@@ -35,6 +36,18 @@ std::wstring Wide(const std::string& text) {
   Require(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
                               static_cast<int>(text.size()), result.data(), length) != 0,
           "UTF8 conversion");
+  return result;
+}
+
+std::vector<uint8_t> ReadPayload(HWND window, UINT format) {
+  Require(OpenClipboard(window) != FALSE, "OpenClipboard/binary");
+  HANDLE memory = GetClipboardData(format);
+  Require(memory != nullptr, "GetClipboardData/binary");
+  const auto* data = static_cast<const uint8_t*>(GlobalLock(memory));
+  Require(data != nullptr, "GlobalLock/binary");
+  const std::vector<uint8_t> result(data, data + GlobalSize(memory));
+  GlobalUnlock(memory);
+  Require(CloseClipboard() != FALSE, "CloseClipboard/binary");
   return result;
 }
 
@@ -109,6 +122,47 @@ int main() {
   Require(WriteClipboardText(window, "") == ERROR_SUCCESS, "copy empty text");
   Require(ReadText(window).empty(), "empty text readback");
 
+  BITMAPINFOHEADER header{};
+  header.biSize = sizeof(header);
+  header.biWidth = 2;
+  header.biHeight = 1;
+  header.biPlanes = 1;
+  header.biBitCount = 32;
+  header.biSizeImage = 8;
+  std::vector<uint8_t> dib(sizeof(header) + 8, 0);
+  std::memcpy(dib.data(), &header, sizeof(header));
+  dib[sizeof(header)] = 255;
+  dib[sizeof(header) + 7] = 255;
+  Require(WriteClipboardImage(window, dib) == ERROR_SUCCESS, "write bitmap");
+  const auto image = ReadPayload(window, CF_DIB);
+  Require(image.size() >= dib.size() &&
+          std::memcmp(image.data(), dib.data(), dib.size()) == 0, "bitmap independent readback");
+  Require(WriteClipboardImage(window, {0}) != ERROR_SUCCESS, "reject invalid bitmap");
+  auto invalid = dib;
+  invalid[14] = 24;
+  Require(WriteClipboardImage(window, invalid) != ERROR_SUCCESS, "reject wrong pixel format");
+  Require(ReadPayload(window, CF_DIB) == image, "invalid bitmap preserves clipboard");
+
+  const std::string file = u8"\\\\wsl.localhost\\Ubuntu-24.04\\tmp\\\u017e video.mp4";
+  Require(WriteClipboardFile(window, file) == ERROR_SUCCESS, "copy Unicode UNC file");
+  const auto drop = ReadPayload(window, CF_HDROP);
+  // DROPFILES header is 20 bytes, followed by a double-NUL UTF-16 list.
+  const auto file_wide = Wide(file);
+  Require(drop.size() >= 20 + (file_wide.size() + 2) * sizeof(wchar_t), "file payload size");
+  DWORD offset = 0;
+  std::memcpy(&offset, drop.data(), sizeof(offset));
+  Require(offset == 20 && drop[16] == 1, "wide file drop header");
+  Require(std::memcmp(drop.data() + offset, file_wide.data(), file_wide.size() * sizeof(wchar_t)) == 0,
+          "file independent readback");
+  const size_t end = offset + file_wide.size() * sizeof(wchar_t);
+  Require(drop[end] == 0 && drop[end + 1] == 0 && drop[end + 2] == 0 && drop[end + 3] == 0,
+          "file double NUL terminator");
+  Require(WriteClipboardFile(window, "relative.mp4") != ERROR_SUCCESS, "reject relative file");
+  Require(WriteClipboardFile(window, std::string("C:\\a\0b", 6)) != ERROR_SUCCESS, "reject NUL file");
+  Require(ReadPayload(window, CF_HDROP) == drop, "invalid file preserves clipboard");
+  Require(WriteClipboardText(window, texts[0]) == ERROR_SUCCESS, "text after media copy");
+  Require(ReadText(window) == Wide(texts[0]), "text after media independent readback");
+
   DestroyWindow(window);
   Require(SetThreadDesktop(original_desktop) != FALSE, "restore thread desktop");
   CloseDesktop(desktop);
@@ -116,6 +170,6 @@ int main() {
   CloseWindowStation(station);
   std::cout << "Isolated clipboard: " << checked
             << " alternating command/Unicode roundtrips passed; invalid input,"
-               " contention, recovery, and empty text passed. User clipboard untouched.\n";
+               " contention, recovery, empty text, bitmap and Unicode file copy passed. User clipboard untouched.\n";
   return 0;
 }

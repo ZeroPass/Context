@@ -19,7 +19,25 @@ String migratedSessionPath(String path) {
 String whiteboardFilePath(String sessionsPath) {
   if (sessionsPath.trim().isEmpty) return '';
   final paths = contextPaths(sessionsPath);
-  return paths.join(paths.dirname(sessionsPath), 'whiteboard.md');
+  final normalized = paths.style == p.Style.windows
+      ? sessionsPath.replaceAll('/', '\\')
+      : sessionsPath;
+  return paths.join(paths.dirname(normalized), 'whiteboard.md');
+}
+
+String whiteboardPublishPrompt(String sessionsPath) {
+  final board = whiteboardFilePath(sessionsPath);
+  if (board.isEmpty) return '';
+  final paths = contextPaths(board);
+  final fullPath = paths.normalize(paths.absolute(board));
+  final wsl = RegExp(
+    r'^//wsl(?:\.localhost|\$)/[^/]+(/.*)$',
+    caseSensitive: false,
+  ).firstMatch(fullPath.replaceAll('\\', '/'));
+  final location = wsl == null
+      ? '`$fullPath`'
+      : '`${wsl.group(1)}` (Windows: `$fullPath`)';
+  return 'Read $location and follow its instructions to publish your last final answer.';
 }
 
 String sessionWorkspaceRoot(String sessionsPath) {

@@ -34,18 +34,23 @@ bool FlutterWindow::OnCreate() {
   clipboard_channel_->SetMethodCallHandler(
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-        if (call.method_name() != "writeText") {
+        const auto& method = call.method_name();
+        if (method != "writeText" && method != "writeFile" && method != "writeImage") {
           result->NotImplemented();
           return;
         }
-        const auto* text = call.arguments() == nullptr
-                               ? nullptr
-                               : std::get_if<std::string>(call.arguments());
-        if (text == nullptr) {
-          result->Error("Clipboard error", "Expected clipboard text.");
-          return;
+        DWORD error = ERROR_INVALID_PARAMETER;
+        if (call.arguments() != nullptr) {
+          if (method == "writeImage") {
+            const auto* bytes = std::get_if<std::vector<uint8_t>>(call.arguments());
+            if (bytes != nullptr) error = WriteClipboardImage(GetHandle(), *bytes);
+          } else {
+            const auto* text = std::get_if<std::string>(call.arguments());
+            if (text != nullptr) error = method == "writeFile"
+                ? WriteClipboardFile(GetHandle(), *text)
+                : WriteClipboardText(GetHandle(), *text);
+          }
         }
-        const DWORD error = WriteClipboardText(GetHandle(), *text);
         if (error != ERROR_SUCCESS) {
           result->Error("Clipboard error", "Windows clipboard could not be updated.",
                         flutter::EncodableValue(static_cast<int32_t>(error)));
