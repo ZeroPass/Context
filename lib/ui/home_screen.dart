@@ -797,7 +797,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final controller = TextEditingController(text: item.name);
-    final nextTitle = await showDialog<String>(
+    final route = DialogRoute<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Rename Session'),
@@ -822,6 +822,9 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+    final nextTitle = await Navigator.of(context).push(route);
+    // The text field still uses its controller during the exit animation.
+    await route.completed;
     controller.dispose();
 
     if (nextTitle == null) {
@@ -3817,7 +3820,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
-        onTap: () => _showRenameHint(context),
+        onTap: item.isSession
+            ? () => _copyCommand(context, item.resumeCommand, 'Resume')
+            : () => _showRenameHint(context),
         onDoubleTap: () => _renameItem(context, state, item, index),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 1),
@@ -3971,14 +3976,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: Material(
                 color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: borderRadius,
-                  onTap: () {
-                    _copyCommand(context, item.resumeCommand, 'Resume');
-                  },
-                  child: Row(
-                    children: [
-                      Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: InkWell(
+                        borderRadius: borderRadius,
+                        onTap: () =>
+                            _copyCommand(context, item.resumeCommand, 'Resume'),
                         child: _tooltip(
                           'Click card to copy resume command',
                           Row(
@@ -4050,55 +4055,49 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ),
                       ),
-                      _tooltip(
-                        item.supportsFork
-                            ? 'Copy fork command'
-                            : switch (item.provider) {
-                                SessionProvider.kimi =>
-                                  'Use /fork command inside Kimi.',
-                                SessionProvider.qwen =>
-                                  'Use /fork command inside Qwen Code.',
-                                SessionProvider.opencode =>
-                                  'Use /fork command inside OpenCode.',
-                                SessionProvider.muse =>
-                                  'Fork command unavailable for Muse.',
-                                _ => 'Fork command unavailable.',
-                              },
-                        AnimatedOpacity(
-                          opacity: item.supportsFork ? 1 : 0.34,
-                          duration: const Duration(milliseconds: 120),
-                          child: IconButton(
-                            onPressed: forkCommand == null
-                                ? null
-                                : () => _copyCommand(
-                                    context,
-                                    forkCommand,
-                                    'Fork',
-                                  ),
-                            icon: const Icon(
-                              Icons.call_split_rounded,
-                              size: 17,
-                            ),
-                          ),
+                    ),
+                    _tooltip(
+                      item.supportsFork
+                          ? 'Copy fork command'
+                          : switch (item.provider) {
+                              SessionProvider.kimi =>
+                                'Use /fork command inside Kimi.',
+                              SessionProvider.qwen =>
+                                'Use /fork command inside Qwen Code.',
+                              SessionProvider.opencode =>
+                                'Use /fork command inside OpenCode.',
+                              SessionProvider.muse =>
+                                'Fork command unavailable for Muse.',
+                              _ => 'Fork command unavailable.',
+                            },
+                      AnimatedOpacity(
+                        opacity: item.supportsFork ? 1 : 0.34,
+                        duration: const Duration(milliseconds: 120),
+                        child: IconButton(
+                          onPressed: forkCommand == null
+                              ? null
+                              : () =>
+                                    _copyCommand(context, forkCommand, 'Fork'),
+                          icon: const Icon(Icons.call_split_rounded, size: 17),
                         ),
                       ),
-                      _tooltip(
-                        'Delete session',
-                        IconButton(
-                          onPressed: () => _deleteSession(state, index),
-                          icon: const Icon(
-                            Icons.delete_outline_rounded,
-                            size: 17,
-                          ),
+                    ),
+                    _tooltip(
+                      'Delete session',
+                      IconButton(
+                        onPressed: () => _deleteSession(state, index),
+                        icon: const Icon(
+                          Icons.delete_outline_rounded,
+                          size: 17,
                         ),
                       ),
-                      if (showDragHandle) ...[
-                        _buildDragHandle(context, index),
-                        const SizedBox(width: 4),
-                      ] else
-                        const SizedBox(width: 8),
-                    ],
-                  ),
+                    ),
+                    if (showDragHandle) ...[
+                      _buildDragHandle(context, index),
+                      const SizedBox(width: 4),
+                    ] else
+                      const SizedBox(width: 8),
+                  ],
                 ),
               ),
             ),
