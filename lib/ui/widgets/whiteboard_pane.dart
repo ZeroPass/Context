@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 
@@ -10,6 +11,7 @@ import '../../app/app_state.dart';
 import '../../app/file_references.dart';
 import '../../app/models.dart';
 import '../../app/preview_actions.dart';
+import '../../app/preview_gallery.dart';
 import '../../app/whiteboard.dart';
 import '../../app/whiteboard_file.dart';
 import '../../app/workspace_paths.dart';
@@ -44,6 +46,9 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   late final WhiteboardReader _reader;
   late final WhiteboardPreviewController _previewController;
   final _paneScroll = ScrollController();
+  final _whiteboardFocus = FocusNode(debugLabel: 'Whiteboard pane');
+  bool _initialNavigationRunning = false;
+  int _initialNavigationOffset = 0;
   Timer? _timer;
   StreamSubscription<void>? _fileChanges;
   bool get _pushMode => _reader is FileWhiteboardReader;
@@ -71,6 +76,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   bool _visible = true;
   int _listGeneration = 0;
   int _responseGeneration = 0;
+  int _galleryGeneration = 0;
   SessionProvider _provider = SessionProvider.codex;
 
   @override
@@ -86,8 +92,12 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       videoFactory: widget.videoFactory,
     );
     widget.appState.addListener(_appChanged);
+    FocusManager.instance.addEarlyKeyEventHandler(_earlyWhiteboardKey);
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _appChanged());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _appChanged();
+      _focusWhiteboard();
+    });
   }
 
   bool get _canPoll =>
@@ -405,10 +415,12 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   @override
   void dispose() {
     widget.appState.removeListener(_appChanged);
+    FocusManager.instance.removeEarlyKeyEventHandler(_earlyWhiteboardKey);
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     unawaited(_fileChanges?.cancel());
     _paneScroll.dispose();
+    _whiteboardFocus.dispose();
     _previewController.dispose();
     if (widget.reader == null) _reader.dispose();
     super.dispose();
@@ -452,8 +464,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       if (path == null || !mounted) return;
       if (!external && !reveal) {
         if (isWhiteboardPreview(path)) {
-          setState(() => _preview = path);
-          unawaited(_previewController.open(path));
+          unawaited(_openPreview(path, resolver ?? _resolver!));
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted && _paneScroll.hasClients) _paneScroll.jumpTo(0);
           });
@@ -491,11 +502,122 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     context,
   ).showSnackBar(SnackBar(content: Text(message)));
 
+  Future<void> _openPreview(
+    String path,
+    FileReferenceResolver resolver, {
+    List<String>? gallery,
+  }) {
+    final nested = identical(resolver, _previewController.resolver);
+    final text = nested
+        ? _previewController.markdown ?? ''
+        : (_history?.responses ?? const <SessionResponse>[])
+              .map((response) => response.text)
+              .join('\n\n');
+    final generation = ++_galleryGeneration;
+    setState(() => _preview = path);
+    final loading = _previewController.open(path);
+    if (gallery != null) {
+      _previewController.setGallery(gallery);
+      return loading;
+    }
+    _previewController.setGallery([path]);
+    unawaited(() async {
+      final paths = await resolvePreviewGallery(text, resolver);
+      if (!mounted || generation != _galleryGeneration || _preview == null) {
+        return;
+      }
+      _previewController.setGallery(paths);
+    }());
+    return loading;
+  }
+
+  bool get _editingText {
+    final focused = FocusManager.instance.primaryFocus?.context;
+    final field = focused?.widget is EditableText
+        ? focused!.widget as EditableText
+        : focused?.findAncestorWidgetOfExactType<EditableText>();
+    return field != null && !field.readOnly;
+  }
+
+  KeyEventResult _earlyWhiteboardKey(KeyEvent event) {
+    if (!mounted ||
+        !_whiteboardFocus.hasFocus ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return KeyEventResult.ignored;
+    }
+    // Read-only Markdown selection must not swallow gallery arrow keys.
+    return _whiteboardKey(_whiteboardFocus, event);
+  }
+
+  void _focusWhiteboard() {
+    if (!mounted || !_visible || _editingText) return;
+    if (ModalRoute.of(context)?.isCurrent == false) return;
+    if (!_whiteboardFocus.hasFocus) _whiteboardFocus.requestFocus();
+  }
+
+  KeyEventResult _whiteboardKey(FocusNode node, KeyEvent event) {
+    final keyboard = HardwareKeyboard.instance;
+    if (!_canPoll ||
+        _editingText ||
+        (event is! KeyDownEvent && event is! KeyRepeatEvent) ||
+        keyboard.isControlPressed ||
+        keyboard.isMetaPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    final delta = switch (event.logicalKey) {
+      LogicalKeyboardKey.arrowLeft => -1,
+      LogicalKeyboardKey.arrowRight => 1,
+      _ => 0,
+    };
+    if (delta == 0) return KeyEventResult.ignored;
+    unawaited(_navigateWhiteboard(delta));
+    return KeyEventResult.handled;
+  }
+
+  Future<void> _navigateWhiteboard(int delta) async {
+    if (_previewController.path != null) {
+      _previewController.navigate(delta);
+      return;
+    }
+    if (_initialNavigationRunning) {
+      _initialNavigationOffset += delta;
+      return;
+    }
+    final resolver = _resolver;
+    final history = _history;
+    if (resolver == null || history == null) return;
+    final generation = _galleryGeneration;
+    _initialNavigationRunning = true;
+    _initialNavigationOffset = 0;
+    try {
+      final paths = await resolvePreviewGallery(
+        history.responses.map((response) => response.text).join('\n\n'),
+        resolver,
+      );
+      if (!mounted ||
+          generation != _galleryGeneration ||
+          !identical(resolver, _resolver) ||
+          paths.isEmpty) {
+        return;
+      }
+      final start = delta > 0 ? 0 : paths.length - 1;
+      final index = (start + _initialNavigationOffset).clamp(
+        0,
+        paths.length - 1,
+      );
+      await _openPreview(paths[index], resolver, gallery: paths);
+      if (mounted && _paneScroll.hasClients) _paneScroll.jumpTo(0);
+    } finally {
+      _initialNavigationRunning = false;
+    }
+  }
+
   Future<Uint8List> _snapshot(String path) async {
     if (!mounted) throw StateError('Whiteboard was closed.');
     if (_previewController.path != path) {
-      setState(() => _preview = path);
-      await _previewController.open(path);
+      await _openPreview(path, _resolver!);
       if (!mounted) throw StateError('Whiteboard was closed.');
       // A video referenced in Markdown opens inline, never in an external app.
       // Its first frame is used unless this video is already being previewed.
@@ -607,11 +729,25 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
           return reference;
         }
         // Keep the folder's existing external-open menu independent.
-        return PreviewContextMenu(
+        final controls = PreviewContextMenu(
           path: path,
           snapshot: isPreviewVideo(path) ? () => _snapshot(path) : null,
           actions: widget.previewActions,
           child: reference,
+        );
+        if (!isPreviewImage(path)) return controls;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _ImageThumbnail(
+              path: path,
+              onTap: () => _activate(source, resolver: fileResolver),
+              fallback: const SizedBox.shrink(),
+              previewActions: widget.previewActions,
+            ),
+            controls,
+          ],
         );
       },
     );
@@ -933,6 +1069,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
         _markdown(text, resolver, preview: true),
     actions: widget.previewActions,
     onClose: () {
+      _galleryGeneration++;
       _previewController.close();
       setState(() => _preview = null);
     },
@@ -1099,34 +1236,54 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   }
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) => Scrollbar(
-      controller: _paneScroll,
-      child: SingleChildScrollView(
-        key: const ValueKey('whiteboard-scroll'),
-        controller: _paneScroll,
-        primary: false,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: constraints.maxHeight),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.end,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (_preview != null)
-                ConstrainedBox(
-                  constraints: BoxConstraints(maxHeight: constraints.maxWidth),
-                  child: _filePreview(),
+  Widget build(BuildContext context) => Focus(
+    focusNode: _whiteboardFocus,
+    canRequestFocus: _visible,
+    onKeyEvent: _whiteboardKey,
+    child: MouseRegion(
+      onEnter: (_) => _focusWhiteboard(),
+      child: Listener(
+        onPointerDown: (event) {
+          if (event.buttons == kPrimaryButton) {
+            // Let child controls/selection take focus before focusing blank space.
+            WidgetsBinding.instance.addPostFrameCallback(
+              (_) => _focusWhiteboard(),
+            );
+          }
+        },
+        child: LayoutBuilder(
+          builder: (context, constraints) => Scrollbar(
+            controller: _paneScroll,
+            child: SingleChildScrollView(
+              key: const ValueKey('whiteboard-scroll'),
+              controller: _paneScroll,
+              primary: false,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_preview != null)
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: constraints.maxWidth,
+                        ),
+                        child: _filePreview(),
+                      ),
+                    _viewer(),
+                    Divider(
+                      height: 1,
+                      thickness: 0.7,
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.outlineVariant.withValues(alpha: 0.65),
+                    ),
+                    _sessions(),
+                  ],
                 ),
-              _viewer(),
-              Divider(
-                height: 1,
-                thickness: 0.7,
-                color: Theme.of(
-                  context,
-                ).colorScheme.outlineVariant.withValues(alpha: 0.65),
               ),
-              _sessions(),
-            ],
+            ),
           ),
         ),
       ),
@@ -1135,10 +1292,22 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
 }
 
 class _FileSyntax extends md.InlineSyntax {
-  _FileSyntax() : super(fileReferencePattern.pattern, caseSensitive: false);
+  _FileSyntax()
+    : super(
+        // A caption path such as map/live must not consume ](image.png).
+        fileReferencePattern.pattern.replaceAll(
+          r'''[^\s`<>"|]+''',
+          r'''[^\s`<>"|\[\]()]+''',
+        ),
+        caseSensitive: false,
+      );
   @override
   bool onMatch(md.InlineParser parser, Match match) {
     final source = match[0]!.replaceFirst(RegExp(r'[.,;!?\)\]]+$'), '');
+    if (isProseRatio(source)) {
+      parser.addNode(md.Text(match[0]!));
+      return true;
+    }
     parser.addNode(
       md.Element('a', [md.Text(source)])..attributes['href'] = source,
     );
@@ -1226,38 +1395,57 @@ class _ResponseImage extends StatelessWidget {
     builder: (context, snapshot) {
       final paths = snapshot.data?.paths ?? const <String>[];
       if (paths.length != 1 || !isPreviewImage(paths.first)) return fallback;
-      return LayoutBuilder(
-        builder: (context, constraints) => Wrap(
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            PreviewContextMenu(
-              path: paths.first,
-              actions: previewActions,
-              child: InkWell(
-                onTap: onTap,
-                child: ConstrainedBox(
-                  key: const ValueKey('whiteboard-response-thumbnail'),
-                  constraints: BoxConstraints(
-                    maxWidth: constraints.maxWidth / 2,
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.file(
-                      File(paths.first),
-                      height: 90,
-                      fit: BoxFit.contain,
-                      cacheWidth: 400,
-                      errorBuilder: (_, _, _) => fallback,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            actions,
-          ],
-        ),
+      return Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _ImageThumbnail(
+            path: paths.first,
+            onTap: onTap,
+            fallback: fallback,
+            previewActions: previewActions,
+          ),
+          actions,
+        ],
       );
     },
+  );
+}
+
+class _ImageThumbnail extends StatelessWidget {
+  const _ImageThumbnail({
+    required this.path,
+    required this.onTap,
+    required this.fallback,
+    this.previewActions,
+  });
+  final String path;
+  final VoidCallback onTap;
+  final Widget fallback;
+  final PreviewActions? previewActions;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => PreviewContextMenu(
+      path: path,
+      actions: previewActions,
+      child: InkWell(
+        onTap: onTap,
+        child: ConstrainedBox(
+          key: const ValueKey('whiteboard-response-thumbnail'),
+          constraints: BoxConstraints(maxWidth: constraints.maxWidth / 2),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.file(
+              File(path),
+              height: 90,
+              fit: BoxFit.contain,
+              cacheWidth: 400,
+              errorBuilder: (_, _, _) => fallback,
+            ),
+          ),
+        ),
+      ),
+    ),
   );
 }
 

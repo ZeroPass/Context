@@ -4,6 +4,9 @@ mod codex_refresh;
 #[path = "whiteboard.rs"]
 mod whiteboard;
 
+#[path = "wsl_paths.rs"]
+mod wsl_paths;
+
 #[path = "recent_cache.rs"]
 mod recent_cache;
 
@@ -98,6 +101,7 @@ const ZCODE_STATE_NOT_FOUND_ERROR: &str =
 // Only local metadata transactions take this lock, never token or usage requests.
 static CODEX_METADATA_LOCK: Mutex<()> = Mutex::new(());
 const CODEX_WEEKLY_WINDOW_MIN_SECONDS: i64 = 6 * 24 * 60 * 60;
+const CODEX_WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 // Persisted account fingerprints are FNV-1a over the UTF-8 account ID. The versioned prefix
 // makes algorithm changes fail closed instead of reusing history under an incompatible key.
 const CODEX_ACCOUNT_KEY_PREFIX: &str = "fnv1a64-v1:";
@@ -1258,6 +1262,7 @@ impl ContextActor {
 pub async fn create_actors() {
     tokio::spawn(whiteboard::listen());
     tokio::spawn(whiteboard::listen_files());
+    tokio::spawn(whiteboard::listen_paths());
     let context = Context::new();
     let addr = context.address();
     let actor = ContextActor::new(addr);
@@ -4654,21 +4659,25 @@ fn parse_weekly_usage_response(body: &[u8], now_ms: i64) -> std::result::Result<
     let primary = rate_limit
         .get("primary_window")
         .and_then(|value| parse_usage_window(value, now_ms));
-    if let Some(primary) = primary.as_ref()
-        && primary.window_seconds >= CODEX_WEEKLY_WINDOW_MIN_SECONDS
-    {
-        return Ok(primary.clone());
-    }
-
-    if let Some(secondary) = rate_limit
+    let secondary = rate_limit
         .get("secondary_window")
-        .and_then(|value| parse_usage_window(value, now_ms))
-        .filter(|window| window.window_seconds >= CODEX_WEEKLY_WINDOW_MIN_SECONDS)
+        .and_then(|value| parse_usage_window(value, now_ms));
+    let windows = [primary, secondary];
+    if let Some(weekly) = windows
+        .iter()
+        .flatten()
+        .find(|window| window.window_seconds == CODEX_WEEKLY_WINDOW_SECONDS)
     {
-        return Ok(secondary);
+        return Ok(weekly.clone());
     }
 
-    Err(())
+    // Some accounts only have a monthly allowance. Preserve its actual period;
+    // the UI must not use that date as the weekly manual-reset picker's base.
+    windows
+        .into_iter()
+        .flatten()
+        .find(|window| window.window_seconds >= CODEX_WEEKLY_WINDOW_MIN_SECONDS)
+        .ok_or(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -6232,6 +6241,28 @@ mod tests {
             }
         }"#;
         assert!(parse_weekly_usage_response(invalid_body, 0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn actual_weekly_window_beats_monthly_and_monthly_only_is_preserved() -> anyhow::Result<()> {
+        for (primary_seconds, secondary_seconds, expected_used) in
+            [(2_592_000, 604_800, 12.0), (604_800, 2_592_000, 34.0)]
+        {
+            let body = serde_json::json!({"rate_limit": {
+                "primary_window": {"used_percent":34, "limit_window_seconds":primary_seconds, "reset_after_seconds":300},
+                "secondary_window": {"used_percent":12, "limit_window_seconds":secondary_seconds, "reset_after_seconds":200}
+            }});
+            let usage = parse_weekly_usage_response(&serde_json::to_vec(&body)?, 1_700_000_000_000)
+                .map_err(|_| anyhow::anyhow!("mixed-period usage did not parse"))?;
+            assert_eq!(usage.window_seconds, 604_800);
+            assert_eq!(usage.used_percent, expected_used);
+        }
+        let monthly = br#"{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":2592000,"reset_after_seconds":2592000},"secondary_window":null}}"#;
+        let usage = parse_weekly_usage_response(monthly, 1_700_000_000_000)
+            .map_err(|_| anyhow::anyhow!("monthly-only usage was lost"))?;
+        assert_eq!(usage.window_seconds, 2_592_000);
+        assert_eq!(usage.reset_at_ms, Some(1_702_592_000_000));
         Ok(())
     }
 

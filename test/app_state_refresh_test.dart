@@ -1210,6 +1210,52 @@ void main() {
     expect(state.sessionsMarkdownPath, nextPath);
   });
 
+  stateTest('monthly account cannot move manual reset picker to next month', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final weekly = DateTime.now().add(const Duration(days: 6));
+    emitState(
+      apiResetAt: weekly.millisecondsSinceEpoch,
+      extraAccounts: [
+        {
+          'slot': '3',
+          'name': 'Monthly account',
+          'weekly_used_percent': 0,
+          'weekly_reset_at': DateTime.now()
+              .add(const Duration(days: 30))
+              .millisecondsSinceEpoch,
+          'weekly_window_seconds': 2592000,
+        },
+      ],
+    );
+    await tester.pump();
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: state,
+        child: const MaterialApp(home: HomeScreen()),
+      ),
+    );
+    await tester.tap(find.byTooltip('Set manual reset'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Set manual Codex reset'), findsOneWidget);
+    final preview = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byWidgetPredicate(
+        (widget) => widget is Text && widget.data?.contains(' at ') == true,
+      ),
+    );
+    expect(preview, findsOneWidget);
+    expect(tester.widget<Text>(preview).data, contains(', ${weekly.day} '));
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(requests, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   stateTest('manual reset dialog opens and submits while accounts refresh', (
     tester,
   ) async {

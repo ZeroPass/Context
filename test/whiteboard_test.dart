@@ -153,6 +153,107 @@ void main() {
   });
 
   test(
+    'WSL Windows drive mounts use native paths rather than the WSL share',
+    () async {
+      final checked = <String>[];
+      final resolver = FileReferenceResolver(
+        markdownPath:
+            r'\\wsl.localhost\Ubuntu-24.04\home\luka\Context\sessions.md',
+        roots: const ['/mnt/e/reports'],
+        workDir: '/mnt/d/project',
+        windows: true,
+        exists: (path) async {
+          checked.add(path);
+          return path == r'C:\Users\tester\flight clip.mp4' ||
+              path == r'D:\project\clip.mp4' ||
+              path == r'E:\reports\plot.png';
+        },
+      );
+      expect(
+        (await resolver.resolve(
+          '/mnt/c/Users/tester/flight%20clip.mp4:12',
+        )).paths,
+        [r'C:\Users\tester\flight clip.mp4'],
+      );
+      expect((await resolver.resolve('clip.mp4')).paths, [
+        r'D:\project\clip.mp4',
+      ]);
+      expect((await resolver.resolve('plot.png')).paths, [
+        r'E:\reports\plot.png',
+      ]);
+      expect(
+        checked.any((path) => path.startsWith(r'\\wsl.localhost')),
+        isFalse,
+      );
+      expect(resolver.translate('/mnt/z'), 'Z:\\');
+      expect(
+        resolver.translate('/mnt/Z/folder/clip.mp4'),
+        r'Z:\folder\clip.mp4',
+      );
+      expect(
+        resolver.translate('/mnt/cache/clip.mp4'),
+        r'\\wsl.localhost\Ubuntu-24.04\mnt\cache\clip.mp4',
+      );
+      expect(
+        resolver.translate('/home/luka/clip.mp4'),
+        r'\\wsl.localhost\Ubuntu-24.04\home\luka\clip.mp4',
+      );
+      final localMarkdown = FileReferenceResolver(
+        markdownPath: r'C:\Context\sessions.md',
+        roots: const [],
+        windows: true,
+      );
+      expect(localMarkdown.translate('/mnt/c/clip.mp4'), r'C:\clip.mp4');
+      final linux = FileReferenceResolver(
+        markdownPath: '/workspace/sessions.md',
+        roots: const [],
+        windows: false,
+      );
+      expect(linux.translate('/mnt/c/clip.mp4'), '/mnt/c/clip.mp4');
+    },
+  );
+
+  test(
+    'WSL symlink fallback verifies and caches the canonical Windows target',
+    () async {
+      final lookups = <String>[];
+      final checks = <String>[];
+      final resolver = FileReferenceResolver(
+        markdownPath: r'\\wsl.localhost\Ubuntu\home\tester\Context\sessions.md',
+        roots: const [],
+        windows: true,
+        exists: (path) async {
+          checks.add(path);
+          if (path.startsWith(r'\\wsl.localhost')) {
+            throw FileSystemException('Access denied', path);
+          }
+          return path == r'C:\evidence\review\clip.mp4';
+        },
+        canonicalizeWsl: (path) async {
+          lookups.add(path);
+          return '/mnt/c/evidence/review/clip.mp4';
+        },
+      );
+      final result = await resolver.resolve('/home/tester/review/clip.mp4');
+      expect(result.paths, [r'C:\evidence\review\clip.mp4']);
+      await resolver.resolve('/home/tester/review/clip.mp4');
+      expect(lookups, hasLength(1));
+      expect(checks, hasLength(2));
+      final missing = FileReferenceResolver(
+        markdownPath: r'\\wsl.localhost\Ubuntu\home\tester\sessions.md',
+        roots: const [],
+        windows: true,
+        exists: (_) async => false,
+        canonicalizeWsl: (_) async => '/mnt/c/missing.mp4',
+      );
+      expect(
+        (await missing.resolve('/home/tester/missing.mp4')).missing,
+        isTrue,
+      );
+    },
+  );
+
+  test(
     'fallback locations are bounded and ambiguous matches retained',
     () async {
       final checked = <String>[];
@@ -345,6 +446,85 @@ void main() {
     }
   }
 
+  testWidgets(
+    'Whiteboard arrows work before any preview and after clicking response text',
+    (tester) async {
+      final directory = Directory.systemTemp.createTempSync(
+        'context-pane-arrows-',
+      );
+      final first = File('${directory.path}/first.md')
+        ..writeAsStringSync('First attachment');
+      final last = File('${directory.path}/last.md')
+        ..writeAsStringSync('Last attachment');
+      final app = AppState.forTesting(sendRequest: (_) {});
+      final reader = FakeReader()
+        ..answer =
+            'Response body.\n\n[First](${first.path.replaceAll('\\', '/')})\n\n[Last](${last.path.replaceAll('\\', '/')})';
+      await mount(tester, app, reader);
+      await flushReferences(tester);
+      expect(find.byType(WhiteboardFilePreview), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await flushReferences(tester);
+      expect(find.text('First attachment', findRichText: true), findsOneWidget);
+      expect(find.text('1/2'), findsOneWidget);
+      await tester.tap(find.text('Response body.', findRichText: true));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await flushReferences(tester);
+      expect(find.text('Last attachment', findRichText: true), findsOneWidget);
+      expect(find.text('2/2'), findsOneWidget);
+      await tester.tap(tip('Close preview'));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await flushReferences(tester);
+      expect(find.text('Last attachment', findRichText: true), findsOneWidget);
+      expect(find.text('2/2'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+      directory.deleteSync(recursive: true);
+    },
+  );
+
+  testWidgets('Whiteboard does not steal arrows or focus from a text field', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: 'Editable text');
+    final app = AppState.forTesting(sendRequest: (_) {});
+    app.sessionsMarkdownPath = '/test/codex sessions.md';
+    final reader = FakeReader();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Column(
+            children: [
+              TextField(controller: controller),
+              Expanded(
+                child: WhiteboardPane(appState: app, reader: reader),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.byType(TextField));
+    controller.selection = const TextSelection.collapsed(offset: 8);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: const Offset(1, 1));
+    await mouse.moveTo(tester.getCenter(find.byType(WhiteboardPane)));
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    expect(controller.selection.baseOffset, 7);
+    expect(find.byType(WhiteboardFilePreview), findsNothing);
+    await mouse.removePointer();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+    controller.dispose();
+  });
+
   Future<void> openFolderMenu(WidgetTester tester, Finder button) async {
     final mouse = await tester.startGesture(
       tester.getCenter(button),
@@ -370,6 +550,23 @@ void main() {
 
   String localPath(String path) =>
       Platform.isWindows ? path.replaceAll('/', '\\') : path;
+
+  testWidgets('compressed percentages render as prose, never a gray error box', (
+    tester,
+  ) async {
+    final app = AppState.forTesting(sendRequest: (_) {});
+    const text =
+        'Parent at97.54%mean/94.92%worst; continued at96.78%/90.97%. Both have0/106main failures and0/106support failures.';
+    final reader = FakeReader()..answer = text;
+    await mount(tester, app, reader);
+    await flushReferences(tester);
+    expect(find.text(text, findRichText: true), findsOneWidget);
+    expect(find.byType(ErrorWidget), findsNothing);
+    expect(find.byType(FileLocationButton), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    app.dispose();
+  });
 
   testWidgets(
     'recent rows reuse Context styling and leave only normal bottom padding',
@@ -622,6 +819,83 @@ void main() {
     },
   );
 
+  testWidgets('all local image reference formats show clickable thumbnails', (
+    tester,
+  ) async {
+    final root = Directory('build/whiteboard-test-fixtures')
+      ..createSync(recursive: true);
+    final directory = root.createTempSync('all-image-references-');
+    final file = File('${directory.path}/reference.png').absolute;
+    await tester.runAsync(() async {
+      final recorder = ui.PictureRecorder();
+      ui.Canvas(recorder).drawColor(const Color(0xFF8EC07C), ui.BlendMode.src);
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(120, 60);
+      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+      file.writeAsBytesSync(bytes!.buffer.asUint8List());
+      image.dispose();
+      picture.dispose();
+    });
+    final source = file.path.replaceAll('\\', '/').replaceAll(' ', '%20');
+    await tester.pumpWidget(const MaterialApp(home: Scaffold()));
+    await tester.runAsync(() async {
+      final resolver = FileReferenceResolver(markdownPath: '', roots: []);
+      for (final reference in {
+        file.path,
+        source,
+        Uri.parse(source).toString(),
+      }) {
+        final path = (await resolver.resolve(reference)).paths.single;
+        await precacheImage(
+          ResizeImage(FileImage(File(path)), width: 400),
+          tester.element(find.byType(Scaffold)),
+        ).timeout(const Duration(seconds: 10));
+      }
+    });
+    for (final text in [
+      '[Image]($source)',
+      file.path,
+      '`${file.path}`',
+      '```text\n${file.path}\n```',
+      '![Image]($source)',
+    ]) {
+      final app = AppState.forTesting(sendRequest: (_) {});
+      final reader = FakeReader()..answer = text;
+      await mount(tester, app, reader);
+      for (var step = 0; step < 4; step++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 40)),
+        );
+        await tester.pump();
+      }
+      final thumbnail = find.byKey(
+        const ValueKey('whiteboard-response-thumbnail'),
+      );
+      expect(thumbnail, findsOneWidget, reason: text);
+      expect(
+        tester
+            .widget<RawImage>(
+              find.descendant(of: thumbnail, matching: find.byType(RawImage)),
+            )
+            .image,
+        isNotNull,
+        reason: text,
+      );
+      expect(find.byType(FileLocationButton), findsOneWidget, reason: text);
+      await tester.tap(thumbnail);
+      for (var step = 0; step < 4; step++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 40)),
+        );
+        await tester.pump();
+      }
+      expect(find.byType(WhiteboardFilePreview), findsOneWidget, reason: text);
+      expect(tester.takeException(), isNull, reason: text);
+      await tester.pumpWidget(const SizedBox.shrink());
+      app.dispose();
+    }
+  });
+
   testWidgets(
     'Markdown links preview locally above the response and follow their own directory',
     (tester) async {
@@ -773,7 +1047,7 @@ void main() {
         }
       });
       reader.answer =
-          'Preview [sample image]($source).\n\n![Thumbnail]($source)';
+          'Preview [sample image]($source).\n\n![Case: Before / After; map/live]($source)';
       await mount(tester, app, reader);
       await tester.runAsync(() async {
         await precacheImage(
@@ -787,10 +1061,11 @@ void main() {
         });
         await tester.pump();
       }
-      final thumbnail = find.byKey(
+      final thumbnails = find.byKey(
         const ValueKey('whiteboard-response-thumbnail'),
       );
-      expect(thumbnail, findsOneWidget);
+      expect(thumbnails, findsNWidgets(2));
+      final thumbnail = thumbnails.first;
       expect(
         tester
             .renderObject<RenderImage>(
@@ -827,6 +1102,21 @@ void main() {
         find.descendant(of: zoom, matching: find.text('100%')),
         findsOneWidget,
       );
+      final selection =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('whiteboard-image-selection')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect((selection.border! as Border).top.color.a, 0);
+      final imageSelection = find.byKey(
+        const ValueKey('whiteboard-image-selection'),
+      );
+      await tester.ensureVisible(imageSelection);
+      await tester.pump();
+      await tester.tap(imageSelection);
+      await tester.pump(const Duration(milliseconds: 350));
       await tester.sendEventToBinding(
         PointerScrollEvent(
           position: tester.getCenter(find.byType(InteractiveViewer)),
@@ -865,6 +1155,8 @@ void main() {
           image.dispose();
         });
       }
+      await tester.ensureVisible(tip('Expand to app'));
+      await tester.pump();
       await tester.tap(tip('Expand to app'));
       await tester.pumpAndSettle();
       expect(find.byType(Dialog), findsOneWidget);
@@ -879,6 +1171,8 @@ void main() {
       );
       Navigator.of(tester.element(find.byType(Dialog))).pop();
       await tester.pumpAndSettle();
+      await tester.ensureVisible(zoom);
+      await tester.pump();
       await tester.tap(zoom);
       await tester.pump();
       expect(transform.value, Matrix4.identity());
@@ -889,6 +1183,8 @@ void main() {
       tester.view.physicalSize = const Size(280, 950);
       await tester.pump();
       expect(tester.takeException(), isNull);
+      await tester.ensureVisible(tip('Close preview'));
+      await tester.pump();
       await tester.tap(tip('Close preview'));
       await tester.pump();
       expect(find.byType(InteractiveViewer), findsNothing);

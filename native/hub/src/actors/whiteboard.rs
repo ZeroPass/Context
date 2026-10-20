@@ -3,7 +3,9 @@ use super::{
     normalize_epoch_millis, remove_snapshot_database, resolve_codex_rollout_path,
     snapshot_sqlite_database, sqlite_table_has_column,
 };
-use crate::signals::{OpenWhiteboardFile, ReadWhiteboard, WhiteboardResult};
+use crate::signals::{
+    OpenWhiteboardFile, ReadWhiteboard, ResolveWhiteboardPaths, WhiteboardResult,
+};
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use rinf::{DartSignal, RustSignal};
 use rusqlite::{Connection, OpenFlags};
@@ -160,6 +162,23 @@ pub(super) async fn listen_files() {
             }
             .send_signal_to_dart();
         });
+    }
+}
+
+pub(super) async fn listen_paths() {
+    let receiver = ResolveWhiteboardPaths::get_dart_signal_receiver();
+    while let Some(pack) = receiver.recv().await {
+        let request = pack.message;
+        let id = request.request_id;
+        let result = spawn_blocking(move || {
+            if request.paths_json.len() > 64 * 1024 {
+                return Err(anyhow!("WSL path request exceeds limit."));
+            }
+            let paths: Vec<String> = serde_json::from_str(&request.paths_json)?;
+            super::wsl_paths::resolve(&request.distro, &paths)
+        })
+        .await;
+        send_read_result(id, result);
     }
 }
 

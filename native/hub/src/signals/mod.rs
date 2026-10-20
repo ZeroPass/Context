@@ -25,6 +25,13 @@ pub struct OpenWhiteboardFile {
 }
 
 #[derive(Deserialize, DartSignal)]
+pub struct ResolveWhiteboardPaths {
+    pub request_id: u64,
+    pub distro: String,
+    pub paths_json: String,
+}
+
+#[derive(Deserialize, DartSignal)]
 pub struct InitApp {
     pub theme_seed_color_value: i64,
     pub sessions_markdown_path: String,

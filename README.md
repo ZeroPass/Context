@@ -114,8 +114,22 @@ to open the file in its default app; the same menu is available in all previews.
 Markdown files, raster images, and videos open in a full-width viewer
 above the response, without replacing it. Markdown follows the same styling as
 answers and resolves links relative to the opened document. Images support
-zoom/pan, with a live zoom percentage in the toolbar that resets to 100% when
-clicked. Inline response images use compact thumbnails. Video has playback,
+zoom/pan after clicking inside the viewer; a subtle outline indicates selection.
+Until selected, the wheel scrolls Whiteboard instead of zooming. Click outside
+or press Escape in the embedded viewer to release selection. The live zoom
+percentage resets to 100% when clicked. Previous/next buttons and a counter on
+the toolbar browse existing image, video, and Markdown attachments in document
+order, counting duplicate links/thumbnails only once. Left/right arrow keys work
+throughout the active Whiteboard pane, not only the viewer. Before opening any
+attachment, Right opens the first and Left opens the last. Navigation does not
+activate image zoom, and text fields/dialogs retain their normal keyboard input.
+Arrow keys also work in the expanded viewer. No next file is loaded until
+navigated to. Double-click viewer content to **Expand to app**, keeping the
+navigation and zoom/file controls at the top.
+Every resolved local image uses a compact thumbnail, including image embeds,
+ordinary links, bare paths, and paths in inline or fenced code. Labels and folder
+controls remain available; missing or ambiguous paths retain their existing
+location controls. Video has playback,
 seeking, mute, and volume controls. **Expand to app**
 covers the application's content area, not the monitor; the exit button or Escape
 restores both panes. Video remains the same player when expanded and is released
@@ -128,8 +142,14 @@ Video's **Copy snapshot** copies the current frame. Images and video references
 inside Markdown have their own menus; a snapshot opens a referenced video in
 Context if necessary and captures its first frame. Save as preserves the original
 file bytes. These menus also work when a preview is expanded to the full app.
-Linux paths are translated to the WSL share indicated by the markdown location;
-line-number suffixes are removed. Relative paths are checked against the publisher's
+Linux paths are translated to the WSL share indicated by the markdown location.
+Standard Windows drive mounts such as `/mnt/c/...` use `C:\...` directly instead
+of the inaccessible WSL-share mount path.
+When a WSL path is unreadable because a Linux symlink crosses onto a Windows
+drive, Context requests the real target from that distro and checks it directly.
+These on-demand lookups are batched, cached and time-limited, without opening a
+terminal or scanning directories.
+Line-number suffixes are removed. Relative paths are checked against the publisher's
 working directory, then the folders in **Settings > Whiteboard file locations**.
 The default fallback stays `codex-out` when the session file is in its Context
 subfolder; custom locations use the selected folder. Only exact
@@ -199,6 +219,10 @@ Codex accounts and recent sessions refresh in the background. Setting, editing,
 or removing a manual reset saves local metadata without waiting for the usage
 API. Refresh responses preserve newer reset edits. Without a manual override,
 each account uses its own API-reported reset.
+The manual-reset picker uses the latest genuine seven-day reset still within
+the coming week. Monthly allowances keep their real usage/reset but never move
+that picker into the following month. If no usable weekly reset is available,
+the picker starts seven days from now; its day/hour offsets remain unchanged.
 
 Account usage reads run concurrently (up to three at a time), after serial
 credential preparation and snapshot writes. The refresh interval remains 30

@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../app/app_state.dart';
+import '../app/codex_reset.dart';
 import '../app/models.dart';
 import '../app/workspace_paths.dart';
 import 'copy_feedback.dart';
@@ -1014,11 +1015,14 @@ class _HomeScreenState extends State<HomeScreen> {
     BuildContext context,
     AppState state,
   ) async {
-    final apiResetAt = _latestCodexApiResetAt(state);
-    if (apiResetAt == null) {
+    final baseResetAt = codexManualResetBase(
+      state.codexAccounts,
+      now: DateTime.now(),
+    );
+    if (baseResetAt == null) {
       await _showError(
         context,
-        StateError('No weekly reset is available yet.'),
+        StateError('Save a Codex account before setting a manual reset.'),
       );
       return;
     }
@@ -1026,7 +1030,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final configuredManualResetAt = _configuredCodexManualResetAt(state);
     final manualResetAt = await _showCodexManualResetDialog(
       context,
-      apiResetAt: apiResetAt,
+      baseResetAt: baseResetAt,
       configuredManualResetAt: configuredManualResetAt,
     );
     if (manualResetAt == null) {
@@ -1069,11 +1073,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<DateTime?> _showCodexManualResetDialog(
     BuildContext context, {
-    required DateTime apiResetAt,
+    required DateTime baseResetAt,
     required DateTime? configuredManualResetAt,
   }) async {
     final initialOffsets = _codexManualResetPickerOffsets(
-      apiResetAt,
+      baseResetAt,
       configuredManualResetAt,
     );
     var dayOffset = initialOffsets.day;
@@ -1173,7 +1177,7 @@ class _HomeScreenState extends State<HomeScreen> {
         context: context,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) {
-            final preview = apiResetAt.add(
+            final preview = baseResetAt.add(
               Duration(days: dayOffset, hours: hourOffset),
             );
             final previewIsFuture = preview.isAfter(DateTime.now());
@@ -1446,21 +1450,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return '$candidate';
   }
 
-  DateTime? _latestCodexApiResetAt(AppState state) {
-    int? latestTimestamp;
-    for (final account in state.codexAccounts) {
-      final timestamp = account.weeklyResetAt;
-      if (timestamp == null ||
-          (latestTimestamp != null && timestamp <= latestTimestamp)) {
-        continue;
-      }
-      latestTimestamp = timestamp;
-    }
-    return latestTimestamp == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(latestTimestamp);
-  }
-
   DateTime? _configuredCodexManualResetAt(AppState state) {
     var latestManualResetAt = state.codexActiveManualResetAt;
     for (final account in state.codexAccounts) {
@@ -1478,14 +1467,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   ({int day, int hour}) _codexManualResetPickerOffsets(
-    DateTime apiResetAt,
+    DateTime baseResetAt,
     DateTime? configuredManualResetAt,
   ) {
     if (configuredManualResetAt == null) {
       return (day: 0, hour: 0);
     }
 
-    final offset = configuredManualResetAt.difference(apiResetAt);
+    final offset = configuredManualResetAt.difference(baseResetAt);
     const minimumOffset = Duration(days: -6, hours: -23);
     final clampedOffset = Duration(
       microseconds: offset.inMicroseconds
@@ -2220,7 +2209,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final manualResetAt = configuredManualResetAt?.isAfter(now) == true
         ? configuredManualResetAt
         : null;
-    final apiResetAt = _latestCodexApiResetAt(state);
+    final resetPickerBase = codexManualResetBase(state.codexAccounts, now: now);
     final hasConfiguredManualReset = configuredManualResetAt != null;
 
     return Padding(
@@ -2295,7 +2284,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     onPressed:
                         state.busy ||
                             state.codexManualResetBusy ||
-                            apiResetAt == null
+                            resetPickerBase == null
                         ? null
                         : () => unawaited(_setCodexManualReset(context, state)),
                     icon: Icon(
@@ -2453,7 +2442,7 @@ class _HomeScreenState extends State<HomeScreen> {
               '(${_formatCodexPercent(usage.targetLeftPercent)}% target left).';
     final quotaSemanticsLabel = usage == null
         ? null
-        : 'Weekly usage ${_formatCodexPercent(usage.actualPercent)} percent used, '
+        : '${account.isWeeklyWindow ? 'Weekly' : 'Account'} usage ${_formatCodexPercent(usage.actualPercent)} percent used, '
               'last recorded.\n'
               'Fair target by now ${_formatExpectedCodexPercent(usage.expectedPercent)} percent '
               'used, or ${_formatCodexPercent(usage.targetLeftPercent)} percent target left.';
@@ -2555,7 +2544,7 @@ class _HomeScreenState extends State<HomeScreen> {
         : DateTime.fromMillisecondsSinceEpoch(stored);
     final manualResetAt = await _showCodexManualResetDialog(
       context,
-      apiResetAt: apiResetAt,
+      baseResetAt: apiResetAt,
       configuredManualResetAt: configuredManualResetAt,
     );
     if (manualResetAt == null) {

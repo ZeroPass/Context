@@ -1,6 +1,7 @@
 param(
   [string]$FlutterDir = (Join-Path $env:LOCALAPPDATA "AppxKit\deps\flutter"),
   [string]$EvidenceDir = ".buildlog\refresh-validation",
+  [string]$RustTargetDir = (Join-Path $env:TEMP "context-per-account-reset-tests"),
   [switch]$UiOnly,
   [switch]$WhiteboardWslProbe
 )
@@ -41,6 +42,10 @@ $inputs = @(
   "lib\app\clipboard_writer.dart", "lib\ui\copy_feedback.dart",
   "lib\app\preview_actions.dart", "lib\ui\widgets\preview_context_menu.dart",
   "test\preview_actions_test.dart",
+  "lib\app\preview_gallery.dart", "test\preview_gallery_test.dart",
+  "lib\app\wsl_paths.dart", "test\wsl_paths_test.dart", "native\hub\src\actors\wsl_paths.rs",
+  "lib\app\models.dart", "lib\app\codex_reset.dart", "test\codex_reset_test.dart",
+  "lib\src\bindings\signals\whiteboard.dart",
   "test\clipboard_writer_test.dart", "test\session_copy_test.dart",
   "windows\runner\clipboard_writer.cpp", "windows\runner\clipboard_writer.h",
   "windows\runner\flutter_window.cpp", "windows\runner\flutter_window.h",
@@ -81,7 +86,7 @@ function Run-Check([string]$Name, [string]$Exe, [string[]]$Arguments) {
 Push-Location $root
 try {
   $env:CARGO_INCREMENTAL = "0"
-  $env:CARGO_TARGET_DIR = Join-Path $env:TEMP "context-per-account-reset-tests"
+  $env:CARGO_TARGET_DIR = $RustTargetDir
   if (-not $UiOnly) {
     Run-Check "rust-format" "cargo" @("fmt", "--manifest-path", "native/hub/Cargo.toml", "--", "--check")
     Run-Check "rust-tests" "cargo" @("test", "--locked", "--manifest-path", "native/hub/Cargo.toml")
@@ -95,6 +100,9 @@ try {
   $formatFiles += @("lib/app/clipboard_writer.dart", "lib/ui/copy_feedback.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart")
   $formatFiles += @("lib/app/whiteboard_file.dart", "lib/app/workspace_paths.dart", "test/whiteboard_file_test.dart", "lib/ui/widgets/whiteboard_pane.dart")
   $formatFiles += @("lib/app/preview_actions.dart", "lib/ui/widgets/preview_context_menu.dart", "lib/ui/widgets/file_preview.dart", "lib/ui/widgets/video_preview.dart", "lib/ui/widgets/file_location_button.dart", "test/preview_actions_test.dart")
+  $formatFiles += @("lib/app/preview_gallery.dart", "test/preview_gallery_test.dart")
+  $formatFiles += @("lib/app/wsl_paths.dart", "test/wsl_paths_test.dart", "lib/src/bindings/signals/whiteboard.dart")
+  $formatFiles += @("lib/app/models.dart", "lib/app/codex_reset.dart", "test/codex_reset_test.dart")
   Run-Check "dart-format" $dart (@("format", "--output=none", "--set-exit-if-changed") + $formatFiles)
 
   # Flutter's batch launcher needs an NTFS working directory, not a WSL UNC path.
@@ -114,7 +122,7 @@ try {
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
-    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart", "test/whiteboard_file_test.dart", "test/whiteboard_wsl_probe_test.dart", "test/preview_actions_test.dart")
+    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart", "test/whiteboard_file_test.dart", "test/whiteboard_wsl_probe_test.dart", "test/preview_actions_test.dart", "test/preview_gallery_test.dart", "test/wsl_paths_test.dart", "test/codex_reset_test.dart")
   } finally { Pop-Location }
 
   $report = @("UTC: $([DateTime]::UtcNow.ToString('o'))", "Result: all checks completed", "Source: $root", "Flutter staging: $work", "CARGO_TARGET_DIR: $env:CARGO_TARGET_DIR", "CARGO_INCREMENTAL: $env:CARGO_INCREMENTAL", "PUB_CACHE: $env:PUB_CACHE", "", "Commands:") + $commands.ToArray()

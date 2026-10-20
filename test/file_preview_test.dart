@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:context/app/app_state.dart';
 import 'package:context/app/file_references.dart';
@@ -8,6 +9,7 @@ import 'package:context/ui/widgets/passive_tooltip.dart';
 import 'package:context/ui/widgets/video_preview.dart';
 import 'package:context/ui/widgets/whiteboard_pane.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,6 +75,226 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   Finder tip(String text) => find.byWidgetPredicate(
     (widget) => widget is PassiveTooltip && widget.message == text,
+  );
+
+  testWidgets(
+    'wheel scrolls the pane until selected; selection gates zoom and has an outline',
+    (tester) async {
+      final directory = Directory.systemTemp.createTempSync('context-image-');
+      final file = File('${directory.path}/image.png');
+      await tester.runAsync(() async {
+        final recorder = ui.PictureRecorder();
+        ui.Canvas(recorder).drawColor(Colors.green, ui.BlendMode.src);
+        final picture = recorder.endRecording();
+        final image = await picture.toImage(160, 100);
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        file.writeAsBytesSync(bytes!.buffer.asUint8List());
+        image.dispose();
+        picture.dispose();
+      });
+      final controller = WhiteboardPreviewController(
+        resolverFor: (path) =>
+            FileReferenceResolver(markdownPath: path, roots: []),
+      );
+      await controller.open(file.path);
+      final scroll = ScrollController();
+      await tester.pumpWidget(const MaterialApp(home: Scaffold()));
+      await tester.runAsync(
+        () => precacheImage(
+          FileImage(file),
+          tester.element(find.byType(Scaffold)),
+        ).timeout(const Duration(seconds: 10)),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 420,
+              height: 450,
+              child: SingleChildScrollView(
+                controller: scroll,
+                child: Column(
+                  children: [
+                    TextButton(
+                      onPressed: () {},
+                      child: const Text('Outside viewer'),
+                    ),
+                    SizedBox(
+                      height: 250,
+                      child: WhiteboardFilePreview(
+                        controller: controller,
+                        markdownBuilder: (text, _) => Text(text),
+                        onClose: controller.close,
+                        onOpenExternal: () {},
+                        onReveal: () {},
+                      ),
+                    ),
+                    const SizedBox(height: 1000),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      final imageArea = find.byKey(
+        const ValueKey('whiteboard-image-selection'),
+      );
+      final transform = tester
+          .widget<InteractiveViewer>(find.byType(InteractiveViewer))
+          .transformationController!;
+      Future<void> wheel(double dy) async {
+        await tester.sendEventToBinding(
+          PointerScrollEvent(
+            position: tester.getCenter(imageArea),
+            scrollDelta: Offset(0, dy),
+          ),
+        );
+        await tester.pump();
+      }
+
+      await wheel(60);
+      expect(scroll.offset, greaterThan(0));
+      expect(transform.value, Matrix4.identity());
+      scroll.jumpTo(0);
+      await tester.pump();
+      await tester.tap(imageArea);
+      await tester.pump(const Duration(milliseconds: 350));
+      final decoration =
+          tester.widget<DecoratedBox>(imageArea).decoration as BoxDecoration;
+      expect((decoration.border! as Border).top.color.a, greaterThan(0));
+      await wheel(-140);
+      expect(transform.value.getMaxScaleOnAxis(), greaterThan(1));
+      expect(scroll.offset, 0);
+      final scale = transform.value.getMaxScaleOnAxis();
+      await tester.tap(find.text('Outside viewer'));
+      await tester.pump();
+      await wheel(60);
+      expect(scroll.offset, greaterThan(0));
+      expect(transform.value.getMaxScaleOnAxis(), scale);
+      scroll.jumpTo(0);
+      await tester.pump();
+      controller.setGallery([file.path, '${directory.path}/next.png']);
+      await tester.tap(tip('Next attachment (Right arrow)'));
+      await tester.pump();
+      final afterNavigation =
+          tester.widget<DecoratedBox>(imageArea).decoration as BoxDecoration;
+      expect((afterNavigation.border! as Border).top.color.a, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+      scroll.dispose();
+      // Windows can retain the decoded file mapping until the test process exits.
+    },
+  );
+
+  testWidgets(
+    'mixed attachments navigate with buttons and keys, including expanded view',
+    (tester) async {
+      final directory = Directory.systemTemp.createTempSync('context-gallery-');
+      final first = File('${directory.path}/first.md')
+        ..writeAsStringSync('First document');
+      final last = File('${directory.path}/last.md')
+        ..writeAsStringSync('Last document');
+      final videos = <FakeVideo>[];
+      final controller = WhiteboardPreviewController(
+        resolverFor: (path) =>
+            FileReferenceResolver(markdownPath: path, roots: []),
+        videoFactory: () {
+          final video = FakeVideo();
+          videos.add(video);
+          return video;
+        },
+      );
+      await tester.runAsync(() => controller.open(first.path));
+      controller.setGallery([first.path, 'synthetic.mp4', last.path]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: Column(
+                children: [
+                  TextButton(
+                    onPressed: () {},
+                    child: const Text('Outside viewer'),
+                  ),
+                  Expanded(
+                    child: WhiteboardFilePreview(
+                      controller: controller,
+                      markdownBuilder: (text, _) => Text(text),
+                      onClose: controller.close,
+                      onOpenExternal: () {},
+                      onReveal: () {},
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final counter = find.byKey(const ValueKey('whiteboard-preview-counter'));
+      Future<void> finishLoad() async {
+        for (var step = 0; step < 30; step++) {
+          await tester.pump(const Duration(milliseconds: 40));
+          await tester.runAsync(
+            () async => Future<void>.delayed(const Duration(milliseconds: 40)),
+          );
+          if (!controller.loading) break;
+        }
+        expect(controller.loading, isFalse);
+        await tester.pumpAndSettle();
+      }
+
+      expect(tester.widget<Text>(counter).data, '1/3');
+      await tester.tap(tip('Next attachment (Right arrow)'));
+      await tester.pumpAndSettle();
+      expect(controller.kind, WhiteboardPreviewKind.video);
+      expect(tester.widget<Text>(counter).data, '2/3');
+      expect(videos, hasLength(1));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await finishLoad();
+      expect(controller.path, last.path);
+      expect(videos.single.released, isTrue);
+      expect(tester.widget<Text>(counter).data, '3/3');
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(controller.path, last.path);
+      // Double-click expands only app content and keeps the toolbar above it.
+      await tester.tap(find.text('Last document'));
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.tap(find.text('Last document'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('whiteboard-app-preview')),
+        findsOneWidget,
+      );
+      expect(tester.widget<Text>(counter).data, '3/3');
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pumpAndSettle();
+      expect(controller.kind, WhiteboardPreviewKind.video);
+      expect(tester.widget<Text>(counter).data, '2/3');
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('whiteboard-app-preview')),
+        findsNothing,
+      );
+      expect(tester.widget<Text>(counter).data, '2/3');
+      await tester.tap(find.text('Outside viewer'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(controller.kind, WhiteboardPreviewKind.video);
+      await tester.tap(tip('Previous attachment (Left arrow)'));
+      await finishLoad();
+      expect(controller.path, first.path);
+      expect(tester.widget<Text>(counter).data, '1/3');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+      directory.deleteSync(recursive: true);
+    },
   );
 
   testWidgets(

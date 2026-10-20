@@ -93,6 +93,9 @@ class CodexAccount {
   int get effectiveWeeklyWindowSeconds =>
       weeklyWindowSeconds ?? defaultWeeklyWindowSeconds;
 
+  bool get isWeeklyWindow =>
+      effectiveWeeklyWindowSeconds == defaultWeeklyWindowSeconds;
+
   bool get hasWeeklyUsage =>
       weeklyError == null &&
       weeklyUsedPercent != null &&
