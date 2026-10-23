@@ -13,6 +13,11 @@ mod recent_cache;
 #[path = "kimi_index.rs"]
 mod kimi_index;
 
+#[path = "claude_sessions.rs"]
+mod claude_sessions;
+#[path = "terminal_tabs.rs"]
+mod terminal_tabs;
+
 #[cfg(test)]
 #[path = "context_refresh_tests.rs"]
 mod context_refresh_tests;
@@ -49,6 +54,7 @@ const PROVIDER_OPENCODE: &str = "opencode";
 const PROVIDER_QWEN: &str = "qwen";
 const PROVIDER_MUSE: &str = "muse";
 const PROVIDER_ZCODE: &str = "zcode";
+const PROVIDER_CLAUDE: &str = "claude";
 const RECENT_LIMIT: usize = 3;
 const RECENT_CANDIDATE_LIMIT: usize = RECENT_LIMIT * 4;
 const CODEX_ACCOUNTS_DIR: &str = "context-accounts";
@@ -1260,6 +1266,7 @@ impl ContextActor {
 }
 
 pub async fn create_actors() {
+    tokio::spawn(terminal_tabs::listen());
     tokio::spawn(whiteboard::listen());
     tokio::spawn(whiteboard::listen_files());
     tokio::spawn(whiteboard::listen_paths());
@@ -5286,6 +5293,19 @@ fn parse_session_command(line: &str) -> Option<ParsedSessionCommand> {
     let tokens = command.split_whitespace().collect::<Vec<_>>();
     let executable = normalize_executable(tokens.first()?);
 
+    if executable == PROVIDER_CLAUDE {
+        for (index, token) in tokens.iter().enumerate().skip(1) {
+            let (flag, inline) = token.split_once('=').map_or((*token, None), |(a, b)| (a, Some(b)));
+            if matches!(flag, "--resume" | "-r" | "--session-id") {
+                let id = inline.or_else(|| tokens.get(index + 1).copied())?;
+                return Some(ParsedSessionCommand {
+                    provider: PROVIDER_CLAUDE.to_owned(),
+                    command_id: normalize_session_id(id, PROVIDER_CLAUDE)?,
+                });
+            }
+        }
+    }
+
     if executable == PROVIDER_CODEX {
         if tokens.len() < 3 || !matches!(tokens[1].to_ascii_lowercase().as_str(), "resume" | "fork")
         {
@@ -5424,7 +5444,9 @@ fn normalize_session_id(value: &str, provider: &str) -> Option<String> {
 
 fn normalize_provider(value: &str) -> String {
     let normalized = value.trim().to_ascii_lowercase();
-    if normalized == PROVIDER_KIMI {
+    if matches!(normalized.as_str(), "claude" | "claude-code" | "claude code") {
+        PROVIDER_CLAUDE.to_owned()
+    } else if normalized == PROVIDER_KIMI {
         PROVIDER_KIMI.to_owned()
     } else if normalized == PROVIDER_OPENCODE {
         PROVIDER_OPENCODE.to_owned()
@@ -5595,7 +5617,10 @@ fn render_markdown_items(items: &[ConfigItem]) -> String {
             out.push_str("# ");
             out.push_str(&title);
             out.push('\n');
-            if provider == PROVIDER_KIMI {
+            if provider == PROVIDER_CLAUDE {
+                out.push_str("claude --resume ");
+                out.push_str(&command_id);
+            } else if provider == PROVIDER_KIMI {
                 out.push_str("kimi --session ");
                 out.push_str(&command_id);
             } else if provider == PROVIDER_OPENCODE {

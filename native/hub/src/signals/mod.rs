@@ -2,6 +2,19 @@ use rinf::{DartSignal, RustSignal};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, DartSignal)]
+pub struct ReadTerminalTabs {
+    pub request_id: u64,
+    pub sessions_markdown_path: String,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct TerminalTabsResult {
+    pub request_id: u64,
+    pub payload_json: String,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, DartSignal)]
 pub struct ReadWhiteboard {
     pub request_id: u64,
     pub sessions_markdown_path: String,

@@ -90,6 +90,7 @@ class _AddSessionDialogState extends State<AddSessionDialog> {
                 labelText: 'Session id or resume command',
                 hintText: switch (_provider) {
                   SessionProvider.codex => 'codex resume <id>',
+                  SessionProvider.claude => 'claude --resume <id>',
                   SessionProvider.kimi => 'kimi --session <id>',
                   SessionProvider.opencode => 'opencode --session <id>',
                   SessionProvider.qwen => 'qwen --resume <id>',

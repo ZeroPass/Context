@@ -14,6 +14,7 @@ import '../../app/preview_actions.dart';
 import '../../app/preview_gallery.dart';
 import '../../app/whiteboard.dart';
 import '../../app/whiteboard_file.dart';
+import '../../app/whiteboard_publications.dart';
 import '../../app/workspace_paths.dart';
 import '../copy_feedback.dart';
 import 'passive_tooltip.dart';
@@ -22,6 +23,7 @@ import 'file_preview.dart';
 import 'file_location_button.dart';
 import 'preview_context_menu.dart';
 import 'video_preview.dart';
+import 'whiteboard_drop_surface.dart';
 
 class WhiteboardPane extends StatefulWidget {
   const WhiteboardPane({
@@ -44,9 +46,11 @@ class WhiteboardPane extends StatefulWidget {
 class _WhiteboardPaneState extends State<WhiteboardPane>
     with WidgetsBindingObserver {
   late final WhiteboardReader _reader;
+  WhiteboardPublications? _publications;
   late final WhiteboardPreviewController _previewController;
   final _paneScroll = ScrollController();
   final _whiteboardFocus = FocusNode(debugLabel: 'Whiteboard pane');
+  final _dropSurface = GlobalKey<WhiteboardDropSurfaceState>();
   bool _initialNavigationRunning = false;
   int _initialNavigationOffset = 0;
   Timer? _timer;
@@ -82,7 +86,10 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   @override
   void initState() {
     super.initState();
-    _reader = widget.reader ?? FileWhiteboardReader();
+    _publications = widget.reader == null
+        ? widget.appState.publishedWhiteboard
+        : null;
+    _reader = widget.reader ?? _publications?.reader ?? FileWhiteboardReader();
     _previewController = WhiteboardPreviewController(
       resolverFor: (file) => FileReferenceResolver(
         markdownPath: file,
@@ -134,9 +141,10 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
         unawaited(_fileChanges?.cancel());
         _fileChanges = null;
       } else {
-        _fileChanges ??= (_reader as FileWhiteboardReader)
-            .changes(_path)
-            .listen((_) => _poll());
+        _fileChanges ??=
+            (_publications?.changes ??
+                    (_reader as FileWhiteboardReader).changes(_path))
+                .listen((_) => _poll());
       }
       return;
     }
@@ -249,7 +257,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       final items = await _reader.recent(
         _path,
         _provider,
-        _moreSessions ? 10 : 3,
+        _pushMode ? 4 : (_moreSessions ? 10 : 3),
       );
       if (!mounted || generation != _listGeneration) return;
       if (!_sameRecent(items) || _recentError != null) {
@@ -422,7 +430,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     _paneScroll.dispose();
     _whiteboardFocus.dispose();
     _previewController.dispose();
-    if (widget.reader == null) _reader.dispose();
+    if (widget.reader == null && _publications == null) _reader.dispose();
     super.dispose();
   }
 
@@ -557,6 +565,17 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
 
   KeyEventResult _whiteboardKey(FocusNode node, KeyEvent event) {
     final keyboard = HardwareKeyboard.instance;
+    if (_pushMode &&
+        _canPoll &&
+        !_editingText &&
+        event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyV &&
+        keyboard.isControlPressed &&
+        !keyboard.isAltPressed &&
+        !keyboard.isShiftPressed) {
+      unawaited(_dropSurface.currentState?.paste());
+      return KeyEventResult.handled;
+    }
     if (!_canPoll ||
         _editingText ||
         (event is! KeyDownEvent && event is! KeyRepeatEvent) ||
@@ -1214,18 +1233,57 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
                       ),
                     ),
                   ),
-                for (final session in _recent.take(_moreSessions ? 10 : 3))
+                for (final session in _recent.take(
+                  _pushMode ? 4 : (_moreSessions ? 10 : 3),
+                ))
                   RecentSessionCard(
                     key: ValueKey('whiteboard-session-${session.id}'),
                     session: session,
-                    badgeLabel: _pushMode ? 'WB' : null,
+                    badgeLabel: _pushMode
+                        ? (session.localDrop ? 'Drop' : 'WB')
+                        : null,
+                    compact: _pushMode,
                     title: _title(session),
                     color: scheme.primary,
                     selected: _selected?.identityKey == session.identityKey,
-                    tip: _pushMode
+                    tip: session.localDrop
+                        ? 'Click to view and copy the agent prompt'
+                        : _pushMode
                         ? 'Click to view this published output'
                         : 'Click card to view the last response',
-                    onTap: () => _select(session),
+                    onTap: () {
+                      _select(session);
+                      if (session.localDrop && session.agentPrompt.isNotEmpty) {
+                        unawaited(
+                          copyWithFeedback(
+                            context,
+                            session.agentPrompt,
+                            'Prompt copied. Paste to your agent.',
+                          ),
+                        );
+                      }
+                    },
+                    trailing:
+                        session.localDrop && session.agentPrompt.isNotEmpty
+                        ? PassiveTooltip(
+                            message: 'Copy prompt for your agent',
+                            child: IconButton(
+                              icon: const Icon(Icons.copy_rounded, size: 15),
+                              style: IconButton.styleFrom(
+                                minimumSize: const Size(28, 28),
+                                fixedSize: const Size(28, 28),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                padding: EdgeInsets.zero,
+                              ),
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => copyWithFeedback(
+                                context,
+                                session.agentPrompt,
+                                'Prompt copied. Paste to your agent.',
+                              ),
+                            ),
+                          )
+                        : null,
                   ),
               ],
             ),
@@ -1251,36 +1309,48 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
             );
           }
         },
-        child: LayoutBuilder(
-          builder: (context, constraints) => Scrollbar(
-            controller: _paneScroll,
-            child: SingleChildScrollView(
-              key: const ValueKey('whiteboard-scroll'),
+        child: WhiteboardDropSurface(
+          key: _dropSurface,
+          path: _path,
+          enabled: _pushMode && _visible && widget.appState.sessionsReady,
+          onPublished: () {
+            _followLatest = true;
+            _previewController.close();
+            setState(() => _preview = null);
+            // A drop onto an inactive window is still an explicit refresh.
+            unawaited(_refresh());
+          },
+          child: LayoutBuilder(
+            builder: (context, constraints) => Scrollbar(
               controller: _paneScroll,
-              primary: false,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_preview != null)
-                      ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight: constraints.maxWidth,
+              child: SingleChildScrollView(
+                key: const ValueKey('whiteboard-scroll'),
+                controller: _paneScroll,
+                primary: false,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (_preview != null)
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxHeight: constraints.maxWidth,
+                          ),
+                          child: _filePreview(),
                         ),
-                        child: _filePreview(),
+                      _viewer(),
+                      Divider(
+                        height: 1,
+                        thickness: 0.7,
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.outlineVariant.withValues(alpha: 0.65),
                       ),
-                    _viewer(),
-                    Divider(
-                      height: 1,
-                      thickness: 0.7,
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.outlineVariant.withValues(alpha: 0.65),
-                    ),
-                    _sessions(),
-                  ],
+                      _sessions(),
+                    ],
+                  ),
                 ),
               ),
             ),

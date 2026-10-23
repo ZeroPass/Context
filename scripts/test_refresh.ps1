@@ -3,6 +3,8 @@ param(
   [string]$EvidenceDir = ".buildlog\refresh-validation",
   [string]$RustTargetDir = (Join-Path $env:TEMP "context-per-account-reset-tests"),
   [switch]$UiOnly,
+  [switch]$TerminalOnly,
+  [switch]$WorkspaceOnly,
   [switch]$WhiteboardWslProbe
 )
 
@@ -20,6 +22,8 @@ New-Item -ItemType Directory -Force -Path $evidence, $work | Out-Null
 $reportPath = Join-Path $evidence "report.txt"
 if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force }
 $inputs = @(
+  "lib\app\whiteboard_drop.dart", "lib\ui\widgets\whiteboard_drop_surface.dart", "test\whiteboard_drop_test.dart",
+  "windows\runner\whiteboard_input.cpp", "windows\runner\whiteboard_input.h",
   "native\hub\src\actors\context.rs",
   "native\hub\src\actors\context_refresh_tests.rs",
   "native\hub\src\actors\codex_refresh.rs",
@@ -45,11 +49,23 @@ $inputs = @(
   "lib\app\preview_gallery.dart", "test\preview_gallery_test.dart",
   "lib\app\wsl_paths.dart", "test\wsl_paths_test.dart", "native\hub\src\actors\wsl_paths.rs",
   "lib\app\models.dart", "lib\app\codex_reset.dart", "test\codex_reset_test.dart",
+  "lib\app\whiteboard_publications.dart", "test\whiteboard_publications_test.dart",
+  "windows\runner\whiteboard_notifications.cpp", "windows\runner\whiteboard_notifications.h",
   "lib\src\bindings\signals\whiteboard.dart",
   "test\clipboard_writer_test.dart", "test\session_copy_test.dart",
   "windows\runner\clipboard_writer.cpp", "windows\runner\clipboard_writer.h",
   "windows\runner\flutter_window.cpp", "windows\runner\flutter_window.h",
   "windows\runner\CMakeLists.txt",
+  "windows\runner\main.cpp", "windows\runner\session_terminal.cpp", "windows\runner\session_terminal.h",
+  "lib\app\session_terminal.dart", "test\session_terminal_test.dart",
+  "lib\app\terminal_profiles.dart",
+  "lib\app\workspace_window.dart", "test\workspace_window_test.dart",
+  "lib\app\terminal_tabs.dart", "lib\ui\widgets\terminal_tabs_card.dart", "test\terminal_tabs_test.dart",
+  "native\hub\src\actors\terminal_tabs.rs", "native\hub\src\actors\claude_sessions.rs",
+  "scripts\probe-terminal-tabs.ps1", "scripts\probe-terminal-sessions.py",
+  "windows\runner\workspace_window.cpp", "windows\runner\workspace_window.h",
+  "test\windows_workspace_smoke.cpp", "scripts\test_workspace_window.ps1",
+  "scripts\test_terminal.ps1", "test\windows_terminal_smoke.cpp",
   "scripts\test_clipboard.ps1", "test\windows_clipboard_smoke.cpp",
   "lib\app\whiteboard_file.dart", "lib\app\workspace_paths.dart", "test\whiteboard_file_test.dart",
   "native\whiteboard_writer\src\main.rs", "native\whiteboard_writer\Cargo.toml",
@@ -103,6 +119,12 @@ try {
   $formatFiles += @("lib/app/preview_gallery.dart", "test/preview_gallery_test.dart")
   $formatFiles += @("lib/app/wsl_paths.dart", "test/wsl_paths_test.dart", "lib/src/bindings/signals/whiteboard.dart")
   $formatFiles += @("lib/app/models.dart", "lib/app/codex_reset.dart", "test/codex_reset_test.dart")
+  $formatFiles += @("lib/app/whiteboard_publications.dart", "test/whiteboard_publications_test.dart")
+  $formatFiles += @("lib/app/whiteboard_drop.dart", "lib/ui/widgets/whiteboard_drop_surface.dart", "test/whiteboard_drop_test.dart")
+  $formatFiles += @("lib/app/session_terminal.dart", "test/session_terminal_test.dart")
+  $formatFiles += @("lib/app/terminal_profiles.dart")
+  $formatFiles += @("lib/app/workspace_window.dart", "test/workspace_window_test.dart")
+  $formatFiles += @("lib/app/terminal_tabs.dart", "lib/ui/widgets/terminal_tabs_card.dart", "test/terminal_tabs_test.dart")
   Run-Check "dart-format" $dart (@("format", "--output=none", "--set-exit-if-changed") + $formatFiles)
 
   # Flutter's batch launcher needs an NTFS working directory, not a WSL UNC path.
@@ -122,7 +144,17 @@ try {
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
-    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart", "test/whiteboard_file_test.dart", "test/whiteboard_wsl_probe_test.dart", "test/preview_actions_test.dart", "test/preview_gallery_test.dart", "test/wsl_paths_test.dart", "test/codex_reset_test.dart")
+    Run-Check "flutter-drop-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_drop_test.dart")
+    Run-Check "flutter-terminal-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_terminal_test.dart")
+    Run-Check "flutter-workspace-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/workspace_window_test.dart")
+    Run-Check "flutter-discovery-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/terminal_tabs_test.dart")
+    if ($WorkspaceOnly) {
+      Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_workspace_test.dart", "test/app_state_refresh_test.dart", "test/session_copy_test.dart")
+    } elseif ($TerminalOnly) {
+      Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_copy_test.dart")
+    } else {
+    Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart", "test/whiteboard_file_test.dart", "test/whiteboard_wsl_probe_test.dart", "test/preview_actions_test.dart", "test/preview_gallery_test.dart", "test/wsl_paths_test.dart", "test/codex_reset_test.dart", "test/whiteboard_publications_test.dart")
+    }
   } finally { Pop-Location }
 
   $report = @("UTC: $([DateTime]::UtcNow.ToString('o'))", "Result: all checks completed", "Source: $root", "Flutter staging: $work", "CARGO_TARGET_DIR: $env:CARGO_TARGET_DIR", "CARGO_INCREMENTAL: $env:CARGO_INCREMENTAL", "PUB_CACHE: $env:PUB_CACHE", "", "Commands:") + $commands.ToArray()

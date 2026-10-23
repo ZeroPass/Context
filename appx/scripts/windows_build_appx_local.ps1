@@ -207,6 +207,8 @@ try {
 }
 
 $excludeDirs = @(
+  (Join-Path $src "whiteboard-drops"),
+  (Join-Path $src ".whiteboard-write.lock"),
   (Join-Path $src "build"),
   (Join-Path $src ".dart_tool"),
   (Join-Path $src ".git"),

@@ -98,6 +98,7 @@ pub(super) fn load(markdown: &str, provider: &str, limit: usize) -> Result<serde
         PROVIDER_QWEN => load_recent_qwen_contexts(markdown),
         PROVIDER_MUSE => load_recent_muse_contexts(markdown),
         PROVIDER_ZCODE => load_recent_zcode_contexts(markdown),
+        PROVIDER_CLAUDE => claude_sessions::load(markdown),
         _ => Err(anyhow!("Unknown session provider.")),
     };
     let paths = TRACKED.with(|paths| paths.borrow_mut().take().unwrap_or_default());

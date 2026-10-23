@@ -18,6 +18,8 @@ class WhiteboardPost {
     this.cwd,
     this.time,
     this.body,
+    this.localDrop,
+    this.agentPrompt,
   );
   final String id;
   final String title;
@@ -25,6 +27,8 @@ class WhiteboardPost {
   final String cwd;
   final int time;
   final String body;
+  final bool localDrop;
+  final String agentPrompt;
 }
 
 List<WhiteboardPost> parseWhiteboard(String text) {
@@ -59,16 +63,18 @@ List<WhiteboardPost> parseWhiteboard(String text) {
         metadata['cwd'] as String,
         metadata['published_at_ms'] as int,
         text.substring(bodyStart, end),
+        metadata['local_drop'] == true,
+        (metadata['agent_prompt'] as String?) ?? '',
       );
       posts.remove(id);
       posts[id] = post;
-      if (posts.length > 3) posts.remove(posts.keys.first);
+      if (posts.length > 4) posts.remove(posts.keys.first);
       cursor = end + endMarker.length;
     } on Object {
       // Ignore malformed/orphaned entries; the publisher cleans them on its next write.
     }
   }
-  return posts.values.toList().reversed.take(3).toList();
+  return posts.values.toList().reversed.take(4).toList();
 }
 
 typedef _Stamp = (FileSystemEntityType, int, DateTime, DateTime);
@@ -229,6 +235,8 @@ class FileWhiteboardReader implements WhiteboardReader {
           title: post.title,
           updatedAt: post.time,
           workDir: post.cwd,
+          localDrop: post.localDrop,
+          agentPrompt: post.agentPrompt,
         ),
       )
       .toList();

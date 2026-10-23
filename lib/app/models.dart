@@ -1,6 +1,6 @@
 enum ConfigItemKind { group, session, groupEnd }
 
-enum SessionProvider { codex, kimi, opencode, qwen, muse, zcode }
+enum SessionProvider { codex, kimi, opencode, qwen, muse, zcode, claude }
 
 extension SessionProviderInfo on SessionProvider {
   String get key => name;
@@ -12,10 +12,14 @@ extension SessionProviderInfo on SessionProvider {
     SessionProvider.qwen => 'Qwen Code',
     SessionProvider.muse => 'Muse',
     SessionProvider.zcode => 'ZCode',
+    SessionProvider.claude => 'Claude Code',
   };
 
   static SessionProvider parse(Object? value) {
     final normalized = (value ?? '').toString().trim().toLowerCase();
+    if (['claude', 'claude-code', 'claude code'].contains(normalized)) {
+      return SessionProvider.claude;
+    }
     if (normalized == SessionProvider.kimi.name) {
       return SessionProvider.kimi;
     }
@@ -265,6 +269,8 @@ class RecentContext {
     required this.updatedAt,
     this.forkedFromId,
     this.workDir,
+    this.localDrop = false,
+    this.agentPrompt = '',
   });
 
   factory RecentContext.fromJson(Map<String, dynamic> json) {
@@ -288,6 +294,8 @@ class RecentContext {
   final int updatedAt;
   final String? forkedFromId;
   final String? workDir;
+  final bool localDrop;
+  final String agentPrompt;
 
   Map<String, dynamic> toJson() => {
     'provider': provider.key,
@@ -387,7 +395,9 @@ class ConfigItem {
 
   bool get isGroupEnd => kind == ConfigItemKind.groupEnd;
 
-  bool get supportsFork => isSession && provider == SessionProvider.codex;
+  bool get supportsFork =>
+      isSession &&
+      (provider == SessionProvider.codex || provider == SessionProvider.claude);
 
   String get identityKey => '${provider.key}:${commandId.trim().toLowerCase()}';
 
@@ -397,6 +407,9 @@ class ConfigItem {
       _shortSessionId(commandId.trim().isEmpty ? id.trim() : commandId.trim());
 
   String get resumeCommand {
+    if (provider == SessionProvider.claude) {
+      return 'claude --resume $commandId';
+    }
     if (provider == SessionProvider.kimi) {
       return 'kimi --session $commandId';
     }
@@ -420,7 +433,9 @@ class ConfigItem {
     if (!supportsFork) {
       return null;
     }
-    return 'codex fork $commandId';
+    return provider == SessionProvider.claude
+        ? 'claude --resume $commandId --fork-session'
+        : 'codex fork $commandId';
   }
 
   ConfigItem copyWith({

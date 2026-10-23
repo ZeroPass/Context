@@ -11,7 +11,7 @@
 - Use `scripts/publish-whiteboard` (Linux/WSL) or `scripts/publish-whiteboard.ps1`
   (Windows), sending the final output on stdin. Do not append/edit blocks by hand.
   The helper preserves instructions and surviving output, serializes writers,
-  and removes all entries older than the newest three plus unframed debris.
+  and removes all entries older than the newest four plus unframed debris.
 - Do not claim publication unless the helper succeeds. Never publish thinking
   traces, tool logs, credentials, or unrelated private data.
 
@@ -19,4 +19,8 @@
 
 - `codex sessions.md`, `whiteboard.md`, locks, and temporary files are private
   local data. Keep them out of commits, build staging, and APPX payloads.
+- `whiteboard-drops/` contains private user attachments and must not be committed
+  or packaged. It is temporary storage: the publishing helper removes owned
+  drop folders after their entries leave the newest four. Never delete originals
+  referenced in drop READMEs. Unmarked folders and links must remain untouched.
 - Do not infer provider homes or credentials from a specific Markdown filename.

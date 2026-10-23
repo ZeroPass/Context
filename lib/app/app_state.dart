@@ -11,7 +11,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../src/bindings/bindings.dart';
 import 'models.dart';
 import 'whiteboard.dart';
+import 'whiteboard_publications.dart';
 import 'workspace_paths.dart';
+import 'workspace_window.dart';
+import 'terminal_tabs.dart';
 
 enum _PendingOpKind {
   load,
@@ -59,19 +62,28 @@ class _JsonListCache<T> {
 }
 
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
-  AppState() : _testRequestSender = null;
+  AppState() : _testRequestSender = null {
+    publishedWhiteboard = WhiteboardPublications();
+  }
 
   @visibleForTesting
   AppState.forTesting({
     required void Function(Uint64) sendRequest,
     SharedPreferences? preferences,
     WhiteboardReader? recentReader,
+    WhiteboardPublications? publications,
     bool sessionsReady = true,
+    this.terminalTabs,
   }) : _testRequestSender = sendRequest {
     _recentReader = recentReader;
+    publishedWhiteboard = publications;
     _sessionConfigReady = sessionsReady;
     _prefs = preferences;
+    openSessionsInTerminal = _prefs?.getBool('openSessionsInTerminal') ?? false;
     whiteboardEnabled = _prefs?.getBool('whiteboardEnabled') ?? false;
+    whiteboardSplit = whiteboardContextFraction(_prefs?.get('whiteboardSplit'));
+    whiteboardNotificationsEnabled =
+        _prefs?.getBool('whiteboardNotificationsEnabled') ?? true;
     _pendingRecentRefresh = false;
     _listenToRust();
   }
@@ -104,6 +116,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _recentRefreshTimer;
   Timer? _sessionCheckTimer;
   WhiteboardReader? _recentReader;
+  WhiteboardPublications? publishedWhiteboard;
+  TerminalTabs? terminalTabs;
+  bool whiteboardNotificationsEnabled = true;
+  bool openSessionsInTerminal = false;
   bool _disposed = false;
   bool _sessionConfigReady = false;
   bool _viewFocused = true;
@@ -136,6 +152,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool dirty = false;
   bool autosaveEnabled = true;
   bool whiteboardEnabled = false;
+  double whiteboardSplit = defaultWhiteboardContextFraction;
+  WorkspaceWindow? _workspaceWindow;
   bool recentBusy = false;
   int recentRefreshRevision = 0;
   SessionProvider recentProvider = SessionProvider.codex;
@@ -175,6 +193,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RecentContext> recentQwen = const <RecentContext>[];
   List<RecentContext> recentMuse = const <RecentContext>[];
   List<RecentContext> recentZcode = const <RecentContext>[];
+  List<RecentContext> recentClaude = const <RecentContext>[];
   bool _codexAccountRequestInFlight = false;
   bool _nativeCodexAccountBusy = false;
   bool _codexAccountLoadPending = false;
@@ -196,6 +215,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   final _recentQwenCache = _JsonListCache<RecentContext>();
   final _recentMuseCache = _JsonListCache<RecentContext>();
   final _recentZcodeCache = _JsonListCache<RecentContext>();
+  final _recentClaudeCache = _JsonListCache<RecentContext>();
   final void Function(Uint64)? _testRequestSender;
 
   @override
@@ -205,7 +225,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _autosaveTimer?.cancel();
     _recentRefreshTimer?.cancel();
     _sessionCheckTimer?.cancel();
+    _workspaceWindow?.dispose();
+    terminalTabs?.dispose();
     _recentReader?.dispose();
+    publishedWhiteboard?.dispose();
     _museRefreshTimer?.cancel();
     _zcodeRefreshTimer?.cancel();
     _uiStateSub?.cancel();
@@ -229,11 +252,25 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
     _prefs = await SharedPreferences.getInstance();
+    terminalTabs = TerminalTabs(
+      preferences: _prefs,
+      savedSessions: () => items,
+    );
     themeSeedColorValue =
         _prefs?.getInt('themeSeedColorValue') ?? themeSeedColorValue;
     themeAppearance = _loadThemeAppearance();
     autosaveEnabled = _prefs?.getBool('autosaveEnabled') ?? true;
     whiteboardEnabled = _prefs?.getBool('whiteboardEnabled') ?? false;
+    whiteboardSplit = whiteboardContextFraction(_prefs?.get('whiteboardSplit'));
+    _workspaceWindow = WorkspaceWindow(
+      _prefs!,
+      onSplitAdjusted: _adjustWhiteboardSplit,
+    );
+    try {
+      await _workspaceWindow!.restore(visible: whiteboardEnabled);
+    } catch (error) {
+      debugPrint('Could not restore the workspace window: $error');
+    }
     whiteboardSearchRoots =
         _prefs?.getStringList('whiteboardSearchRoots') ?? const [];
     _whiteboardRootsConfigured =
@@ -242,6 +279,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _prefs?.getString('sessionsMarkdownPath'),
     );
     await _prefs?.setString('sessionsMarkdownPath', sessionsMarkdownPath);
+    whiteboardNotificationsEnabled =
+        _prefs?.getBool('whiteboardNotificationsEnabled') ?? true;
+    publishedWhiteboard?.notificationsEnabled = whiteboardNotificationsEnabled;
+    openSessionsInTerminal = _prefs?.getBool('openSessionsInTerminal') ?? false;
+    publishedWhiteboard?.follow(sessionsMarkdownPath);
     recentProvider = SessionProviderInfo.parse(
       _prefs?.getString('recentProvider'),
     );
@@ -291,6 +333,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _scheduleSessionChecks() {
+    terminalTabs?.follow(
+      sessionsMarkdownPath,
+      active: sessionWindowActive && _sessionConfigReady,
+    );
     _sessionCheckTimer?.cancel();
     _sessionCheckTimer = null;
     if (sessionWindowActive && _recentReader != null && !_disposed) {
@@ -323,7 +369,41 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     whiteboardEnabled = enabled;
     notifyListeners();
     final prefs = _prefs ??= await SharedPreferences.getInstance();
-    await prefs.setBool('whiteboardEnabled', whiteboardEnabled);
+    await Future.wait([
+      prefs.setBool('whiteboardEnabled', enabled).then<void>((_) {}),
+      if (_workspaceWindow != null) _workspaceWindow!.setVisible(enabled),
+    ]);
+  }
+
+  Future<void> setWhiteboardSplit(double fraction) async {
+    final preferred = whiteboardContextFraction(fraction);
+    whiteboardSplit = preferred;
+    _workspaceWindow?.setSplit(preferred);
+    notifyListeners();
+    final prefs = _prefs ??= await SharedPreferences.getInstance();
+    await prefs.setDouble('whiteboardSplit', preferred);
+  }
+
+  void _adjustWhiteboardSplit(double fraction) {
+    if (_disposed || whiteboardSplit == fraction) return;
+    whiteboardSplit = fraction;
+    notifyListeners();
+  }
+
+  void setWhiteboardNotificationsEnabled(bool enabled) {
+    whiteboardNotificationsEnabled = enabled;
+    publishedWhiteboard?.notificationsEnabled = enabled;
+    _prefs?.setBool('whiteboardNotificationsEnabled', enabled);
+    notifyListeners();
+  }
+
+  Future<void> setOpenSessionsInTerminal(bool enabled) async {
+    final prefs = _prefs ??= await SharedPreferences.getInstance();
+    if (!await prefs.setBool('openSessionsInTerminal', enabled)) {
+      throw StateError('Could not save the Terminal setting.');
+    }
+    openSessionsInTerminal = enabled;
+    notifyListeners();
   }
 
   void _startRecentRefreshTimer() {
@@ -376,6 +456,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     SessionProvider.qwen => recentQwen,
     SessionProvider.muse => recentMuse,
     SessionProvider.zcode => recentZcode,
+    SessionProvider.claude => recentClaude,
   };
 
   CodexAccount? get activeCodexAccount {
@@ -814,9 +895,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   List<SessionProvider> get orderedRecentTabs {
-    final order = recentTabOrder.isEmpty
-        ? SessionProvider.values.map((provider) => provider.key).toList()
-        : recentTabOrder;
+    final order = <String>{
+      ...recentTabOrder,
+      ...SessionProvider.values.map((provider) => provider.key),
+    };
     final hidden = recentTabHidden.toSet();
     return order
         .map(SessionProviderInfo.parse)
@@ -1183,12 +1265,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         recentQwen = const [];
         recentMuse = const [];
         recentZcode = const [];
+        recentClaude = const [];
         _providerStatuses.clear();
         _providerRetryAfter.clear();
         recentBusy = false;
         recentStatus = null;
       }
       sessionsMarkdownPath = requestedPath;
+      publishedWhiteboard?.follow(requestedPath);
       _prefs?.setString('sessionsMarkdownPath', requestedPath);
     }
 
@@ -1303,6 +1387,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           encoded,
           _decodeRecentContexts,
         ),
+        SessionProvider.claude => _recentClaudeCache.decode(
+          encoded,
+          _decodeRecentContexts,
+        ),
       };
       switch (provider) {
         case SessionProvider.codex:
@@ -1317,6 +1405,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           recentMuse = next;
         case SessionProvider.zcode:
           recentZcode = next;
+        case SessionProvider.claude:
+          recentClaude = next;
       }
       _providerStatuses[provider] = '${items.length} loaded';
       _providerRetryAfter.remove(provider);
@@ -1897,6 +1987,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _pendingRecentRefresh = true;
     }
     sessionsMarkdownPath = state.sessionsMarkdownPath;
+    terminalTabs?.follow(
+      sessionsMarkdownPath,
+      active: sessionWindowActive && _sessionConfigReady && !busy,
+    );
+    publishedWhiteboard?.follow(sessionsMarkdownPath);
     final reloadingItems =
         !busy &&
         lastError == null &&
@@ -2106,6 +2201,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     required SessionProvider fallback,
   }) {
     final trimmed = input.trim();
+    final claudeMatch = RegExp(
+      r'(?:^|[\s&])claude(?:\.exe)?\s+.*?(?:--resume|--session-id|-r)(?:=|\s+)([A-Za-z0-9._-]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (claudeMatch != null) {
+      return (provider: SessionProvider.claude, id: claudeMatch.group(1)!);
+    }
     if (trimmed.isEmpty) {
       throw const FormatException('Enter a session id or resume command.');
     }

@@ -13,6 +13,8 @@ import 'package:provider/provider.dart';
 import '../app/app_state.dart';
 import '../app/codex_reset.dart';
 import '../app/models.dart';
+import '../app/session_terminal.dart';
+import '../app/terminal_tabs.dart';
 import '../app/workspace_paths.dart';
 import 'copy_feedback.dart';
 import 'widgets/codex_account_card.dart';
@@ -20,6 +22,7 @@ import 'widgets/whiteboard_workspace.dart';
 import 'widgets/whiteboard_pane.dart';
 import 'widgets/passive_tooltip.dart';
 import 'widgets/recent_sessions.dart';
+import 'widgets/terminal_tabs_card.dart';
 import 'widgets/add_session_dialog.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
@@ -502,6 +505,7 @@ class _RecentProviderTabBarState extends State<_RecentProviderTabBar> {
                         SessionProvider.qwen => Icons.auto_awesome_rounded,
                         SessionProvider.muse => Icons.bolt_rounded,
                         SessionProvider.zcode => Icons.smart_toy_outlined,
+                        SessionProvider.claude => Icons.wb_sunny_outlined,
                       },
                       size: 15,
                       color: _screen._providerColor(scheme, provider),
@@ -548,9 +552,13 @@ class _RecentProviderTabBarState extends State<_RecentProviderTabBar> {
         Expanded(
           child: LayoutBuilder(
             builder: (context, constraints) {
+              final textScale = MediaQuery.textScalerOf(context).scale(12) / 12;
               final columns = math.min(
                 tabs.length,
-                math.max(1, (constraints.maxWidth / 140).floor()),
+                math.max(
+                  1,
+                  ((constraints.maxWidth + 3) / (90 * textScale + 3)).floor(),
+                ),
               );
               final width =
                   (constraints.maxWidth - 3 * (columns - 1)) / columns;
@@ -677,7 +685,365 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+enum _SessionAction { copy, terminal }
+
 class _HomeScreenState extends State<HomeScreen> {
+  final _filterController = TextEditingController();
+  final _filterFocus = FocusNode();
+  bool _terminalActionBusy = false;
+
+  void _terminalNotice(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> _openTerminalGroup(
+    AppState state,
+    TerminalTabGroup group,
+    TerminalSession? only,
+  ) async {
+    final monitor = state.terminalTabs;
+    if (monitor == null || _terminalActionBusy) return;
+    _terminalActionBusy = true;
+    var approved = false;
+    try {
+      final result = await monitor.openGroup(group, (session, window) async {
+        if (!mounted || !_terminalAvailable(session.provider)) {
+          throw StateError(
+            'Terminal launching is unavailable for this provider.',
+          );
+        }
+        if (!approved) {
+          approved = await _enableTerminal(context, state);
+          if (!approved) return false;
+        }
+        final saved = state.items
+            .where(
+              (s) =>
+                  s.isSession &&
+                  s.provider == session.provider &&
+                  s.commandId == session.id,
+            )
+            .firstOrNull;
+        await const SessionTerminal().open(
+          terminalSessionArguments(
+            provider: session.provider,
+            sessionId: session.id,
+            title:
+                saved?.displayName ??
+                (session.name.isEmpty
+                    ? '${session.provider.label} ${session.shortId}'
+                    : session.name),
+            markdownPath: state.sessionsMarkdownPath,
+            workDir: '//wsl.localhost/${session.distro}${session.cwd}',
+            window: window,
+          ),
+        );
+        return true;
+      }, only: only);
+      _terminalNotice(result);
+    } catch (error) {
+      if (mounted) await _showError(context, error);
+    } finally {
+      _terminalActionBusy = false;
+    }
+  }
+
+  Future<void> _closeTerminalGroup(
+    AppState state,
+    TerminalTabGroup group,
+  ) async {
+    final monitor = state.terminalTabs;
+    if (monitor == null || _terminalActionBusy) return;
+    final wasActive = monitor.isActive(group);
+    _terminalActionBusy = true;
+    try {
+      await monitor.ensureFresh();
+      final current = monitor.groups.where((g) => g.id == group.id).firstOrNull;
+      if (current == null || !mounted) return;
+      if (wasActive && !monitor.isActive(current)) {
+        _terminalNotice('Window is already closed. The group stays saved.');
+        return;
+      }
+      if (!wasActive && monitor.isActive(current)) {
+        _terminalNotice(
+          'This group is now open. Press X again to close its window.',
+        );
+        return;
+      }
+      if (!monitor.isActive(current)) {
+        await monitor.deleteGroup(current.id);
+        _terminalNotice('Saved Terminal group deleted.');
+        return;
+      }
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: Text('Close ${current.name}?'),
+          content: const Text(
+            'This closes the whole Terminal window and can stop running agents. Its tabs will stay saved here.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: const Text('Close window'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true ||
+          !mounted ||
+          !await _enableTerminal(context, state)) {
+        return;
+      }
+      await const SessionTerminal().closeWindow(
+        current.window.handle,
+        current.window.pid,
+        current.window.started,
+      );
+      monitor.closingWindow(current.window);
+      _terminalNotice('Close requested. The group will stay saved.');
+    } catch (error) {
+      if (mounted) await _showError(context, error);
+    } finally {
+      _terminalActionBusy = false;
+    }
+  }
+
+  bool _terminalAvailable(SessionProvider provider) =>
+      Theme.of(context).platform == TargetPlatform.windows &&
+      canOpenSessionInTerminal(provider);
+
+  bool _launchesInTerminal(AppState state, SessionProvider provider) =>
+      state.openSessionsInTerminal && _terminalAvailable(provider);
+
+  String _sessionTip(AppState state, SessionProvider provider) =>
+      _launchesInTerminal(state, provider)
+      ? 'Click to open in Terminal. Right-click to copy resume command.'
+      : provider == SessionProvider.zcode
+      ? 'Click card to copy session id'
+      : _terminalAvailable(provider)
+      ? 'Click to copy resume command. Right-click to open in Terminal.'
+      : 'Click card to copy resume command';
+
+  Future<bool> _enableTerminal(
+    BuildContext context,
+    AppState state, {
+    bool enableDefault = false,
+  }) async {
+    const terminal = SessionTerminal();
+    if (await terminal.isElevated()) {
+      if (enableDefault && !state.openSessionsInTerminal) {
+        await state.setOpenSessionsInTerminal(true);
+      }
+      return true;
+    }
+    if (!context.mounted) return false;
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Restart Context as administrator?'),
+        content: const Text(
+          'Windows needs one administrator approval so Context can add tabs '
+          'to your admin Terminal without asking again for each session.\n\n'
+          'Current session-list edits will be saved before restarting. '
+          'After the restart, open your session again. No helper or service '
+          'is installed. Approval is needed again if Context starts normally.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Restart as administrator'),
+          ),
+        ],
+      ),
+    );
+    if (approved != true) return false;
+    final previous = state.openSessionsInTerminal;
+    try {
+      if (state.dirty) await state.saveConfig();
+      if (enableDefault && !previous) {
+        await state.setOpenSessionsInTerminal(true);
+      }
+      await terminal.restartElevated();
+    } catch (_) {
+      if (state.openSessionsInTerminal != previous) {
+        await state.setOpenSessionsInTerminal(previous);
+      }
+      rethrow;
+    }
+    return false;
+  }
+
+  Future<void> _setTerminalMode(
+    BuildContext context,
+    AppState state,
+    bool enabled,
+  ) async {
+    if (_terminalActionBusy) return;
+    _terminalActionBusy = true;
+    try {
+      if (enabled) {
+        await _enableTerminal(context, state, enableDefault: true);
+      } else {
+        await state.setOpenSessionsInTerminal(false);
+      }
+    } catch (error) {
+      if (context.mounted) await _showError(context, error);
+    } finally {
+      _terminalActionBusy = false;
+    }
+  }
+
+  Future<void> _activateSession(
+    BuildContext context,
+    AppState state, {
+    required SessionProvider provider,
+    required String id,
+    required String title,
+    required String command,
+    String? workDir,
+    _SessionAction? action,
+  }) async {
+    final selected =
+        action ??
+        (_launchesInTerminal(state, provider)
+            ? _SessionAction.terminal
+            : _SessionAction.copy);
+    if (selected == _SessionAction.copy) {
+      await _copyCommand(context, command, 'Resume');
+      return;
+    }
+    if (_terminalActionBusy) return;
+    _terminalActionBusy = true;
+    try {
+      if (!await _enableTerminal(context, state)) return;
+      final arguments = terminalSessionArguments(
+        provider: provider,
+        sessionId: id,
+        title: title,
+        markdownPath: state.sessionsMarkdownPath,
+        workDir: workDir,
+      );
+      await const SessionTerminal().open(arguments);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('Opened in Terminal.')));
+    } catch (error) {
+      if (context.mounted) await _showError(context, error);
+    } finally {
+      _terminalActionBusy = false;
+    }
+  }
+
+  Future<void> _activateSaved(
+    BuildContext context,
+    AppState state,
+    ConfigItem item, {
+    _SessionAction? action,
+  }) => _activateSession(
+    context,
+    state,
+    provider: item.provider,
+    id: item.commandId,
+    title: item.displayName,
+    command: item.resumeCommand,
+    action: action,
+    workDir:
+        (switch (item.provider) {
+              SessionProvider.codex => state.recentCodex,
+              SessionProvider.kimi => state.recentKimi,
+              SessionProvider.opencode => state.recentOpencode,
+              SessionProvider.qwen => state.recentQwen,
+              SessionProvider.muse => state.recentMuse,
+              SessionProvider.zcode => state.recentZcode,
+              SessionProvider.claude => state.recentClaude,
+            })
+            .where(
+              (recent) =>
+                  recent.provider == item.provider &&
+                  recent.id == item.commandId,
+            )
+            .firstOrNull
+            ?.workDir,
+  );
+
+  Future<void> _showSessionMenu(
+    BuildContext context,
+    TapDownDetails details, {
+    required AppState state,
+    required SessionProvider provider,
+    required Future<void> Function(_SessionAction) onSelected,
+  }) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final actions = _terminalAvailable(provider)
+        ? (_launchesInTerminal(state, provider)
+              ? [_SessionAction.copy, _SessionAction.terminal]
+              : [_SessionAction.terminal, _SessionAction.copy])
+        : [_SessionAction.copy];
+    final selected = await showMenu<_SessionAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(
+          details.globalPosition.dx,
+          details.globalPosition.dy,
+          0,
+          0,
+        ),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        for (final action in actions)
+          PopupMenuItem(
+            value: action,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  action == _SessionAction.copy
+                      ? Icons.copy_rounded
+                      : Icons.terminal_rounded,
+                  size: 18,
+                ),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Text(
+                    action == _SessionAction.terminal
+                        ? 'Open in Terminal'
+                        : provider == SessionProvider.zcode
+                        ? 'Copy session id'
+                        : 'Copy resume command',
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (selected != null && context.mounted) {
+      await onSelected(selected);
+    }
+  }
+
+  @override
+  void dispose() {
+    _filterController.dispose();
+    _filterFocus.dispose();
+    super.dispose();
+  }
+
   Widget _tooltip(String message, Widget child) {
     return PassiveTooltip(message: message, child: child);
   }
@@ -700,6 +1066,14 @@ class _HomeScreenState extends State<HomeScreen> {
           content: Text('Double-click the name to rename it.'),
         ),
       );
+  }
+
+  Future<void> _toggleWhiteboard(BuildContext context, AppState state) async {
+    try {
+      await state.setWhiteboardEnabled(!state.whiteboardEnabled);
+    } catch (error) {
+      if (context.mounted) await _showError(context, error);
+    }
   }
 
   Future<void> _pickMarkdownFile(BuildContext context, AppState state) async {
@@ -1704,25 +2078,44 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .surfaceContainerLowest
-                            .withValues(alpha: 0.55),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: Theme.of(context).colorScheme.outlineVariant,
-                          width: 0.7,
-                        ),
+                    Selector<AppState, Object>(
+                      selector: (_, state) => (
+                        state.sessionsMarkdownPath,
+                        state.status,
+                        state.items.length,
+                        state.busy,
                       ),
-                      child: SelectableText(
-                        state.sessionsMarkdownPath.trim().isEmpty
-                            ? 'No markdown file selected.'
-                            : state.sessionsMarkdownPath,
-                        style: Theme.of(context).textTheme.bodySmall,
+                      builder: (context, _, _) => Container(
+                        key: const ValueKey('settings-markdown-file'),
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerLowest
+                              .withValues(alpha: 0.55),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Theme.of(context).colorScheme.outlineVariant,
+                            width: 0.7,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SelectableText(
+                              state.sessionsMarkdownPath.trim().isEmpty
+                                  ? 'No markdown file selected.'
+                                  : state.sessionsMarkdownPath,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            if (state.sessionsMarkdownPath.trim().isNotEmpty ||
+                                state.status?.trim().isNotEmpty == true) ...[
+                              const SizedBox(height: 8),
+                              _buildLoadedLine(context, state),
+                            ],
+                          ],
+                        ),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -1794,6 +2187,31 @@ class _HomeScreenState extends State<HomeScreen> {
                               setDialogState(() {});
                             },
                     ),
+                    if (Theme.of(context).platform == TargetPlatform.windows)
+                      SwitchListTile(
+                        key: const ValueKey('terminal-session-mode'),
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Open sessions in Terminal'),
+                        subtitle: const Text(
+                          'Experimental. Click to open Ubuntu / WSL tabs in the latest admin Terminal; '
+                          'create one if needed. Right-click offers both actions, with the other action first.',
+                        ),
+                        value: state.openSessionsInTerminal,
+                        onChanged: _terminalActionBusy
+                            ? null
+                            : (value) async {
+                                final action = _setTerminalMode(
+                                  context,
+                                  state,
+                                  value,
+                                );
+                                setDialogState(() {});
+                                await action;
+                                if (dialogContext.mounted) {
+                                  setDialogState(() {});
+                                }
+                              },
+                      ),
                     const Divider(height: 28),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -1803,6 +2221,18 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       trailing: const Icon(Icons.folder_open_rounded, size: 18),
                       onTap: () => showWhiteboardLocations(context, state),
+                    ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Whiteboard notifications'),
+                      subtitle: const Text(
+                        'Notify when a new entry is published, even while minimized.',
+                      ),
+                      value: state.whiteboardNotificationsEnabled,
+                      onChanged: (value) {
+                        state.setWhiteboardNotificationsEnabled(value);
+                        setDialogState(() {});
+                      },
                     ),
                     const Divider(height: 28),
                     Text(
@@ -1944,12 +2374,39 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildSearchField(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
+    if (_filterController.text != state.filterQuery) {
+      _filterController.value = TextEditingValue(
+        text: state.filterQuery,
+        selection: TextSelection.collapsed(offset: state.filterQuery.length),
+      );
+    }
     return TextField(
+      controller: _filterController,
+      focusNode: _filterFocus,
       onChanged: state.setFilterQuery,
       decoration: InputDecoration(
         isDense: true,
         hintText: 'Filter contexts',
         prefixIcon: const Icon(Icons.search_rounded, size: 18),
+        suffixIcon: state.filterQuery.isEmpty
+            ? null
+            : _tooltip(
+                'Clear filter',
+                IconButton(
+                  key: const ValueKey('clear-context-filter'),
+                  onPressed: () {
+                    _filterController.clear();
+                    state.setFilterQuery('');
+                    _filterFocus.requestFocus();
+                  },
+                  icon: const Icon(
+                    Icons.close_rounded,
+                    size: 18,
+                    semanticLabel: 'Clear filter',
+                  ),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
         filled: true,
         fillColor: scheme.surfaceContainerLowest.withValues(alpha: 0.7),
         contentPadding: const EdgeInsets.symmetric(
@@ -1981,6 +2438,7 @@ class _HomeScreenState extends State<HomeScreen> {
         : 'Loaded ${state.items.length} item(s).';
 
     return Column(
+      key: const ValueKey('markdown-load-status'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
@@ -2022,6 +2480,13 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Text(
+            'Sessions',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -2064,9 +2529,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          const SizedBox(height: 10),
-          _buildLoadedLine(context, state),
-          const SizedBox(height: 10),
+          SizedBox(
+            key: const ValueKey('context-load-progress'),
+            width: double.infinity,
+            height: 10,
+            child: state.busy
+                ? const Center(child: LinearProgressIndicator(minHeight: 2))
+                : null,
+          ),
           _buildSearchField(context, state),
         ],
       ),
@@ -2076,6 +2546,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _recentResumeCommand(RecentContext item) {
     return switch (item.provider) {
       SessionProvider.codex => 'codex resume ${item.id}',
+      SessionProvider.claude => 'claude --resume ${item.id}',
       SessionProvider.kimi => 'kimi --session ${item.id}',
       SessionProvider.opencode => 'opencode --session ${item.id}',
       SessionProvider.qwen => 'qwen --resume ${item.id}',
@@ -2093,6 +2564,7 @@ class _HomeScreenState extends State<HomeScreen> {
       SessionProvider.qwen => state.recentQwen.length,
       SessionProvider.muse => state.recentMuse.length,
       SessionProvider.zcode => state.recentZcode.length,
+      SessionProvider.claude => state.recentClaude.length,
     };
   }
 
@@ -2157,6 +2629,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                 SessionProvider.muse => Icons.bolt_rounded,
                                 SessionProvider.zcode =>
                                   Icons.smart_toy_outlined,
+                                SessionProvider.claude =>
+                                  Icons.wb_sunny_outlined,
                               },
                               size: 18,
                               color: _providerColor(
@@ -2235,13 +2709,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: providerColor,
                 ),
                 const SizedBox(width: 7),
-                Text(
-                  'Codex account',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(width: 8),
                 Flexible(
                   child: Text(
                     activeSlot == null
@@ -2661,13 +3128,6 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Icon(Icons.bolt_rounded, size: 17, color: providerColor),
                 const SizedBox(width: 7),
-                Text(
-                  'Muse account',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(width: 8),
                 Flexible(
                   child: Text(
                     account == null ? 'Not checked yet' : account.displayName,
@@ -2999,13 +3459,6 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Icon(Icons.smart_toy_outlined, size: 17, color: providerColor),
                 const SizedBox(width: 7),
-                Text(
-                  'ZCode account',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(width: 8),
                 Flexible(
                   child: Text(
                     account == null ? 'Not checked yet' : account.displayName,
@@ -3421,6 +3874,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildRecentSectionHeader(BuildContext context, AppState state) =>
       RecentSectionHeader(
+        title: 'Last sessions',
         color: _providerColor(
           Theme.of(context).colorScheme,
           state.recentProvider,
@@ -3453,13 +3907,21 @@ class _HomeScreenState extends State<HomeScreen> {
     final scheme = Theme.of(context).colorScheme;
     final recent = state.visibleRecent;
 
-    // No framed container here: the panel border plus the account box are the
-    // only two frames; the recent section sits directly on the panel.
+    // Provider controls and recent sessions share the Accounts card.
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2),
+            child: Text(
+              'Accounts',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
             child: Container(
@@ -3520,13 +3982,31 @@ class _HomeScreenState extends State<HomeScreen> {
                             session: item,
                             title: displayTitle,
                             color: itemColor,
-                            tip: item.provider == SessionProvider.zcode
-                                ? 'Click card to copy session id'
-                                : 'Click card to copy resume command',
-                            onTap: () => _copyCommand(
+                            tip: _sessionTip(state, item.provider),
+                            onTap: () => _activateSession(
                               context,
-                              _recentResumeCommand(item),
-                              'Resume',
+                              state,
+                              provider: item.provider,
+                              id: item.id,
+                              title: displayTitle,
+                              command: _recentResumeCommand(item),
+                              workDir: item.workDir,
+                            ),
+                            onSecondaryTapDown: (details) => _showSessionMenu(
+                              context,
+                              details,
+                              state: state,
+                              provider: item.provider,
+                              onSelected: (action) => _activateSession(
+                                context,
+                                state,
+                                provider: item.provider,
+                                id: item.id,
+                                title: displayTitle,
+                                command: _recentResumeCommand(item),
+                                workDir: item.workDir,
+                                action: action,
+                              ),
                             ),
                             trailing: item.provider == SessionProvider.zcode
                                 ? _tooltip(
@@ -3581,26 +4061,25 @@ class _HomeScreenState extends State<HomeScreen> {
     ScrollController scrollController,
   ) {
     final scheme = Theme.of(context).colorScheme;
+    final cardDecoration = BoxDecoration(
+      color: scheme.surfaceContainerLowest.withValues(alpha: 0.28),
+      border: Border.all(color: scheme.outlineVariant, width: 0.7),
+      borderRadius: BorderRadius.circular(14),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.035),
+          blurRadius: 18,
+          offset: const Offset(0, 5),
+        ),
+      ],
+    );
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Expanded(
-          child: Container(
-            margin: const EdgeInsets.fromLTRB(12, contextPanelTopInset, 0, 12),
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainerLowest.withValues(alpha: 0.28),
-              border: Border.all(color: scheme.outlineVariant, width: 0.7),
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.035),
-                  blurRadius: 18,
-                  offset: const Offset(0, 5),
-                ),
-              ],
-            ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, contextPanelTopInset, 0, 12),
             child: ScrollConfiguration(
               // The scrollbar is drawn by _PanelScrollbar outside this frame.
               behavior: ScrollConfiguration.of(
@@ -3610,79 +4089,121 @@ class _HomeScreenState extends State<HomeScreen> {
                 controller: scrollController,
                 slivers: [
                   SliverToBoxAdapter(
-                    child: Selector<AppState, Object>(
-                      selector: (_, state) => (
-                        state.items,
-                        state.busy,
-                        state.dirty,
-                        state.filterQuery,
-                        state.status,
-                        state.sessionsMarkdownPath,
+                    child: Container(
+                      key: const ValueKey('terminal-section-card'),
+                      decoration: cardDecoration,
+                      clipBehavior: Clip.antiAlias,
+                      child: Selector<AppState, Object>(
+                        selector: (_, state) =>
+                            (state.terminalTabs, state.items),
+                        builder: (context, _, _) => TerminalTabsCard(
+                          monitor: state.terminalTabs,
+                          saved: state.items,
+                          providerColor: (provider) =>
+                              _providerColor(scheme, provider),
+                          onOpen: (group, only) =>
+                              _openTerminalGroup(state, group, only),
+                          onClose: (group) => _closeTerminalGroup(state, group),
+                          onAlreadyOpen: () =>
+                              _terminalNotice('Already open in Terminal.'),
+                        ),
                       ),
-                      builder: (context, _, _) =>
-                          _buildPanelHeader(context, state),
                     ),
                   ),
-                  Selector<AppState, Object>(
-                    selector: (_, state) =>
-                        (state.items, state.busy, state.filterQuery),
-                    builder: (context, _, _) =>
-                        _buildSessionSliver(context, state),
+                  const SliverToBoxAdapter(child: SizedBox(height: 12)),
+                  DecoratedSliver(
+                    key: const ValueKey('sessions-section-card'),
+                    decoration: cardDecoration,
+                    sliver: SliverMainAxisGroup(
+                      slivers: [
+                        SliverToBoxAdapter(
+                          child: Selector<AppState, Object>(
+                            selector: (_, state) => (
+                              state.items,
+                              state.busy,
+                              state.dirty,
+                              state.filterQuery,
+                            ),
+                            builder: (context, _, _) =>
+                                _buildPanelHeader(context, state),
+                          ),
+                        ),
+                        Selector<AppState, Object>(
+                          selector: (_, state) => (
+                            state.items,
+                            state.busy,
+                            state.filterQuery,
+                            state.openSessionsInTerminal,
+                          ),
+                          builder: (context, _, _) =>
+                              _buildSessionSliver(context, state),
+                        ),
+                        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+                      ],
+                    ),
                   ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 12)),
                   SliverToBoxAdapter(
-                    child: Selector<AppState, Object>(
-                      selector: (_, state) => (
-                        state.recentProvider,
-                        state.recentBusy,
-                        state.recentRefreshRevision,
-                        state.recentStatus,
-                        state.items,
-                        state.busy,
-                        state.recentCodex,
-                        state.recentKimi,
-                        state.recentOpencode,
-                        state.recentQwen,
-                        state.recentMuse,
-                        state.recentZcode,
-                        state.recentTabOrder,
-                        state.recentTabHidden,
-                      ),
-                      // Keep account widgets stable while recent sessions refresh.
+                    child: Container(
+                      key: const ValueKey('accounts-section-card'),
+                      decoration: cardDecoration,
+                      clipBehavior: Clip.antiAlias,
                       child: Selector<AppState, Object>(
                         selector: (_, state) => (
                           state.recentProvider,
-                          state.codexAccounts,
-                          state.codexActiveAccount,
-                          state.codexAccountBusy,
-                          state.codexAccountRefreshRevision,
-                          state.codexManualResetBusy,
-                          state.codexAccountStatus,
-                          state.codexAccountError,
-                          state.museAccounts,
-                          state.museActiveAccount,
-                          state.museAccountBusy,
-                          state.museAccountRefreshRevision,
-                          state.museManualResetAt,
-                          state.museAccountStatus,
-                          state.museAccountError,
-                          state.zcodeAccounts,
-                          state.zcodeAccountBusy,
-                          state.zcodeAccountRefreshRevision,
-                          state.zcodeAccountStatus,
-                          state.zcodeAccountError,
+                          state.recentBusy,
+                          state.recentRefreshRevision,
+                          state.recentStatus,
+                          state.items,
                           state.busy,
+                          state.recentCodex,
+                          state.recentKimi,
+                          state.recentOpencode,
+                          state.recentQwen,
+                          state.recentMuse,
+                          state.recentZcode,
+                          state.recentClaude,
+                          state.recentTabOrder,
+                          state.recentTabHidden,
+                          state.openSessionsInTerminal,
                         ),
-                        builder: (context, _, _) =>
-                            state.recentProvider == SessionProvider.muse
-                            ? _buildMuseAccountSection(context, state)
-                            : state.recentProvider == SessionProvider.zcode
-                            ? _buildZcodeAccountSection(context, state)
-                            : _buildCodexAccountSection(context, state),
-                      ),
-                      builder: (context, _, accounts) => _buildRecentContexts(
-                        context,
-                        state,
-                        accountSection: accounts!,
+                        // Keep account widgets stable while recent sessions refresh.
+                        child: Selector<AppState, Object>(
+                          selector: (_, state) => (
+                            state.recentProvider,
+                            state.codexAccounts,
+                            state.codexActiveAccount,
+                            state.codexAccountBusy,
+                            state.codexAccountRefreshRevision,
+                            state.codexManualResetBusy,
+                            state.codexAccountStatus,
+                            state.codexAccountError,
+                            state.museAccounts,
+                            state.museActiveAccount,
+                            state.museAccountBusy,
+                            state.museAccountRefreshRevision,
+                            state.museManualResetAt,
+                            state.museAccountStatus,
+                            state.museAccountError,
+                            state.zcodeAccounts,
+                            state.zcodeAccountBusy,
+                            state.zcodeAccountRefreshRevision,
+                            state.zcodeAccountStatus,
+                            state.zcodeAccountError,
+                            state.busy,
+                          ),
+                          builder: (context, _, _) =>
+                              state.recentProvider == SessionProvider.muse
+                              ? _buildMuseAccountSection(context, state)
+                              : state.recentProvider == SessionProvider.zcode
+                              ? _buildZcodeAccountSection(context, state)
+                              : _buildCodexAccountSection(context, state),
+                        ),
+                        builder: (context, _, accounts) => _buildRecentContexts(
+                          context,
+                          state,
+                          accountSection: accounts!,
+                        ),
                       ),
                     ),
                   ),
@@ -3810,7 +4331,7 @@ class _HomeScreenState extends State<HomeScreen> {
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: item.isSession
-            ? () => _copyCommand(context, item.resumeCommand, 'Resume')
+            ? () => _activateSaved(context, state, item)
             : () => _showRenameHint(context),
         onDoubleTap: () => _renameItem(context, state, item, index),
         child: Padding(
@@ -3971,10 +4492,21 @@ class _HomeScreenState extends State<HomeScreen> {
                     Expanded(
                       child: InkWell(
                         borderRadius: borderRadius,
-                        onTap: () =>
-                            _copyCommand(context, item.resumeCommand, 'Resume'),
+                        onTap: () => _activateSaved(context, state, item),
+                        onSecondaryTapDown: (details) => _showSessionMenu(
+                          context,
+                          details,
+                          state: state,
+                          provider: item.provider,
+                          onSelected: (action) => _activateSaved(
+                            context,
+                            state,
+                            item,
+                            action: action,
+                          ),
+                        ),
                         child: _tooltip(
-                          'Click card to copy resume command',
+                          _sessionTip(state, item.provider),
                           Row(
                             children: [
                               SizedBox(width: isGrouped ? 16 : 8),
@@ -4168,6 +4700,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final whiteboardVisible = context.select<AppState, bool>(
       (state) => state.whiteboardEnabled,
     );
+    final whiteboardSplit = context.select<AppState, double>(
+      (state) => state.whiteboardSplit,
+    );
     final scheme = Theme.of(context).colorScheme;
     final compactHeader = MediaQuery.sizeOf(context).width < 720;
     final narrowHeader = MediaQuery.sizeOf(context).width < 480;
@@ -4259,7 +4794,7 @@ class _HomeScreenState extends State<HomeScreen> {
               toggled: whiteboardVisible,
               child: TextButton(
                 key: const ValueKey('whiteboard-toggle'),
-                onPressed: () => state.setWhiteboardEnabled(!whiteboardVisible),
+                onPressed: () => _toggleWhiteboard(context, state),
                 style: TextButton.styleFrom(
                   foregroundColor: whiteboardVisible
                       ? scheme.primary
@@ -4302,6 +4837,8 @@ class _HomeScreenState extends State<HomeScreen> {
         child: _CodexDither(
           child: WhiteboardWorkspace(
             visible: whiteboardVisible,
+            contextFraction: whiteboardSplit,
+            onSplitChanged: state.setWhiteboardSplit,
             whiteboardPane: WhiteboardPane(appState: state),
             contextPane: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -4325,6 +4862,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Color _providerColor(ColorScheme scheme, SessionProvider provider) {
+    if (provider == SessionProvider.claude) {
+      return scheme.brightness == Brightness.dark
+          ? const Color(0xFFE3A184)
+          : const Color(0xFFAC573A);
+    }
     if (provider == SessionProvider.codex) {
       return scheme.primary;
     }

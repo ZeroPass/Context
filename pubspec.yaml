@@ -40,7 +40,7 @@ msix_config:
   output_name: Context
   logo_path: assets/appx/ContextIcon.png
   install_certificate: false
-  capabilities: internetClient
+  capabilities: internetClient, allowElevation
 
 flutter:
   uses-material-design: true

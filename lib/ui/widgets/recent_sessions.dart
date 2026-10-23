@@ -44,76 +44,118 @@ class RecentProviderTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      onTap: () => onTap(),
-      borderRadius: BorderRadius.circular(9),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: selected
-              ? color.withValues(alpha: 0.16)
-              : highlighted
-              ? color.withValues(alpha: 0.08)
-              : Colors.transparent,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 140;
+        final tight = constraints.maxWidth < 112;
+        final tab = InkWell(
+          onTap: () => onTap(),
           borderRadius: BorderRadius.circular(9),
-          border: Border.all(
-            color: selected
-                ? color.withValues(alpha: 0.55)
-                : highlighted
-                ? color.withValues(alpha: 0.45)
-                : Colors.transparent,
-            width: 0.8,
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              switch (provider) {
-                SessionProvider.codex => Icons.terminal_rounded,
-                SessionProvider.kimi => Icons.nights_stay_outlined,
-                SessionProvider.opencode => Icons.code_rounded,
-                SessionProvider.qwen => Icons.auto_awesome_rounded,
-                SessionProvider.muse => Icons.bolt_rounded,
-                SessionProvider.zcode => Icons.smart_toy_outlined,
-              },
-              size: 15,
-              color: selected ? color : scheme.onSurfaceVariant,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            padding: EdgeInsets.symmetric(
+              horizontal: tight
+                  ? 4
+                  : compact
+                  ? 6
+                  : 10,
+              vertical: 7,
             ),
-            const SizedBox(width: 7),
-            Flexible(
-              child: Text(
-                provider.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
-            Container(
-              constraints: const BoxConstraints(minWidth: 20),
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
+            decoration: BoxDecoration(
+              color: selected
+                  ? color.withValues(alpha: 0.16)
+                  : highlighted
+                  ? color.withValues(alpha: 0.08)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(
                 color: selected
-                    ? color.withValues(alpha: 0.22)
-                    : scheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                '$count',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
-                ),
+                    ? color.withValues(alpha: 0.55)
+                    : highlighted
+                    ? color.withValues(alpha: 0.45)
+                    : Colors.transparent,
+                width: 0.8,
               ),
             ),
-          ],
-        ),
-      ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  switch (provider) {
+                    SessionProvider.codex => Icons.terminal_rounded,
+                    SessionProvider.claude => Icons.wb_sunny_outlined,
+                    SessionProvider.kimi => Icons.nights_stay_outlined,
+                    SessionProvider.opencode => Icons.code_rounded,
+                    SessionProvider.qwen => Icons.auto_awesome_rounded,
+                    SessionProvider.muse => Icons.bolt_rounded,
+                    SessionProvider.zcode => Icons.smart_toy_outlined,
+                  },
+                  size: 15,
+                  color: selected ? color : scheme.onSurfaceVariant,
+                ),
+                SizedBox(
+                  width: tight
+                      ? 3
+                      : compact
+                      ? 4
+                      : 7,
+                ),
+                Flexible(
+                  child: Text(
+                    provider.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: selected
+                          ? scheme.onSurface
+                          : scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                SizedBox(
+                  width: tight
+                      ? 3
+                      : compact
+                      ? 4
+                      : 6,
+                ),
+                Container(
+                  constraints: BoxConstraints(
+                    minWidth: tight
+                        ? 16
+                        : compact
+                        ? 18
+                        : 20,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 1,
+                  ),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? color.withValues(alpha: 0.22)
+                        : scheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '$count',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: selected
+                          ? scheme.onSurface
+                          : scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        return compact
+            ? PassiveTooltip(message: provider.label, child: tab)
+            : tab;
+      },
     );
   }
 }
@@ -211,23 +253,29 @@ class RecentSessionCard extends StatelessWidget {
     this.trailing,
     this.selected = false,
     this.badgeLabel,
+    this.onSecondaryTapDown,
+    this.subtitle,
+    this.compact = false,
   });
   final RecentContext session;
   final String title;
   final Color color;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final String tip;
   final Widget? trailing;
   final bool selected;
   final String? badgeLabel;
+  final GestureTapDownCallback? onSecondaryTapDown;
+  final String? subtitle;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.fromLTRB(9, 7, 6, 7),
+      margin: EdgeInsets.only(bottom: compact ? 4 : 6),
+      padding: EdgeInsets.fromLTRB(9, compact ? 3 : 7, 6, compact ? 3 : 7),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLowest.withValues(alpha: 0.62),
         borderRadius: BorderRadius.circular(10),
@@ -239,7 +287,7 @@ class RecentSessionCard extends StatelessWidget {
         ),
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 40),
+        constraints: BoxConstraints(minHeight: compact ? 28 : 40),
         child: Row(
           children: [
             Expanded(
@@ -250,10 +298,13 @@ class RecentSessionCard extends StatelessWidget {
                   child: InkWell(
                     borderRadius: BorderRadius.circular(8),
                     onTap: onTap,
+                    onSecondaryTapDown: onSecondaryTapDown,
                     child: Row(
                       children: [
                         Container(
-                          constraints: const BoxConstraints(minWidth: 72),
+                          constraints: BoxConstraints(
+                            minWidth: compact ? 42 : 72,
+                          ),
                           padding: const EdgeInsets.symmetric(
                             horizontal: 8,
                             vertical: 5,
@@ -305,20 +356,24 @@ class RecentSessionCard extends StatelessWidget {
                                   ],
                                 ],
                               ),
-                              Text(
-                                [
-                                  formatRecentAge(session.updatedAt),
-                                  if (session.workDir?.trim().isNotEmpty ==
-                                      true)
-                                    session.workDir!.trim(),
-                                ].join('  ·  '),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: scheme.onSurfaceVariant,
-                                  fontSize: 10.5,
+                              if (!compact)
+                                Text(
+                                  subtitle ??
+                                      [
+                                        formatRecentAge(session.updatedAt),
+                                        if (session.workDir
+                                                ?.trim()
+                                                .isNotEmpty ==
+                                            true)
+                                          session.workDir!.trim(),
+                                      ].join('  ·  '),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: scheme.onSurfaceVariant,
+                                    fontSize: 10.5,
+                                  ),
                                 ),
-                              ),
                             ],
                           ),
                         ),

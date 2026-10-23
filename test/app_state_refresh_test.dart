@@ -7,12 +7,15 @@ import 'dart:ui' as ui;
 import 'package:context/app/app_state.dart';
 import 'package:context/app/models.dart';
 import 'package:context/app/whiteboard.dart';
+import 'package:context/app/terminal_tabs.dart';
 import 'package:context/ui/widgets/session_agent_picker.dart';
 import 'package:context/ui/widgets/add_session_dialog.dart';
 import 'package:context/ui/widgets/passive_tooltip.dart';
+import 'package:context/ui/widgets/recent_sessions.dart';
 import 'package:context/main.dart';
 import 'package:context/src/bindings/bindings.dart';
 import 'package:context/ui/home_screen.dart';
+import 'package:context/ui/widgets/terminal_tabs_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart'
@@ -71,6 +74,7 @@ void emitState({
   bool recentBusy = false,
   String? recentTitle,
   String? warning,
+  String? status,
   double usedPercent = 31.0,
   int? apiResetAt,
   int? manualResetAt,
@@ -89,6 +93,7 @@ void emitState({
   final state = UiState(
     themeSeedColorValue: AppState.themeSeedColors.first,
     busy: busy,
+    status: status,
     sessionsMarkdownPath: path,
     itemsJson: jsonEncode([
       {
@@ -220,6 +225,243 @@ void main() {
       }
     });
   }
+
+  stateTest(
+    'loaded-file status lives beside the Settings path and updates live',
+    (tester) async {
+      const loaded = 'Loaded 1 item(s) from $markdownPath';
+      emitState(status: loaded);
+      await tester.pump();
+      await mountApp(tester);
+      final fileSection = find.byKey(const ValueKey('settings-markdown-file'));
+      final status = find.byKey(const ValueKey('markdown-load-status'));
+      expect(status, findsNothing);
+      expect(find.text(loaded), findsNothing);
+      await tester.tap(find.byIcon(Icons.settings_outlined));
+      await tester.pumpAndSettle();
+      expect(fileSection, findsOneWidget);
+      expect(
+        find.descendant(of: fileSection, matching: status),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: fileSection, matching: find.text(loaded)),
+        findsOneWidget,
+      );
+
+      const nextPath = '/test/codex-out/other sessions.md';
+      const updated = 'Loaded 1 item(s) from $nextPath';
+      emitState(path: nextPath, status: updated);
+      await pumpSignalFrame(tester);
+      expect(find.text(loaded), findsNothing);
+      expect(
+        find.descendant(of: fileSection, matching: find.text(updated)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: fileSection, matching: find.text(nextPath)),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(status, findsNothing);
+      expect(find.text(updated), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  stateTest(
+    'main warnings and loading feedback remain without shifting the filter',
+    (tester) async {
+      const warning = 'Markdown file not found: /test/missing.md';
+      emitState(warning: warning);
+      await tester.pump();
+      await mountApp(tester);
+      expect(find.text(warning), findsOneWidget);
+      final filter = find.byType(TextField);
+      final top = tester.getTopLeft(filter).dy;
+      final progress = find.byKey(const ValueKey('context-load-progress'));
+      expect(
+        find.descendant(
+          of: progress,
+          matching: find.byType(LinearProgressIndicator),
+        ),
+        findsNothing,
+      );
+      emitState(busy: true, warning: warning, status: 'Loading config...');
+      await pumpSignalFrame(tester);
+      expect(find.text(warning), findsOneWidget);
+      expect(find.text('Loading config...'), findsNothing);
+      expect(
+        find.descendant(
+          of: progress,
+          matching: find.byType(LinearProgressIndicator),
+        ),
+        findsOneWidget,
+      );
+      expect(tester.getTopLeft(filter).dy, top);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  stateTest(
+    'provider buttons squeeze before wrapping and bottom blocks have clear names',
+    (tester) async {
+      emitState();
+      await tester.pump();
+      await mountApp(tester);
+      Finder tab(SessionProvider provider) => find.byWidgetPredicate(
+        (widget) => widget is RecentProviderTab && widget.provider == provider,
+      );
+      tester.view.physicalSize = const Size(860, 1100);
+      await tester.pumpAndSettle();
+      final firstY = tester.getTopLeft(tab(SessionProvider.codex)).dy;
+      for (final provider in SessionProvider.values) {
+        expect(tester.getTopLeft(tab(provider)).dy, closeTo(firstY, 0.1));
+      }
+      expect(find.text('Accounts'), findsOneWidget);
+      expect(find.text('Sessions'), findsOneWidget);
+      expect(find.text('Last sessions'), findsOneWidget);
+      expect(find.text('Terminal tabs'), findsOneWidget);
+      final sessionsCard = find.byKey(const ValueKey('sessions-section-card'));
+      final accountsCard = find.byKey(const ValueKey('accounts-section-card'));
+      expect(
+        find.descendant(of: sessionsCard, matching: find.text('Sessions')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: sessionsCard, matching: find.byType(TextField)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: accountsCard, matching: find.text('Accounts')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: accountsCard, matching: find.text('Last sessions')),
+        findsOneWidget,
+      );
+      expect(
+        tester.getTopLeft(accountsCard).dy,
+        greaterThan(tester.getBottomLeft(find.byType(TextField)).dy),
+      );
+      expect(find.text('Codex account'), findsNothing);
+      expect(find.text('Recent sessions'), findsNothing);
+      await capture(tester, 'accounts-tabs-compact-row');
+
+      tester.view.physicalSize = const Size(400, 1000);
+      await tester.pumpAndSettle();
+      final narrowY = tester.getTopLeft(tab(SessionProvider.codex)).dy;
+      expect(
+        tester.getTopLeft(tab(SessionProvider.kimi)).dy,
+        closeTo(narrowY, 0.1),
+      );
+      expect(
+        tester.getTopLeft(tab(SessionProvider.opencode)).dy,
+        closeTo(narrowY, 0.1),
+      );
+      expect(
+        tester.getTopLeft(tab(SessionProvider.qwen)).dy,
+        greaterThan(narrowY),
+      );
+      await capture(tester, 'accounts-tabs-narrow');
+      await tester.tap(tab(SessionProvider.kimi));
+      await tester.pumpAndSettle();
+      expect(state.recentProvider, SessionProvider.kimi);
+      expect(find.text('Sessions'), findsOneWidget);
+      expect(find.text('Accounts'), findsOneWidget);
+      expect(find.text('Last sessions'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  stateTest('Terminal card is above Sessions and shows multiple providers', (
+    tester,
+  ) async {
+    state.terminalTabs = TerminalTabs(
+      reader: (_) async => {
+        'sessions': [
+          {
+            'pid': 10,
+            'start': '1',
+            'provider': 'codex',
+            'launch_session_id': '11111111-1111-1111-1111-111111111111',
+            'name': 'Live Codex',
+            'cwd': '/work',
+            'distro': 'Ubuntu',
+          },
+          {
+            'pid': 20,
+            'start': '2',
+            'provider': 'claude',
+            'launch_session_id': '22222222-2222-2222-2222-22222222abcd',
+            'name': 'Review changes',
+            'cwd': '/work',
+            'distro': 'Ubuntu',
+          },
+          {
+            'pid': 30,
+            'start': '3',
+            'provider': 'opencode',
+            'launch_session_id': null,
+            'cwd': '/work',
+            'distro': 'Ubuntu',
+          },
+          {
+            'pid': 40,
+            'start': '4',
+            'provider': 'kimi',
+            'launch_session_id': 'test-5678',
+            'cwd': '/work',
+            'distro': 'Ubuntu',
+          },
+        ],
+        'windows': [
+          {
+            'hwnd': 1,
+            'pid': 101,
+            'started': '134372384715116842',
+            'tabs': [
+              {'title': 'Live Codex | work', 'selected': true},
+            ],
+          },
+        ],
+      },
+    );
+    emitState();
+    await tester.pump();
+    await mountApp(tester);
+    tester.view.physicalSize = const Size(860, 1200);
+    await tester.pumpAndSettle();
+    final terminalCard = find.byType(TerminalTabsCard);
+    final savedLabel = find.descendant(
+      of: terminalCard,
+      matching: find.text('Saved session'),
+    );
+    expect(savedLabel, findsOneWidget);
+    for (final title in ['Claude abcd', 'OpenCode ?', 'Kimi 5678']) {
+      expect(find.text(title), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text(title)).dy,
+        tester.getTopLeft(savedLabel).dy,
+      );
+    }
+    expect(
+      find.descendant(
+        of: terminalCard,
+        matching: find.textContaining('Ubuntu'),
+      ),
+      findsNothing,
+    );
+    expect(
+      tester.getTopLeft(find.text('Terminal tabs')).dy,
+      lessThan(tester.getTopLeft(find.text('Sessions')).dy),
+    );
+    await capture(tester, 'accounts-terminal-providers');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
     'agent picker fits narrow widths and prefilled entries stay compact',

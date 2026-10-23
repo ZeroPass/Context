@@ -65,7 +65,7 @@ void main() {
     );
   });
   test(
-    'parser keeps newest three and ignores debris without changing Markdown',
+    'parser keeps newest four and ignores debris without changing Markdown',
     () {
       final body = '# Full output\n\n[notes](notes.md)\n\n```text\n---\n```\n';
       final entries = List.generate(
@@ -76,7 +76,7 @@ void main() {
           '<!-- instructions -->\n$entries'
           '<!-- context:whiteboard:entry broken -->\nunfinished';
       final posts = parseWhiteboard(text);
-      expect(posts.map((p) => p.id), ['post-7', 'post-6', 'post-5']);
+      expect(posts.map((p) => p.id), ['post-7', 'post-6', 'post-5', 'post-4']);
       expect(posts.every((p) => p.body == body), isTrue);
       expect(parseWhiteboard(entry(1) + entry(2) + entry(1)).map((p) => p.id), [
         'post-1',

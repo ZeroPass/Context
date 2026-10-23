@@ -2,6 +2,7 @@ import 'dart:ui' show PointerDeviceKind;
 
 import 'package:context/ui/widgets/whiteboard_workspace.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class ProbePane extends StatefulWidget {
@@ -49,6 +50,8 @@ void main() {
     required Widget whiteboardPane,
     required bool Function() visible,
     required void Function(StateSetter) onSetter,
+    double Function()? fraction,
+    ValueChanged<double>? onSplitChanged,
   }) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1;
@@ -64,6 +67,8 @@ void main() {
                 visible: visible(),
                 contextPane: contextPane,
                 whiteboardPane: whiteboardPane,
+                contextFraction: fraction?.call() ?? 1 / 3,
+                onSplitChanged: onSplitChanged,
               );
             },
           ),
@@ -74,7 +79,7 @@ void main() {
   }
 
   testWidgets(
-    'default split gives Whiteboard two thirds and respects minimum widths',
+    'default split gives Whiteboard two thirds and respects minimums',
     (tester) async {
       await mount(
         tester,
@@ -105,6 +110,47 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+
+  testWidgets('split saves once after dragging and restores after remount', (
+    tester,
+  ) async {
+    var fraction = 0.55;
+    final commits = <double>[];
+    Future<void> show() => mount(
+      tester,
+      contextPane: const Text('Left'),
+      whiteboardPane: const Text('Right'),
+      visible: () => true,
+      onSetter: (_) {},
+      fraction: () => fraction,
+      onSplitChanged: (value) {
+        fraction = value;
+        commits.add(value);
+      },
+    );
+    await show();
+    final divider = find.byKey(const ValueKey('whiteboard-divider'));
+    final gesture = await tester.startGesture(tester.getCenter(divider));
+    await gesture.moveBy(const Offset(30, 0));
+    await gesture.moveBy(const Offset(30, 0));
+    await gesture.moveBy(const Offset(30, 0));
+    await tester.pump();
+    expect(commits, isEmpty);
+    await gesture.up();
+    await tester.pump();
+    expect(commits, hasLength(1));
+    final left = find.byKey(const ValueKey('context-pane'));
+    final width = tester.getSize(left).width;
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    expect(commits, hasLength(2));
+    expect(tester.getSize(left).width, closeTo(width - 24, 0.01));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await show();
+    expect(tester.getSize(left).width, closeTo(width - 24, 0.01));
+    expect(commits, hasLength(2));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
     'panes keep state, scroll, and custom split through paging and resize',

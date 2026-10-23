@@ -12,7 +12,10 @@ Publish only the actual final Markdown output, not thinking, tool traces,
 terminal logs, or an extra summary of the output. Keep links and file paths.
 Never edit surviving entries or this header. Use the publishing helper; it
 serializes concurrent writes, appends the new output, removes ALL entries older
-than the newest three, and cleans unframed debris. Do not append by hand.
+than the newest four, and cleans unframed debris. Do not append by hand.
+
+Entries marked local_drop are user-provided material for an agent, not agent
+answers. Read their linked README when the user shares that drop with you.
 
 Helper: {{PUBLISH_COMMAND}}
 Pass --title "Short description" and optionally --provider codex/kimi/opencode/qwen.

@@ -143,9 +143,9 @@ class FileReferenceResolver {
         final candidate = _paths.normalize(_paths.join(translate(root), path));
         if (candidates.add(candidate)) {
           final existing = await _existing(candidate);
-        if (existing != null && !matches.contains(existing)) {
+          if (existing != null && !matches.contains(existing)) {
             matches.add(existing);
-        }
+          }
         }
       }
       return ResolvedReference(source, matches);

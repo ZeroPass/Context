@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "win32_window.h"
+#include "whiteboard_input.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -31,6 +32,11 @@ class FlutterWindow : public Win32Window {
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> clipboard_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> notification_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> terminal_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> workspace_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> whiteboard_input_channel_;
+  WhiteboardInput* whiteboard_input_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

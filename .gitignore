@@ -43,6 +43,8 @@ config.txt
 /context.md
 /codex sessions.md
 /whiteboard.md
+/whiteboard-drops/
+/.whiteboard-write.lock/
 /wb.md
 /whiteboard.md.lock
 /.whiteboard.*.tmp

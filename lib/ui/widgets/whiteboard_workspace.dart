@@ -5,6 +5,8 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../app/workspace_window.dart';
+
 // Equal gutters keep the resize cue centered between the visible panel frames.
 const contextPanelGutterWidth = 13.0;
 const contextPanelTopInset = 4.0;
@@ -16,11 +18,15 @@ class WhiteboardWorkspace extends StatefulWidget {
     required this.visible,
     required this.contextPane,
     this.whiteboardPane = const SizedBox.expand(),
+    this.contextFraction = defaultWhiteboardContextFraction,
+    this.onSplitChanged,
   });
 
   final bool visible;
   final Widget contextPane;
   final Widget whiteboardPane;
+  final double contextFraction;
+  final ValueChanged<double>? onSplitChanged;
 
   @override
   State<WhiteboardWorkspace> createState() => _WhiteboardWorkspaceState();
@@ -35,7 +41,7 @@ class _WhiteboardWorkspaceState extends State<WhiteboardWorkspace> {
   final _contextKey = GlobalKey();
   final _whiteboardKey = GlobalKey();
   final _pages = PageController(initialPage: 1, keepPage: false);
-  double _contextFraction = 1 / 3;
+  late double _contextFraction;
   int _pageIndex = 1;
   bool _compact = false;
   bool _hovered = false;
@@ -48,18 +54,33 @@ class _WhiteboardWorkspaceState extends State<WhiteboardWorkspace> {
   double _contextWidth(double available) =>
       _clampContextWidth(available * _contextFraction, available);
 
-  void _resize(double delta, double available) {
+  @override
+  void initState() {
+    super.initState();
+    _contextFraction = whiteboardContextFraction(widget.contextFraction);
+  }
+
+  void _resize(double delta, double available, {bool commit = true}) {
     if (available <= 0) return;
     setState(() {
       _contextFraction =
           _clampContextWidth(_contextWidth(available) + delta, available) /
           available;
     });
+    if (commit) widget.onSplitChanged?.call(_contextFraction);
+  }
+
+  void _finishDrag() {
+    setState(() => _dragging = false);
+    widget.onSplitChanged?.call(_contextFraction);
   }
 
   @override
   void didUpdateWidget(WhiteboardWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.contextFraction != oldWidget.contextFraction) {
+      _contextFraction = whiteboardContextFraction(widget.contextFraction);
+    }
     if (widget.visible && !oldWidget.visible) _pageIndex = 1;
     if (!widget.visible && oldWidget.visible) {
       _dividerFocus.unfocus();
@@ -258,11 +279,9 @@ class _WhiteboardWorkspaceState extends State<WhiteboardWorkspace> {
                         setState(() => _dragging = true);
                       },
                       onHorizontalDragUpdate: (details) =>
-                          _resize(details.delta.dx, available),
-                      onHorizontalDragEnd: (_) =>
-                          setState(() => _dragging = false),
-                      onHorizontalDragCancel: () =>
-                          setState(() => _dragging = false),
+                          _resize(details.delta.dx, available, commit: false),
+                      onHorizontalDragEnd: (_) => _finishDrag(),
+                      onHorizontalDragCancel: _finishDrag,
                       child: SizedBox(
                         width: _dividerWidth,
                         child: Padding(
