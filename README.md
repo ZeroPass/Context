@@ -2,137 +2,120 @@
 
 **Manage your contexts**
 
-Working with coding agents means keeping track of more than code: which
-conversation belongs to which project, which Terminal tabs you had open, how
-much account usage is left, and where the agent put its results.
+A Windows desktop app for organizing coding-agent sessions, managing Codex
+accounts, and sharing outputs and files through a local Whiteboard.
 
-Context brings those pieces together. Find the right session, pick up where
-you left off, and keep reports and files beside the work instead of scattered
-across terminal scrollback and external apps.
+Supports **Codex, Claude Code, Kimi Code, OpenCode, Qwen Code, Muse, and ZCode**.
+Session data comes from the agents' local stores. Terminal integration uses WSL.
 
-A Windows desktop companion for **Codex, Claude Code, Kimi Code, OpenCode,
-Qwen Code, Muse, and ZCode**, built around WSL workflows.
+![Context with grouped sessions, Codex account usage, and a Whiteboard preview](./Context%20app%20screenshoot.png)
 
-[Get Started](#get-started) | [Whiteboard](#keep-the-results-next-to-the-work) | [Build](#build-context) | [Full Guide](docs/GUIDE.md)
+## Sessions
 
-![Context with grouped coding sessions, Codex account pacing, and a Whiteboard report preview](./Context%20app%20screenshoot.png)
+Saved sessions have a name, provider, and session ID. They can be filtered,
+reordered by dragging, and arranged in color groups. The list is stored in
+Markdown, with autosave enabled by default.
 
-## What Context Solves
+- Click a session to copy its resume command, or enable opening it in Windows Terminal.
+- Right-click for either action without changing the default.
+- Add entries manually or save them from a provider's recent-session list.
+- Fork controls are available for Codex and Claude Code. ZCode is copy-only.
 
-| Instead of... | You get... |
-| --- | --- |
-| Hunting through history for the right conversation | A named, searchable session library across coding agents. |
-| Rebuilding your Terminal workspace each time | Remembered tab groups that reopen only the sessions that are missing. |
-| Finding out too late that an account is nearly exhausted | Codex usage, reset times, and pacing in one view. |
-| Losing useful outputs in terminal scrollback | A shared Whiteboard for finished answers, reports, images, videos, and files. |
+UUIDs make lousy bookmarks.
 
-## Find the Conversation. Continue the Work.
+## Terminal Tabs
 
-Give sessions names that mean something to you. Keep related work in color
-groups, drag it into the order you want, and filter the whole library as you
-type. Your list is saved as an ordinary Markdown file, with autosave on by default.
-
-Click to copy a resume command, or choose to open sessions directly in Ubuntu
-tabs in Windows Terminal. Recent sessions help you recover work you have not
-saved yet; add one without retyping its name or session ID. Fork where the
-agent supports it, without inventing commands for those that do not.
-
-Context sits beside the agents you already use. You keep their native TUIs,
-tools, and workflows; you get a better way to find and return to them.
-
-## Bring Your Workspace Back
-
-The **Terminal tabs** card shows running coding agents grouped by Terminal
-window. Recognize sessions by your saved names rather than a row of anonymous tabs.
+Running coding agents are grouped by Windows Terminal window, using saved
+session names where available. Groups are remembered locally and can be renamed.
 
 Closing an individual tab updates the active group. Closing the whole window
-keeps its last observed set of sessions, ready to restore later. Reopening a
-group skips anything already open, so restoring work does not mean duplicating it.
+preserves its last observed sessions. Restoring a group opens only missing
+sessions, leaving already-open tabs alone.
 
-## Know What Is Left Before You Run Out
+Tabs open in WSL using the session's working directory. Context can request
+administrator approval once at startup to reuse elevated Terminal windows
+without a prompt for each tab; this is configurable in Settings.
 
-Codex account cards bring sign-in switching, usage, reset times, and pacing
-together. See not just the allowance left, but whether you are spending it faster
-or slower than the time remaining before reset.
+## Codex Accounts
 
-Save accounts under names you recognize and switch between them without
-manually juggling credential files. Each account keeps its own reported reset;
-temporary manual overrides can be edited, removed, or left to expire.
+Save the current Codex sign-in under a name, then switch between saved accounts
+from their cards. Each card shows usage, reset time, and pace relative to the
+time remaining before reset.
 
-You can also arm a one-time model downgrade for a reset or a delay in hours,
-rather than remembering to change the model later. Account switching and
-pacing are Codex-specific; integration capabilities differ between providers.
+Each account uses its own API-reported reset. An optional manual reset override
+can be edited or removed and expires automatically. Usage refreshes every 30 seconds.
 
-## Keep the Results Next to the Work
+The one-shot downgrade control applies a selected model and thinking level
+after a quota reset or a delay in hours. Fast mode is turned off when it runs.
+Account switching and pacing are Codex-specific.
 
-**Whiteboard is a shared space between you and your agents.**
+## Whiteboard
 
-Ask an agent to publish its finished answer, report, or files. The newest six
-publications stay in a slim tab strip, with formatted output and local previews
-together in one pane. It is a deliberate handoff, not another full chat history
-to search through.
+Whiteboard displays published Markdown from agents, with the newest six entries
+in a tab strip. Agents publish through a helper into `whiteboard.md`; Context
+reads that file rather than pulling the full chat history.
 
-Open images, videos, and Markdown without leaving Context. Browse a report's
-attachments, zoom in, expand a preview across the app, and copy or save what
-you need. File-location controls help you get back to the source.
+- Images, videos, and Markdown files open in the built-in viewer.
+- Attachments have previous/next navigation, image zoom, and app-wide expansion.
+- Right-click previews to copy or save; videos also support copying a snapshot.
+- File-location controls reveal files, with an option to open their default app.
+- Relative paths are checked against the publication's working directory and configured locations.
 
-It works the other way too: drag in a file, folder, image, or text, or paste with
-**Ctrl+V**. Preview what you dropped, then copy a short handoff prompt for an
-agent to work on it. No need to explain the same file location from scratch.
+Files, folders, images, and text can also be dropped or pasted into Whiteboard.
+These create entries with a short file-path prompt to copy back to an agent.
+Existing files are referenced in place; pasted content uses temporary local storage.
 
-Use **Copy first prompt** beside the Whiteboard tabs to introduce an agent to
-your board. The prompt includes the active file's location; publishing rules
-live in its header. In a configured workspace, **`wb.md`** refers to that board.
+**Copy first prompt** gives an agent the active Whiteboard path and points it
+to the publishing instructions in the file header. In a configured workspace,
+`wb.md` refers to that file.
 
-Whiteboard lives beside your session library, separated by a draggable divider.
-Show or hide it when needed; Context remembers your layout. Choose light, dark,
-sepia, or dusk, with your own accent and group colors.
+The Whiteboard pane can be shown or hidden beside the session list. Its divider
+position is remembered. Light, dark, sepia, and dusk themes are available.
 
-## Get Started
+## Setup
 
-1. [Build Context](#build-context), then install `Context.appx`.
-2. In **Settings**, choose your sessions Markdown file or create an example.
-3. Add sessions yourself or save them from the provider's recent-session list.
-4. Turn on **Whiteboard** and use **Copy first prompt** to introduce it to an agent.
+Install and sign in to the provider CLIs separately in WSL. In Context's
+Settings, select a sessions Markdown file or create an example. Add sessions
+manually or from the recent-session list.
 
-Install and sign in to your coding agents separately in WSL. To open sessions
-directly, enable **Open sessions in Terminal** in Settings; right-click still
-offers copying. ZCode remains copy-only.
+Enable **Open sessions in Terminal** for direct launching. Enable **Whiteboard**
+in the header and use **Copy first prompt** to introduce it to an agent.
 
-Context can ask for Windows administrator approval at startup to reuse an
-elevated Terminal without asking for every new tab. This is configurable.
+## Local Data
 
-## Your Files Stay Yours
+| File | Contents |
+| --- | --- |
+| `codex sessions.md` | Saved sessions and groups. |
+| `whiteboard.md` | Published entries and agent instructions. |
+| `whiteboard-drops/` | Temporary pasted attachments and handoff notes. |
 
-The session library and Whiteboard are local Markdown files. Pasted attachments
-and handoff notes stay local too; Whiteboard does not upload them.
-Existing files dropped onto it are referenced in place, not copied or deleted.
+These files and saved credentials are private local data, not repository assets.
+Keep credential snapshots out of Git. Whiteboard does not upload attachments;
+account features contact provider APIs.
 
-Session files, publications, attachments, and saved credentials are private
-local data and must not be committed or shared. Account features contact their
-provider APIs. See the [guide](docs/GUIDE.md) for storage, cleanup, and platform limits.
+See the [full guide](docs/GUIDE.md) for storage, cleanup, provider differences,
+and the limits of Terminal discovery.
 
-## Build Context
+## Build
 
-From PowerShell in this project folder:
+From PowerShell in the project folder:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows_appx.ps1
 ```
 
-Or double-click **`Build_APPX.bat`**. The result is `Context.appx` in the project root.
-The included packaging scripts can provision prerequisites and create a local
-signing certificate, with Windows approval where required. Another machine
-must trust that certificate before installing a self-signed package.
+Or run **`Build_APPX.bat`**. The output is `Context.appx` in the project root.
+The bootstrap can provision build dependencies and create a local signing
+certificate. Self-signed packages require that certificate to be trusted on
+each installation machine.
 
-[Windows build guide](BUILD_WINDOWS_APPX_POWERSHELL.md) covers setup, portable
-output, WSL/UNC builds, and certificate troubleshooting.
+[Windows build guide](BUILD_WINDOWS_APPX_POWERSHELL.md): prerequisites,
+portable output, WSL/UNC builds, and certificate troubleshooting.
 
 Built with **Flutter, Rust, and [Rinf](https://pub.dev/packages/rinf)**.
-Developer commands, regression checks, and detailed behavior are in the [full guide](docs/GUIDE.md).
+Developer commands and regression checks are in the [full guide](docs/GUIDE.md).
 
 ## License
 
 Dual-licensed under [LGPL v3](LICENSE.LGPL) and a
-[commercial license](LICENSE.COMMERCIAL). Bundled third-party components retain
-their own licenses.
+[commercial license](LICENSE.COMMERCIAL). Third-party components retain their own licenses.
