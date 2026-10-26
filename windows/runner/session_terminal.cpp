@@ -1,4 +1,5 @@
 #include "session_terminal.h"
+#include "terminal_broker.h"
 
 #include <shellapi.h>
 
@@ -169,7 +170,7 @@ std::wstring TerminalCommandLine(const std::vector<std::string>& arguments) {
 
 DWORD OpenSessionTerminal(HWND owner,
                           const std::vector<std::string>& arguments) noexcept {
-  if (!IsContextElevated()) return ERROR_ELEVATION_REQUIRED;
+  if (!IsContextElevated()) return TerminalBrokerRequest(TerminalBrokerAction::open, arguments);
   try {
     const auto parameters = TerminalCommandLine(arguments);
     std::wstring path(32768, L'\0');
@@ -186,20 +187,11 @@ DWORD OpenSessionTerminal(HWND owner,
 }
 
 DWORD RestartContextElevated(HWND owner) noexcept {
-  if (IsContextElevated()) return ERROR_ALREADY_EXISTS;
-  try {
-    const auto status = Launch(
-        owner, L"runas", Executable(),
-        L"--context-restart-parent " + std::to_wstring(GetCurrentProcessId()));
-    if (status == ERROR_SUCCESS) PostMessageW(owner, WM_CLOSE, 0, 0);
-    return status;
-  } catch (...) {
-    return ERROR_INVALID_PARAMETER;
-  }
+  return ApproveTerminalBroker(owner);
 }
 
-DWORD CloseSessionTerminal(const std::vector<std::string>& identity) noexcept {
-  if (!IsContextElevated()) return ERROR_ELEVATION_REQUIRED;
+static DWORD ValidateTerminalWindow(const std::vector<std::string>& identity,
+                                   HWND* checked) noexcept {
   try {
     if (identity.size() != 3) return ERROR_INVALID_PARAMETER;
     std::vector<unsigned long long> values;
@@ -230,12 +222,49 @@ DWORD CloseSessionTerminal(const std::vector<std::string>& identity) noexcept {
     if (_wcsicmp(base.c_str(), L"WindowsTerminal.exe") != 0 ||
         !GetClassNameW(window, class_name, static_cast<int>(std::size(class_name))) ||
         std::wstring(class_name) != L"CASCADIA_HOSTING_WINDOW_CLASS") return ERROR_INVALID_WINDOW_HANDLE;
-    // Request the normal close path, including Terminal's own confirmation.
-    // Never kill the process: it may own other windows and running agents.
-    return PostMessageW(window, WM_CLOSE, 0, 0) ? ERROR_SUCCESS : GetLastError();
+    *checked = window;
+    return ERROR_SUCCESS;
   } catch (...) {
     return ERROR_INVALID_PARAMETER;
   }
+}
+
+DWORD CloseSessionTerminal(const std::vector<std::string>& identity) noexcept {
+  if (!IsContextElevated()) return TerminalBrokerRequest(TerminalBrokerAction::close, identity);
+  HWND window = nullptr;
+  const auto error = ValidateTerminalWindow(identity, &window);
+  if (error != ERROR_SUCCESS) return error;
+  // Normal close, including Terminal's confirmation. Never kill its process.
+  return PostMessageW(window, WM_CLOSE, 0, 0) ? ERROR_SUCCESS : GetLastError();
+}
+
+DWORD OpenCheckedSessionTerminal(HWND owner,
+    const std::vector<std::string>& arguments) noexcept {
+  if (!IsContextElevated()) return TerminalBrokerRequest(TerminalBrokerAction::open_checked, arguments);
+  try {
+    if (arguments.size() < 7 || arguments[3] != "-w" || arguments[4] != "0")
+      return ERROR_INVALID_PARAMETER;
+    HWND expected = nullptr;
+    const auto error = ValidateTerminalWindow(
+        {arguments.begin(), arguments.begin() + 3}, &expected);
+    if (error != ERROR_SUCCESS) return error;
+    struct Windows { HWND expected; size_t count = 0; size_t visited = 0; bool found = false; } windows{expected};
+    const BOOL complete = EnumWindows([](HWND window, LPARAM data) -> BOOL {
+      auto& state = *reinterpret_cast<Windows*>(data);
+      if (++state.visited > 4096) return FALSE;
+      wchar_t name[256];
+      if (GetClassNameW(window, name, static_cast<int>(std::size(name))) &&
+          std::wstring(name) == L"CASCADIA_HOSTING_WINDOW_CLASS") {
+        ++state.count;
+        state.found |= window == state.expected;
+      }
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&windows));
+    // wt -w 0 is MRU, not an HWND. Refuse ambiguous or disappeared windows.
+    if (!complete || windows.count != 1 || !windows.found || !IsWindow(expected))
+      return ERROR_INVALID_WINDOW_HANDLE;
+    return OpenSessionTerminal(owner, {arguments.begin() + 3, arguments.end()});
+  } catch (...) { return ERROR_INVALID_PARAMETER; }
 }
 
 bool WaitForContextRestartParent() noexcept {

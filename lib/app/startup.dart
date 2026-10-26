@@ -6,8 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'session_terminal.dart';
 
-/// Decide elevation while the native window is hidden and before Rust workers
-/// or the application widget tree can read sessions or start background work.
+/// Approve only the Terminal helper while the normal-rights UI is hidden.
 Future<bool> startContext({
   required Future<void> Function() initializeBackend,
   required VoidCallback showApplication,
@@ -22,8 +21,7 @@ Future<bool> startContext({
       final requestAdmin = prefs.getBool('askTerminalAdminAtStartup') ?? true;
       if (requestAdmin && !await terminal.isElevated()) {
         await terminal.restartElevated();
-        // The hidden parent closes; only its elevated replacement loads the app.
-        return false;
+        // The helper stays elevated; this same normal-rights process loads UI.
       }
     } on PlatformException catch (error) {
       if (error.code != 'cancelled') {

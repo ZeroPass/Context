@@ -6,6 +6,17 @@ import '../../app/models.dart';
 import 'passive_tooltip.dart';
 import 'one_step_picker.dart';
 
+Future<void> showCodexDowngradeDialog(
+  BuildContext context, {
+  required CodexResetDowngrade controller,
+  required String path,
+  required List<CodexAccount> accounts,
+}) => showDialog<void>(
+  context: context,
+  builder: (_) =>
+      _DowngradeDialog(controller: controller, path: path, accounts: accounts),
+);
+
 class CodexDowngradeButton extends StatelessWidget {
   const CodexDowngradeButton({
     super.key,
@@ -26,13 +37,11 @@ class CodexDowngradeButton extends StatelessWidget {
         key: const ValueKey('codex-reset-downgrade'),
         onPressed: controller.busy
             ? null
-            : () => showDialog<void>(
-                context: context,
-                builder: (_) => _DowngradeDialog(
-                  controller: controller,
-                  path: path,
-                  accounts: accounts,
-                ),
+            : () => showCodexDowngradeDialog(
+                context,
+                controller: controller,
+                path: path,
+                accounts: accounts,
               ),
         isSelected: controller.armed,
         color: controller.armed ? Theme.of(context).colorScheme.primary : null,

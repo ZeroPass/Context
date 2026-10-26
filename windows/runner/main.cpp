@@ -5,10 +5,15 @@
 
 #include "flutter_window.h"
 #include "session_terminal.h"
+#include "terminal_broker.h"
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
+  int broker_exit = 0;
+  if (RunTerminalBrokerMode(&broker_exit)) return broker_exit;
+  SetEnvironmentVariableW(L"CONTEXT_TERMINAL_BROKER", nullptr);
+  SetEnvironmentVariableW(L"CONTEXT_TERMINAL_HELPER_PID", nullptr);
   if (!WaitForContextRestartParent()) return EXIT_FAILURE;
 
   // Attach to console when present (e.g., 'flutter run') or create a

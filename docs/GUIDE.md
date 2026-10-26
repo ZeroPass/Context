@@ -91,8 +91,9 @@ Windows UI Automation for tab labels and selection. Codex, Claude Code, Kimi,
 OpenCode, Qwen Code, Muse and ZCode entrypoints are recognized. Session IDs come
 from explicit launch arguments: new sessions and sessions changed inside a TUI
 can remain unknown or retain their launch identity. Tab selection is shown only
-for unique title matches. Access to elevated Terminal windows may require
-Context to be elevated too; process discovery can still work without tab labels.
+for unique title matches. The approved Terminal helper reads elevated window
+labels while Context's UI stays at normal rights. Without approval, process
+discovery can still work without those labels.
 
 **Claude Code** is available in the Accounts provider tabs, including hide/show.
 Its last three main sessions are read from local Claude project JSONL files,
@@ -131,25 +132,26 @@ supported terminal resume command.
 
 To reuse an administrator Terminal without a UAC prompt for every tab, Context
 requests Windows' administrator approval **before the main window appears** by
-default. There is no in-app startup dialog or visible restart. The hidden
-bootstrap starts an elevated replacement before the session list, Rust workers
-or background refreshes load. Already-elevated instances proceed directly.
+default. There is no in-app startup dialog or visible restart. A small, hidden
+helper receives approval before the session list, Rust workers or background
+refreshes load. Context's UI stays at normal rights so Explorer drag/drop works.
 Cancelling UAC opens Context normally, without retrying during that launch.
 In Settings, turn off
 **Ask for administrator at startup** to defer approval to a Terminal action
 instead. Changing this preference affects the next launch and does not change
 whether ordinary session clicks copy or open tabs.
-Deferred Terminal actions still save pending session-list edits before their
-required elevation handoff; cancellation leaves the current app open. No
-service, scheduled task, or background helper is installed.
+Deferred Terminal actions request approval for the same helper, without restarting
+Context. Cancellation leaves the app open. The helper can open/check/close
+Terminal windows and read their tab labels, but does not accept arbitrary scripts
+or chat input. It exits when its Context process closes. No service or scheduled
+task is installed.
 Windows keeps administrator and ordinary Terminal windows separate, so this
 mode targets administrator windows. If Context is started normally again,
 the next launch requests approval while the window is still hidden. Turning off
 **Open sessions in Terminal** restores click-to-copy independently.
 
-The sideloaded APPX declares `allowElevation` for this explicit administrator
-restart. Context still starts normally; this capability does not install a
-helper or remove Windows' approval prompt.
+The sideloaded APPX declares `allowElevation` for this explicit helper approval.
+This does not elevate the main window or remove Windows' approval prompt.
 
 WSL session directories are passed to `wsl.exe` as Linux paths, with the
 distribution taken from the session/config UNC path. Recently discovered
@@ -276,18 +278,28 @@ remain selected. The right pane has no provider tabs, session-log pulls, expansi
 to ten, or per-session Last 3 control. Context's provider tabs and recents on the
 left are unchanged.
 
-Drag files, folders, or text onto the Whiteboard pane, or focus it and press
-**Ctrl+V** to paste copied files, text, or an image. A pane-only **Drop here**
-overlay marks the target. Each submission becomes a silent **Drop** entry;
-clicking it opens the output and copies a minimal `Read <README path>` prompt
-for your agent. A small copy icon also copies that prompt without changing views.
-The top bar contains only tabs, with copy and refresh icons fixed at their right;
+Whiteboard is two-way. Agents publish outputs; you prepare input tabs with
+attachments and notes. The **+** before the tabs creates an empty input. Drag
+files, folders, or text onto the Whiteboard pane, or focus it and press **Ctrl+V**
+to paste copied files, text, or an image. A **Drop here** overlay covers that pane,
+not the session list. A drop appends to the selected input; if an agent output is
+selected, it creates a new input tab. Inputs and outputs share the six slots.
+Each file has a plain-text note, a small preview where supported, a folder action,
+and an optional **Copy into Context** button. General instructions are editable
+above the files. Notes autosave after a short typing pause. Editing an input keeps
+its place in the strip; a new output does not steal selection from your input.
+Selecting an input copies its minimal `Read <README path>` prompt for your agent;
+its copy icon does so without changing views. Older immutable drops remain readable.
+The top bar contains tabs, with copy and refresh icons fixed at their right;
 there is no repeated section heading or publication counter. Entry and first-prompt
 copy feedback appears on the copy icon and its tooltip, with a screen-reader
 announcement, so it neither adds another row nor covers the tabs.
-Existing files are referenced in place (no video copies or folder scans), so
-keep them at that location. Clipboard images/text and a short README are stored
-in private temporary `whiteboard-drops/` beside the active `whiteboard.md`. WSL agents get
+Dropped files are referenced in place, so keep them at that location unless you
+use their copy button. Pasted files and images are stored independently of the
+clipboard; text is saved as instructions. Folders stay linked and are never copied
+recursively. Stored copies are limited to 2 GiB per input. Input manifests and a
+short README live in private temporary `whiteboard-drops/` beside the active
+`whiteboard.md`. WSL agents get
 Linux paths, including `/mnt/<drive>` for Windows files. After a successful
 publication, the helper deletes Context-owned temporary folders for entries
 older than the newest six. This also applies when an agent publishes while
@@ -296,8 +308,9 @@ drops, unmarked folders, and links are left alone. Locked temporary files are
 retried on a later publish/prune, without an extra background timer. Prompts for
 entries that have left the six slots expire with their temporary README.
 These local drops never trigger a Windows notification. Typing fields keep
-normal paste behavior. Windows may block Explorer drag/drop into an elevated
-Context window; Ctrl+V is the alternative, without weakening UAC protections.
+normal paste behavior. Start Context normally, not with **Run as administrator**:
+the Terminal helper handles approved admin actions separately. Manually elevating
+the UI still makes Windows block drops from ordinary Explorer windows.
 
 On Windows, new complete publications show a native **Whiteboard published**
 notification with the entry title/provider. Alerts are on by default and can be

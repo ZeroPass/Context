@@ -1,4 +1,5 @@
 #include "session_terminal.h"
+#include "terminal_broker.h"
 
 #include <shellapi.h>
 
@@ -7,10 +8,14 @@
 #include <stdexcept>
 
 int main(int argc, char** argv) {
+  std::cout << std::unitbuf;
+  std::cout << "TestPID: " << GetCurrentProcessId() << '\n';
+  int broker_exit = 0;
+  if (RunTerminalBrokerMode(&broker_exit)) return broker_exit;
   int checks = 0;
   auto require = [&](bool condition) {
     ++checks;
-    if (!condition) throw std::runtime_error("Terminal assertion failed");
+    if (!condition) throw std::runtime_error("Terminal assertion failed at check " + std::to_string(checks));
   };
   try {
     const std::vector<std::string> args = {
@@ -67,11 +72,53 @@ int main(int argc, char** argv) {
       require(rejected);
     }
     require(WaitForContextRestartParent());
+    require(!TerminalBrokerReady());
+    require(TerminalBrokerRequest(TerminalBrokerAction::ping, {}) == ERROR_ELEVATION_REQUIRED);
     std::string settings;
     const auto settings_error = ReadTerminalSettings(&settings);
     require(settings_error == ERROR_SUCCESS && !settings.empty());
     require(ReadTerminalSettings(nullptr) == ERROR_INVALID_PARAMETER);
+#ifdef CONTEXT_BROKER_TESTS
+    auto allowed = args;
+    allowed[4] = "A saved session";
+    require(TerminalBrokerLaunchValidForTest(allowed));
+    allowed[14] = "touch /tmp/not-allowed";
+    require(!TerminalBrokerLaunchValidForTest(allowed));
+    require(!TerminalBrokerLaunchValidForTest({"-w", "0", "new-tab", "powershell.exe", "-Command", "Write-Output test"}));
+    if (argc == 2 && std::string(argv[1]) == "--broker-smoke") {
+      std::string direct;
+      std::cout << "Direct native probe starting\n";
+      const auto direct_status = TerminalBrokerReadTabsForTest(&direct);
+      std::cout << "Direct native probe status: " << direct_status << '\n';
+      if (direct_status) std::cout << direct.substr(0, 4096) << '\n';
+      require(direct_status == ERROR_SUCCESS);
+      const auto started = StartTerminalBrokerForTest();
+      std::cout << "Broker start status: " << started << '\n';
+      std::cout << "BrokerPID: " << TerminalBrokerTestPid() << '\n';
+      require(started == ERROR_SUCCESS);
+      require(TerminalBrokerReady());
+      std::string first_tabs;
+      const auto first_read = TerminalBrokerRequest(TerminalBrokerAction::read_tabs, {}, &first_tabs);
+      std::cout << "First broker read status: " << first_read << '\n';
+      if (first_read) std::cout << first_tabs.substr(0, 4096) << '\n';
+      require(first_read == ERROR_SUCCESS);
+      require(TerminalBrokerRequest(TerminalBrokerAction::ping, {}) == ERROR_SUCCESS);
+      require(TerminalBrokerRequest(TerminalBrokerAction::close, {}) == ERROR_INVALID_PARAMETER);
+      require(TerminalBrokerRequest(TerminalBrokerAction::open_checked, {}) == ERROR_INVALID_PARAMETER);
+      require(TerminalBrokerRequest(TerminalBrokerAction::open, allowed) == ERROR_INVALID_PARAMETER);
+      std::string tabs;
+      const auto read = TerminalBrokerRequest(TerminalBrokerAction::read_tabs, {}, &tabs);
+      std::cout << "Read tabs status: " << read << '\n';
+      if (read) std::cout << "Read diagnostics: " << tabs.substr(0, 4096) << '\n';
+      require(read == ERROR_SUCCESS);
+      require(tabs.find('[') != std::string::npos && tabs.size() <= 256 * 1024);
+      std::cout << "BrokerPID: " << TerminalBrokerTestPid() << '\n';
+    }
+#endif
     if (IsContextElevated()) {
+      require(OpenCheckedSessionTerminal(nullptr, {}) == ERROR_INVALID_PARAMETER);
+      require(OpenCheckedSessionTerminal(nullptr, {"1", "1", "1", "-w", "0", "new-tab", "wsl.exe"}) != ERROR_SUCCESS);
+      require(OpenCheckedSessionTerminal(nullptr, {"1", "1", "1", "-w", "context-other", "new-tab", "wsl.exe"}) == ERROR_INVALID_PARAMETER);
       require(CloseSessionTerminal({}) == ERROR_INVALID_PARAMETER);
       require(CloseSessionTerminal({"1", "bad", "1"}) == ERROR_INVALID_PARAMETER);
       require(CloseSessionTerminal({"0", "1", "1"}) == ERROR_INVALID_PARAMETER);

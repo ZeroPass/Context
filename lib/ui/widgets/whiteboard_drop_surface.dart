@@ -17,12 +17,18 @@ class WhiteboardDropSurface extends StatefulWidget {
     required this.enabled,
     required this.onPublished,
     this.publisher,
+    this.onInput,
   });
   final Widget child;
   final String path;
   final bool enabled;
   final VoidCallback onPublished;
   final WhiteboardDrop? publisher;
+  final Future<void> Function(
+    Map<Object?, Object?> data, {
+    required bool paste,
+  })?
+  onInput;
   @override
   State<WhiteboardDropSurface> createState() => WhiteboardDropSurfaceState();
 }
@@ -44,7 +50,10 @@ class WhiteboardDropSurfaceState extends State<WhiteboardDropSurface> {
       if (call.method == 'hover') {
         setState(() => _hover = call.arguments == true && _enabled);
       } else if (call.method == 'drop' && _enabled) {
-        await _accept((call.arguments as Map).cast<Object?, Object?>());
+        await _accept(
+          (call.arguments as Map).cast<Object?, Object?>(),
+          paste: false,
+        );
       }
     });
   }
@@ -54,7 +63,7 @@ class WhiteboardDropSurfaceState extends State<WhiteboardDropSurface> {
     try {
       final data = await whiteboardInputChannel
           .invokeMapMethod<Object?, Object?>('paste');
-      if (mounted && _enabled && data != null) await _accept(data);
+      if (mounted && _enabled && data != null) await _accept(data, paste: true);
     } on Object catch (error) {
       _error(error);
     }
@@ -67,15 +76,22 @@ class WhiteboardDropSurfaceState extends State<WhiteboardDropSurface> {
     ).showSnackBar(SnackBar(content: Text('$error')));
   }
 
-  Future<void> _accept(Map<Object?, Object?> data) async {
+  Future<void> _accept(
+    Map<Object?, Object?> data, {
+    required bool paste,
+  }) async {
     if (!_enabled) return;
     setState(() {
       _busy = true;
       _hover = false;
     });
     try {
-      await (widget.publisher ?? WhiteboardDrop()).publish(widget.path, data);
-      if (mounted) widget.onPublished();
+      if (widget.onInput != null) {
+        await widget.onInput!(data, paste: paste);
+      } else {
+        await (widget.publisher ?? WhiteboardDrop()).publish(widget.path, data);
+        if (mounted) widget.onPublished();
+      }
     } on Object catch (error) {
       _error(error);
     } finally {

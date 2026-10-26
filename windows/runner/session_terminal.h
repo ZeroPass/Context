@@ -13,6 +13,8 @@ DWORD OpenSessionTerminal(HWND owner,
                           const std::vector<std::string>& arguments) noexcept;
 DWORD RestartContextElevated(HWND owner) noexcept;
 DWORD CloseSessionTerminal(const std::vector<std::string>& identity) noexcept;
+DWORD OpenCheckedSessionTerminal(HWND owner,
+    const std::vector<std::string>& arguments) noexcept;
 bool WaitForContextRestartParent() noexcept;
 
 #endif  // RUNNER_SESSION_TERMINAL_H_

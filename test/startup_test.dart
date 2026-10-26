@@ -62,24 +62,36 @@ void main() {
   }
 
   test(
-    'default startup requests native UAC without loading backend, app or window',
+    'startup approves helper then initializes the same normal-rights app',
     () async {
-      expect(await launch(), isFalse);
-      expect(events, ['isElevated', 'restartElevated']);
+      expect(await launch(), isTrue);
+      expect(events, [
+        'isElevated',
+        'restartElevated',
+        'backend',
+        'app',
+        'finishStartup',
+      ]);
       expect(preferences.getBool('askTerminalAdminAtStartup'), isNull);
     },
   );
 
   test(
-    'pending UAC holds all application work; approval hands off without showing parent',
+    'pending UAC holds application work then continues without a UI restart',
     () async {
       approval = Completer<void>();
       final launching = launch();
       await drain();
       expect(events, ['isElevated', 'restartElevated']);
       approval!.complete();
-      expect(await launching, isFalse);
-      expect(events, ['isElevated', 'restartElevated']);
+      expect(await launching, isTrue);
+      expect(events, [
+        'isElevated',
+        'restartElevated',
+        'backend',
+        'app',
+        'finishStartup',
+      ]);
     },
   );
 
@@ -180,7 +192,7 @@ void main() {
     'startup approval never enables terminal-click default or rewrites preferences',
     () async {
       await preferences.setBool('openSessionsInTerminal', false);
-      expect(await launch(), isFalse);
+      expect(await launch(), isTrue);
       expect(preferences.getBool('openSessionsInTerminal'), isFalse);
       expect(preferences.getKeys(), {'openSessionsInTerminal'});
     },

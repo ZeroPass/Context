@@ -5,7 +5,8 @@ param(
   [switch]$UiOnly,
   [switch]$TerminalOnly,
   [switch]$WorkspaceOnly,
-  [switch]$WhiteboardWslProbe
+  [switch]$WhiteboardWslProbe,
+  [switch]$InputOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,10 @@ New-Item -ItemType Directory -Force -Path $evidence, $work | Out-Null
 $reportPath = Join-Path $evidence "report.txt"
 if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force }
 $inputs = @(
+  "lib\app\whiteboard_input.dart", "lib\ui\widgets\whiteboard_input_editor.dart", "test\whiteboard_input_test.dart",
+  "test\whiteboard_input_flow_test.dart",
+  "windows\runner\terminal_broker.cpp", "windows\runner\terminal_broker.h", "windows\runner\terminal_probe.h.in",
+  "lib\app\codex_session_control.dart", "lib\app\terminal_schedules.dart", "test\terminal_schedules_test.dart",
   "lib\app\startup.dart", "test\startup_test.dart",
   "lib\app\session_list.dart", "test\session_list_test.dart",
   "lib\app\codex_downgrade.dart", "lib\ui\widgets\codex_downgrade_button.dart",
@@ -132,6 +137,9 @@ try {
   $formatFiles += @("lib/app/workspace_window.dart", "test/workspace_window_test.dart")
   $formatFiles += @("lib/app/terminal_tabs.dart", "lib/ui/widgets/terminal_tabs_card.dart", "test/terminal_tabs_test.dart")
   $formatFiles += @("lib/app/codex_downgrade.dart", "lib/ui/widgets/codex_downgrade_button.dart", "test/codex_downgrade_test.dart")
+  $formatFiles += @("lib/app/codex_session_control.dart", "lib/app/terminal_schedules.dart", "test/terminal_schedules_test.dart")
+  $formatFiles += @("lib/app/whiteboard_input.dart", "lib/ui/widgets/whiteboard_input_editor.dart", "test/whiteboard_input_test.dart")
+  $formatFiles += 'test/whiteboard_input_flow_test.dart'
   $formatFiles += @("lib/ui/widgets/one_step_picker.dart", "test/codex_downgrade_timer_test.dart")
   $formatFiles += @("lib/main.dart", "lib/app/startup.dart", "test/startup_test.dart")
   $formatFiles += @("lib/app/session_list.dart", "test/session_list_test.dart")
@@ -154,20 +162,26 @@ try {
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
+    if ($InputOnly) {
+      Run-Check "flutter-input-regression" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_input_test.dart", "test/whiteboard_input_flow_test.dart", "test/whiteboard_drop_test.dart", "test/whiteboard_file_test.dart", "test/startup_test.dart", "test/session_copy_test.dart")
+    } else {
     Run-Check "flutter-startup-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/startup_test.dart")
     Run-Check "flutter-session-list-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_list_test.dart")
     Run-Check "flutter-downgrade-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/codex_downgrade_test.dart")
     Run-Check "flutter-downgrade-timer-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/codex_downgrade_timer_test.dart")
     Run-Check "flutter-drop-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_drop_test.dart")
+    Run-Check "flutter-input-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_input_test.dart")
     Run-Check "flutter-terminal-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_terminal_test.dart")
     Run-Check "flutter-workspace-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/workspace_window_test.dart")
     Run-Check "flutter-discovery-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/terminal_tabs_test.dart")
+    Run-Check "flutter-terminal-schedules-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/terminal_schedules_test.dart")
     if ($WorkspaceOnly) {
       Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_workspace_test.dart", "test/app_state_refresh_test.dart", "test/session_copy_test.dart")
     } elseif ($TerminalOnly) {
       Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_copy_test.dart")
     } else {
     Run-Check "flutter-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/app_state_refresh_test.dart", "test/codex_account_card_test.dart", "test/whiteboard_test.dart", "test/whiteboard_workspace_test.dart", "test/file_preview_test.dart", "test/passive_tooltip_test.dart", "test/ui_state_wire_order_test.dart", "test/clipboard_writer_test.dart", "test/session_copy_test.dart", "test/whiteboard_file_test.dart", "test/whiteboard_wsl_probe_test.dart", "test/preview_actions_test.dart", "test/preview_gallery_test.dart", "test/wsl_paths_test.dart", "test/codex_reset_test.dart", "test/whiteboard_publications_test.dart")
+    }
     }
   } finally { Pop-Location }
 

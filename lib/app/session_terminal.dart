@@ -99,7 +99,10 @@ class SessionTerminal {
   Future<bool> isElevated() async =>
       await sessionTerminalChannel.invokeMethod<bool>('isElevated') ?? false;
 
-  Future<void> open(List<String> arguments) async {
+  Future<void> open(
+    List<String> arguments, {
+    List<String>? requiredWindow,
+  }) async {
     final wsl = arguments.indexOf('wsl.exe');
     if (wsl < 3) throw ArgumentError('Expected a WSL session command.');
     final distroIndex = arguments.indexOf('-d', wsl + 1);
@@ -113,12 +116,16 @@ class SessionTerminal {
       settings,
       distribution: distroIndex < 0 ? null : arguments[distroIndex + 1],
     );
-    await sessionTerminalChannel.invokeMethod<void>('openTab', [
-      ...arguments.take(3),
-      '--profile',
-      profile,
-      ...arguments.skip(3),
-    ]);
+    await sessionTerminalChannel.invokeMethod<void>(
+      requiredWindow == null ? 'openTab' : 'openTabChecked',
+      [
+        ...?requiredWindow,
+        ...arguments.take(3),
+        '--profile',
+        profile,
+        ...arguments.skip(3),
+      ],
+    );
   }
 
   Future<void> restartElevated() =>

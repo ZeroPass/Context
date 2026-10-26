@@ -137,16 +137,18 @@ HRESULT WhiteboardInput::DragEnter(IDataObject* object, DWORD, POINTL point, DWO
   return DragOver(0, point, effect);
 }
 HRESULT WhiteboardInput::DragOver(DWORD, POINTL point, DWORD* effect) {
-  const bool accept = supported_ && Inside(point) && (*effect & DROPEFFECT_COPY);
+  const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_LINK);
+  const bool accept = supported_ && Inside(point) && allowed;
   Hover(accept);
-  *effect = accept ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+  *effect = accept ? (allowed & DROPEFFECT_LINK ? DROPEFFECT_LINK : DROPEFFECT_COPY) : DROPEFFECT_NONE;
   return S_OK;
 }
 HRESULT WhiteboardInput::DragLeave() { Hover(false); supported_ = false; return S_OK; }
 HRESULT WhiteboardInput::Drop(IDataObject* object, DWORD, POINTL point, DWORD* effect) {
-  const bool accept = supported_ && Inside(point) && (*effect & DROPEFFECT_COPY);
+  const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_LINK);
+  const bool accept = supported_ && Inside(point) && allowed;
   DragLeave();
-  *effect = accept ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+  *effect = accept ? (allowed & DROPEFFECT_LINK ? DROPEFFECT_LINK : DROPEFFECT_COPY) : DROPEFFECT_NONE;
   if (accept && callback_) callback_("drop", Value(ReadWhiteboardData(object)));
   return S_OK;
 }

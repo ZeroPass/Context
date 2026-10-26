@@ -5,6 +5,7 @@
 
 #include "clipboard_writer.h"
 #include "session_terminal.h"
+#include "terminal_broker.h"
 #include "whiteboard_notifications.h"
 #include "workspace_window.h"
 #include "flutter/generated_plugin_registrant.h"
@@ -139,7 +140,7 @@ bool FlutterWindow::OnCreate() {
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         if (call.method_name() == "isElevated") {
-          result->Success(flutter::EncodableValue(IsContextElevated()));
+          result->Success(flutter::EncodableValue(IsContextElevated() || TerminalBrokerReady()));
           return;
         }
         if (call.method_name() == "finishStartup") {
@@ -162,7 +163,7 @@ bool FlutterWindow::OnCreate() {
           }
         } else if (call.method_name() == "restartElevated") {
           error = RestartContextElevated(GetHandle());
-        } else if (call.method_name() == "openTab" || call.method_name() == "closeWindow") {
+        } else if (call.method_name() == "openTab" || call.method_name() == "openTabChecked" || call.method_name() == "closeWindow") {
           const auto* values = call.arguments() == nullptr ? nullptr
               : std::get_if<flutter::EncodableList>(call.arguments());
           if (values != nullptr && values->size() <= 40) {
@@ -175,6 +176,8 @@ bool FlutterWindow::OnCreate() {
             if (arguments.size() == values->size()) {
               error = call.method_name() == "closeWindow"
                   ? CloseSessionTerminal(arguments)
+                  : call.method_name() == "openTabChecked"
+                  ? OpenCheckedSessionTerminal(GetHandle(), arguments)
                   : OpenSessionTerminal(GetHandle(), arguments);
             }
           }

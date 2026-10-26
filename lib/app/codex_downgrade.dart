@@ -2,17 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:rinf/rinf.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../src/bindings/bindings.dart';
+import 'codex_session_control.dart';
 import 'models.dart';
 
-typedef CodexControlRequest =
-    Future<Map<String, dynamic>> Function(
-      String path,
-      Map<String, dynamic> payload,
-    );
+export 'codex_session_control.dart' show CodexControlRequest;
 
 enum CodexDowngradeTrigger { reset, hours }
 
@@ -54,18 +49,15 @@ class _Usage {
 /// timed mode owns only a single deadline timer.
 class CodexResetDowngrade extends ChangeNotifier {
   CodexResetDowngrade({CodexControlRequest? request, DateTime Function()? now})
-    : _requestOverride = request,
+    : control = CodexSessionControlClient(request: request),
       _now = now ?? DateTime.now;
   static const preferenceKey = 'codexResetDowngradeV1';
   static const defaultModel = 'gpt-6.1-sol';
   static const defaultHours = 2;
   static const maxHours = 24;
-  final CodexControlRequest? _requestOverride;
+  final CodexSessionControlClient control;
   final DateTime Function() _now;
   SharedPreferences? _preferences;
-  StreamSubscription<RustSignalPack<CodexSessionControlResult>>? _subscription;
-  final _requests = <Uint64, Completer<Map<String, dynamic>>>{};
-  BigInt _serial = BigInt.one;
   final _baseline = <String, _Usage>{};
   String model = defaultModel, effort = 'high', phase = 'off';
   String? status;
@@ -81,6 +73,7 @@ class CodexResetDowngrade extends ChangeNotifier {
   bool get armed => phase == 'armed';
   bool get running => phase == 'running';
   bool get busy => running || _changing;
+  bool appliesTo(String path) => _path == path && (armed || running);
   DateTime? get scheduledAt =>
       _dueAt == null ? null : DateTime.fromMillisecondsSinceEpoch(_dueAt!);
 
@@ -181,38 +174,7 @@ class CodexResetDowngrade extends ChangeNotifier {
   Future<Map<String, dynamic>> _request(
     String path,
     Map<String, dynamic> payload,
-  ) async {
-    if (_requestOverride != null) return _requestOverride(path, payload);
-    _subscription ??= CodexSessionControlResult.rustSignalStream.listen((pack) {
-      final pending = _requests.remove(pack.message.requestId);
-      if (pending == null) return;
-      if (pack.message.error != null) {
-        pending.completeError(StateError(pack.message.error!));
-      } else {
-        try {
-          pending.complete(
-            jsonDecode(pack.message.payloadJson) as Map<String, dynamic>,
-          );
-        } catch (error, stack) {
-          pending.completeError(error, stack);
-        }
-      }
-    });
-    final id = Uint64(_serial);
-    _serial += BigInt.one;
-    final pending = Completer<Map<String, dynamic>>();
-    _requests[id] = pending;
-    try {
-      CodexSessionControl(
-        requestId: id,
-        sessionsMarkdownPath: path,
-        payloadJson: jsonEncode(payload),
-      ).sendSignalToRust();
-      return await pending.future.timeout(const Duration(seconds: 20));
-    } finally {
-      _requests.remove(id);
-    }
-  }
+  ) => control.request(path, payload);
 
   Future<List<CodexModelChoice>> models(String path) async {
     final result = await _request(path, {'action': 'models'});
@@ -411,11 +373,7 @@ class CodexResetDowngrade extends ChangeNotifier {
     if (_disposed) return;
     _disposed = true;
     _deadlineTimer?.cancel();
-    _subscription?.cancel();
-    for (final pending in _requests.values) {
-      pending.completeError(StateError('Codex control closed'));
-    }
-    _requests.clear();
+    control.dispose();
     super.dispose();
   }
 }

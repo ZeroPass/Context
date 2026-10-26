@@ -43,7 +43,17 @@ class WhiteboardDrop {
     String body,
     String prompt,
     String dropFolder,
-  ) async {
+  ) => writeInput(board, title, body, prompt, dropFolder);
+
+  static Future<void> writeInput(
+    String board,
+    String title,
+    String body,
+    String prompt,
+    String dropFolder, {
+    bool replace = false,
+    bool remove = false,
+  }) async {
     final exe = File(
       Platform.resolvedExecutable,
     ).parent.uri.resolve('context-whiteboard.exe').toFilePath();
@@ -55,13 +65,17 @@ class WhiteboardDrop {
     final process = await Process.start(exe, [
       '--file',
       board,
-      '--title',
-      title,
-      '--local-drop',
-      '--agent-prompt',
-      prompt,
-      '--drop-folder',
-      dropFolder,
+      if (remove) ...['--remove-drop', dropFolder],
+      if (!remove) ...[
+        if (replace) '--replace-drop',
+        '--title',
+        title,
+        '--local-drop',
+        '--agent-prompt',
+        prompt,
+        '--drop-folder',
+        dropFolder,
+      ],
     ]);
     final stdout = process.stdout.transform(utf8.decoder).join();
     final stderr = process.stderr.transform(utf8.decoder).join();

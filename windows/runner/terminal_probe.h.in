@@ -1,0 +1,2 @@
+#pragma once
+constexpr char kContextTerminalProbe[] = R"contextProbe(@CONTEXT_TERMINAL_PROBE_SCRIPT@)contextProbe";

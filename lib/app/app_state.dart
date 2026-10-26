@@ -16,6 +16,7 @@ import 'workspace_paths.dart';
 import 'workspace_window.dart';
 import 'terminal_tabs.dart';
 import 'codex_downgrade.dart';
+import 'terminal_schedules.dart';
 
 enum _PendingOpKind {
   load,
@@ -66,6 +67,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   AppState() : _testRequestSender = null {
     publishedWhiteboard = WhiteboardPublications();
     codexDowngrade = CodexResetDowngrade();
+    terminalSchedules = TerminalSchedules(
+      monitor: () => terminalTabs,
+      request: codexDowngrade.control.request,
+    );
   }
 
   @visibleForTesting
@@ -83,6 +88,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _sessionConfigReady = sessionsReady;
     _prefs = preferences;
     codexDowngrade = downgrade ?? CodexResetDowngrade();
+    terminalSchedules = TerminalSchedules(
+      monitor: () => terminalTabs,
+      request: codexDowngrade.control.request,
+    );
+    if (preferences != null) terminalSchedules.restore(preferences);
     if (preferences != null) codexDowngrade.restore(preferences);
     askTerminalAdminAtStartup =
         _prefs?.getBool('askTerminalAdminAtStartup') ?? true;
@@ -126,6 +136,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   WhiteboardPublications? publishedWhiteboard;
   TerminalTabs? terminalTabs;
   late final CodexResetDowngrade codexDowngrade;
+  late final TerminalSchedules terminalSchedules;
   bool whiteboardNotificationsEnabled = true;
   bool openSessionsInTerminal = false;
   bool askTerminalAdminAtStartup = true;
@@ -235,6 +246,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _recentRefreshTimer?.cancel();
     _sessionCheckTimer?.cancel();
     _workspaceWindow?.dispose();
+    terminalSchedules.dispose();
     terminalTabs?.dispose();
     codexDowngrade.dispose();
     _recentReader?.dispose();
@@ -263,6 +275,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
     _prefs = await SharedPreferences.getInstance();
     codexDowngrade.restore(_prefs!);
+    terminalSchedules.restore(_prefs!);
     terminalTabs = TerminalTabs(
       preferences: _prefs,
       savedSessions: () => items,
@@ -347,6 +360,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _scheduleSessionChecks() {
     codexDowngrade.follow(sessionsMarkdownPath);
+    terminalSchedules.follow(_sessionConfigReady ? sessionsMarkdownPath : '');
     terminalTabs?.follow(
       sessionsMarkdownPath,
       active: sessionWindowActive && _sessionConfigReady,
@@ -1297,6 +1311,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       sessionsMarkdownPath = requestedPath;
       codexDowngrade.follow(requestedPath);
+      terminalSchedules.follow('');
       publishedWhiteboard?.follow(requestedPath);
       _prefs?.setString('sessionsMarkdownPath', requestedPath);
     }
@@ -2020,6 +2035,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     codexDowngrade.follow(sessionsMarkdownPath);
+    terminalSchedules.follow(_sessionConfigReady ? sessionsMarkdownPath : '');
     terminalTabs?.follow(
       sessionsMarkdownPath,
       active: sessionWindowActive && _sessionConfigReady && !busy,

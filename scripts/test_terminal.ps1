@@ -1,6 +1,7 @@
 param(
   [string]$EvidenceDir = ".buildlog\terminal-launch\native",
-  [switch]$OpenTestTabs
+  [switch]$OpenTestTabs,
+  [switch]$BrokerSmoke
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -8,13 +9,16 @@ $evidence = Join-Path $root $EvidenceDir
 $work = Join-Path $env:TEMP ("context-terminal-check-" + [guid]::NewGuid().ToString("N"))
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 $sources = @("windows\runner\session_terminal.cpp", "windows\runner\session_terminal.h", "test\windows_terminal_smoke.cpp", "scripts\test_terminal.ps1")
+$sources += @("windows\runner\terminal_broker.cpp", "windows\runner\terminal_broker.h", "windows\runner\terminal_probe.h.in", "scripts\probe-terminal-tabs.ps1")
 New-Item -ItemType Directory -Force -Path $evidence, $work | Out-Null
 $hashes = @{}
 foreach ($file in $sources) {
   $hashes[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root $file)).Hash
-  if ($file -notlike "*.ps1") { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $work }
+  if ($file -like "*.cpp" -or $file -like "*.h") { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $work }
 }
-$compile = 'call "' + $vcvars + '" >nul && cl.exe /nologo /std:c++17 /EHsc /W4 /WX /DUNICODE /D_UNICODE /DNOMINMAX /I. windows_terminal_smoke.cpp session_terminal.cpp shell32.lib advapi32.lib user32.lib /Fe:terminal_smoke.exe'
+$probeHeader = (Get-Content -LiteralPath (Join-Path $root "windows\runner\terminal_probe.h.in") -Raw).Replace('@CONTEXT_TERMINAL_PROBE_SCRIPT@', (Get-Content -LiteralPath (Join-Path $root "scripts\probe-terminal-tabs.ps1") -Raw))
+$probeHeader | Set-Content -LiteralPath (Join-Path $work 'terminal_probe.h') -Encoding utf8
+$compile = 'call "' + $vcvars + '" >nul && cl.exe /nologo /std:c++17 /EHsc /W4 /WX /DUNICODE /D_UNICODE /DNOMINMAX /DCONTEXT_BROKER_TESTS /I. windows_terminal_smoke.cpp session_terminal.cpp terminal_broker.cpp shell32.lib advapi32.lib user32.lib ole32.lib crypt32.lib /Fe:terminal_smoke.exe'
 Push-Location $work
 try {
   $ErrorActionPreference = "Continue"
@@ -23,6 +27,7 @@ try {
   Get-Content -LiteralPath (Join-Path $evidence "compile.log") -Tail 20
   if ($code -ne 0) { throw "Terminal compilation failed ($code)." }
   $testArguments = @()
+  if ($BrokerSmoke) { $testArguments = @('--broker-smoke') }
   if ($OpenTestTabs) {
     $live = Join-Path $evidence "live"
     New-Item -ItemType Directory -Force -Path $live | Out-Null

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, one-shot Codex daemon client. Never type into Terminal or start turns."""
+"""Bounded Codex control; retries only explicitly authorized failed turns."""
 
 import base64
 import hashlib
@@ -244,27 +244,136 @@ def apply(rpc, model, effort, sessions, live_client=None):
     return result
 
 
+RETRY_TEXT = ("Continue only the unfinished work from the last failed turn. "
+              "Do not repeat completed actions.")
+
+
+def retry_kind(error):
+    info = error.get("codexErrorInfo")
+    code = info if isinstance(info, str) else next(iter(info or {}), "")
+    message = " ".join(str(error.get("message", "")).split()).casefold()
+    if code in ("", "other") and message == (
+            "selected model is at capacity. please try a different model."):
+        return "temporary"
+    if code in ("usageLimitExceeded", "rateLimitExceeded"):
+        return "usage"
+    if code in ("serverOverloaded", "flexUnavailable", "internalServerError"):
+        return "temporary"
+    if code in ("httpConnectionFailed", "responseStreamConnectionFailed",
+                "responseStreamDisconnected", "responseTooManyFailedAttempts"):
+        status = info[code].get("httpStatusCode")
+        if status == 429:
+            return "usage"
+        if status is None or status in (408, 500, 502, 503, 504):
+            return "temporary"
+    return "attention"
+
+
+def recovery_state(rpc, thread_id):
+    thread = rpc.request("thread/read", {
+        "threadId": thread_id, "includeTurns": False,
+    })["thread"]
+    if (thread.get("parentThreadId") or thread.get("canAcceptDirectInput") is False or
+            thread.get("status", {}).get("type") != "idle"):
+        return {"state": "untouched"}
+    turns = rpc.request("thread/turns/list", {
+        "threadId": thread_id, "limit": 1,
+        "sortDirection": "desc", "itemsView": "notLoaded",
+    })["data"]
+    if not turns or turns[0].get("status") != "failed" or not turns[0].get("error"):
+        return {"state": "untouched"}
+    turn = turns[0]
+    kind = retry_kind(turn["error"])
+    if kind == "attention":
+        return {"state": "attention"}
+    goal = rpc.request("thread/goal/get", {"threadId": thread_id}).get("goal")
+    if goal is not None and goal.get("status") != "active":
+        return {"state": "attention"}
+    if kind == "usage":
+        limits = rpc.request("account/rateLimits/read", {})
+        # Never infer recovery from cached percentages or an elapsed reset date.
+        if limits.get("ordinaryUsageAllowed") is not True:
+            return {"state": "waiting_usage"}
+        snapshots = [limits.get("rateLimits", {})]
+        snapshots.extend((limits.get("rateLimitsByLimitId") or {}).values())
+        for snapshot in snapshots:
+            reached = snapshot.get("rateLimitReachedType")
+            if snapshot.get("spendControlReached") or reached not in (None, "rate_limit_reached"):
+                return {"state": "attention"}
+            if snapshot.get("normalModelSlug") == thread.get("model") or snapshot.get("limitId") == thread.get("model"):
+                if any((snapshot.get(w) or {}).get("usedPercent", 0) >= 100
+                       for w in ("primary", "secondary")):
+                    return {"state": "waiting_usage"}
+    return {"state": "retryable", "turn_id": turn["id"], "kind": kind}
+
+
+def keep_alive(rpc, request, sessions):
+    results = []
+    for target in request["targets"]:
+        thread_id = target["id"]
+        matching = [s for s in sessions if s.get("launch_session_id") == thread_id]
+        result = {"id": thread_id, "state": "unavailable"}
+        if (len(matching) != 1 or matching[0].get("unsupported_home") or
+                str(matching[0].get("pid")) != target["pid"] or
+                str(matching[0].get("start")) != target["start"]):
+            results.append(result)
+            continue
+        try:
+            state = recovery_state(rpc, thread_id)
+            result.update(state)
+            if request["action"] == "recover" and state.get("state") == "retryable":
+                if state["turn_id"] != target["turn_id"]:
+                    result["state"] = "changed"
+                else:
+                    # Recheck after the quota/goal lookups. The protocol has no
+                    # atomic idle-only turn/start; never interrupt or type keys.
+                    latest = rpc.request("thread/read", {
+                        "threadId": thread_id, "includeTurns": False,
+                    })["thread"]
+                    turns = rpc.request("thread/turns/list", {
+                        "threadId": thread_id, "limit": 1,
+                        "sortDirection": "desc", "itemsView": "notLoaded",
+                    })["data"]
+                    if (latest.get("status", {}).get("type") != "idle" or not turns or
+                            turns[0].get("id") != target["turn_id"] or
+                            turns[0].get("status") != "failed"):
+                        result["state"] = "changed"
+                    else:
+                        rpc.request("turn/start", {
+                            "threadId": thread_id,
+                            "input": [{"type": "text", "text": RETRY_TEXT}],
+                        })
+                        result["state"] = "retried"
+        except (ControlError, OSError, ValueError, KeyError, TypeError):
+            # A lost reply may mean the request was accepted. The UI persists
+            # its failed-turn claim before dispatch and never replays that ID.
+            result["state"] = "unavailable"
+        results.append(result)
+    return {"sessions": results}
+
+
 def run(request, probe_source):
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     rpc = CodexRpc(home)
     try:
         if request.get("action") == "models":
             return {"models": catalog(rpc)}
-        if request.get("action") != "apply":
+        if request.get("action") not in ("apply", "status", "recover"):
             raise ControlError("Unknown Codex control action.")
         probe = {"__name__": "context_terminal_probe"}
         exec(probe_source, probe)
         sessions, warnings = probe["process_sessions"]()
-        if any("inventory is incomplete" in warning for warning in warnings):
-            raise ControlError("Terminal inventory is incomplete. No settings were changed.")
+        if any(not warning.startswith("Session names unavailable:") for warning in warnings):
+            raise ControlError("Terminal inventory is incomplete. Nothing was changed.")
         sessions = [session for session in sessions if session["provider"] == "codex"]
         for session in sessions:
             if Path(session.get("codex_home", home)).resolve() != home.resolve():
                 session["unsupported_home"] = True
         if len(sessions) > 64:
             raise ControlError("Too many active Codex tabs. No settings were changed.")
-        result = apply(rpc, request["model"], request["effort"], sessions,
-                       lambda: CodexRpc(home, min(rpc.deadline, time.monotonic() + 3)))
+        result = (apply(rpc, request["model"], request["effort"], sessions,
+                        lambda: CodexRpc(home, min(rpc.deadline, time.monotonic() + 3)))
+                  if request["action"] == "apply" else keep_alive(rpc, request, sessions))
         result["warnings"] = warnings[:8]
         return result
     finally:

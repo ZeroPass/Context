@@ -21,6 +21,7 @@ class WhiteboardPost {
     this.body,
     this.localDrop,
     this.agentPrompt,
+    this.dropFolder,
   );
   final String id;
   final String title;
@@ -30,6 +31,7 @@ class WhiteboardPost {
   final String body;
   final bool localDrop;
   final String agentPrompt;
+  final String dropFolder;
 }
 
 List<WhiteboardPost> parseWhiteboard(String text) {
@@ -66,6 +68,7 @@ List<WhiteboardPost> parseWhiteboard(String text) {
         text.substring(bodyStart, end),
         metadata['local_drop'] == true,
         (metadata['agent_prompt'] as String?) ?? '',
+        (metadata['drop_folder'] as String?) ?? '',
       );
       posts.remove(id);
       posts[id] = post;
@@ -238,6 +241,7 @@ class FileWhiteboardReader implements WhiteboardReader {
           workDir: post.cwd,
           localDrop: post.localDrop,
           agentPrompt: post.agentPrompt,
+          dropFolder: post.dropFolder,
         ),
       )
       .toList();

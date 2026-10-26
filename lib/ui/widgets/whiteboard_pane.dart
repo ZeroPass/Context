@@ -6,6 +6,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'package:file_picker/file_picker.dart';
 
 import '../../app/app_state.dart';
 import '../../app/clipboard_writer.dart';
@@ -16,6 +17,7 @@ import '../../app/preview_gallery.dart';
 import '../../app/whiteboard.dart';
 import '../../app/whiteboard_file.dart';
 import '../../app/whiteboard_publications.dart';
+import '../../app/whiteboard_input.dart';
 import '../../app/workspace_paths.dart';
 import '../copy_feedback.dart';
 import 'passive_tooltip.dart';
@@ -25,6 +27,7 @@ import 'file_location_button.dart';
 import 'preview_context_menu.dart';
 import 'video_preview.dart';
 import 'whiteboard_drop_surface.dart';
+import 'whiteboard_input_editor.dart';
 
 class WhiteboardPane extends StatefulWidget {
   const WhiteboardPane({
@@ -34,12 +37,16 @@ class WhiteboardPane extends StatefulWidget {
     this.videoFactory = NativePreviewVideoSession.new,
     this.openFile = openReference,
     this.previewActions,
+    this.inputs,
+    this.pickInputFiles,
   });
   final AppState appState;
   final WhiteboardReader? reader;
   final PreviewVideoSession Function() videoFactory;
   final ReferenceOpener openFile;
   final PreviewActions? previewActions;
+  final WhiteboardInputs? inputs;
+  final Future<List<String>> Function()? pickInputFiles;
   @override
   State<WhiteboardPane> createState() => _WhiteboardPaneState();
 }
@@ -57,6 +64,17 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   static const _entryTabWeights = [1.30, 1.18, 1.06, 0.94, 0.82, 0.70];
   final _whiteboardFocus = FocusNode(debugLabel: 'Whiteboard pane');
   final _dropSurface = GlobalKey<WhiteboardDropSurfaceState>();
+  late final WhiteboardInputs _inputStore;
+  final _inputModels = <String, WhiteboardInputDraft>{};
+  final _legacyInputs = <String>{};
+  WhiteboardInputDraft? _pendingInput;
+  String? _pendingInputSelection;
+  Timer? _inputSaveTimer;
+  bool _inputBusy = false;
+  int _inputSaves = 0;
+  String? _inputError;
+  WhiteboardInputDraft? get _input =>
+      _selected?.localDrop == true ? _inputModels[_selected?.dropFolder] : null;
   bool _initialNavigationRunning = false;
   int _initialNavigationOffset = 0;
   Timer? _timer;
@@ -94,6 +112,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   @override
   void initState() {
     super.initState();
+    _inputStore = widget.inputs ?? WhiteboardInputs();
     _publications = widget.reader == null
         ? widget.appState.publishedWhiteboard
         : null;
@@ -194,6 +213,10 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     }
     _savedItems = widget.appState.items;
     if (path != _path) {
+      unawaited(_saveInput().catchError((Object _) {}));
+      _inputModels.clear();
+      _pendingInputSelection = null;
+      _legacyInputs.clear();
       unawaited(_fileChanges?.cancel());
       _fileChanges = null;
       _path = path;
@@ -278,7 +301,17 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
         });
         _revealEntryTab();
       }
-      if (_selected == null && items.isNotEmpty) {
+      final wantedInput = items
+          .where(
+            (s) =>
+                s.dropFolder.isNotEmpty &&
+                s.dropFolder == _pendingInputSelection,
+          )
+          .firstOrNull;
+      if (wantedInput != null) {
+        _pendingInputSelection = null;
+        _select(wantedInput, userInitiated: false);
+      } else if (_selected == null && items.isNotEmpty) {
         _select(items.first, userInitiated: false);
       } else if ((_followLatest ||
               (_pushMode &&
@@ -295,6 +328,9 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
         if (updated != null) _selected = updated;
       }
       if (_pushMode) {
+        final folders = items.map((s) => s.dropFolder).toSet();
+        _inputModels.removeWhere((folder, _) => !folders.contains(folder));
+        _legacyInputs.removeWhere((folder) => !folders.contains(folder));
         final retained = items.map((s) => s.identityKey).toSet();
         _historyCache.removeWhere((key, _) => !retained.contains(key));
         if (items.isEmpty && _selected != null) {
@@ -323,13 +359,16 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   }
 
   void _select(RecentContext session, {bool userInitiated = true}) {
+    if (userInitiated) unawaited(_saveInput().catchError((Object _) {}));
     if (userInitiated) _previewController.close();
     final cached = _historyCache.remove(session.identityKey);
     if (cached != null) _historyCache[session.identityKey] = cached;
     setState(() {
       if (userInitiated) {
         _entryCopyStatus = null;
-        _followLatest = _recent.firstOrNull?.identityKey == session.identityKey;
+        _followLatest =
+            !session.localDrop &&
+            _recent.firstOrNull?.identityKey == session.identityKey;
         _preview = null;
         _moreResponses = false;
       }
@@ -344,7 +383,159 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     _revealEntryTab();
     if (userInitiated && _paneScroll.hasClients) _paneScroll.jumpTo(0);
     unawaited(_loadHistory(background: cached != null));
+    if (session.localDrop && session.dropFolder.isNotEmpty) {
+      unawaited(_loadInput(session));
+    }
   }
+
+  Future<void> _loadInput(RecentContext session) async {
+    if (_inputModels.containsKey(session.dropFolder) ||
+        _legacyInputs.contains(session.dropFolder)) {
+      return;
+    }
+    final path = _path;
+    try {
+      final draft = await _inputStore.load(path, session.dropFolder);
+      if (!mounted || path != _path) return;
+      setState(() {
+        if (draft == null) {
+          _legacyInputs.add(session.dropFolder);
+        } else {
+          _inputModels[session.dropFolder] = draft;
+        }
+      });
+    } catch (error) {
+      if (mounted && path == _path) setState(() => _inputError = '$error');
+    }
+  }
+
+  void _editInput(WhiteboardInputDraft draft) {
+    setState(() {
+      _inputModels[draft.folder] = draft;
+      _pendingInput = draft;
+      _inputError = null;
+    });
+    _inputSaveTimer?.cancel();
+    _inputSaveTimer = Timer(const Duration(milliseconds: 500), () {
+      unawaited(_saveInput().catchError((Object _) {}));
+    });
+  }
+
+  Future<void> _saveInput() async {
+    _inputSaveTimer?.cancel();
+    _inputSaveTimer = null;
+    final draft = _pendingInput;
+    if (draft == null) return;
+    _pendingInput = null;
+    _inputSaves++;
+    try {
+      await _inputStore.save(draft);
+    } catch (error) {
+      if (mounted && draft.board == whiteboardFilePath(_path)) {
+        _pendingInput ??= draft;
+        _inputError = '$error';
+      }
+      rethrow;
+    } finally {
+      _inputSaves--;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _inputAction(Future<void> Function() task) async {
+    if (_inputBusy || _path.isEmpty) return;
+    setState(() {
+      _inputBusy = true;
+      _inputError = null;
+    });
+    try {
+      await _saveInput();
+      await task();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _inputError = '$error');
+        _message('$error');
+      }
+    } finally {
+      if (mounted) setState(() => _inputBusy = false);
+    }
+  }
+
+  Future<void> _selectInput(WhiteboardInputDraft draft, String path) async {
+    if (!mounted || path != _path) return;
+    _inputModels[draft.folder] = draft;
+    _pendingInputSelection = draft.folder;
+    _followLatest = false;
+    await _refresh(background: true);
+    if (!mounted || path != _path) return;
+    final entry = _recent
+        .where((s) => s.dropFolder == draft.folder)
+        .firstOrNull;
+    if (entry != null && _selected?.identityKey != entry.identityKey) {
+      _select(entry, userInitiated: false);
+    }
+    setState(() {});
+  }
+
+  Future<void> _newInput() => _inputAction(() async {
+    final path = _path;
+    await _selectInput(await _inputStore.create(path), path);
+  });
+
+  Future<void> _acceptInput(
+    Map<Object?, Object?> data, {
+    required bool paste,
+  }) => _inputAction(() async {
+    WhiteboardInputs.validateData(data);
+    final path = _path;
+    final selected = _selected;
+    if (selected != null &&
+        selected.localDrop &&
+        selected.dropFolder.isNotEmpty) {
+      await _loadInput(selected);
+    }
+    final current = _input ?? await _inputStore.create(path);
+    final next = await _inputStore.add(current, data, paste: paste);
+    await _selectInput(next, path);
+  });
+
+  Future<void> _pickInputFiles() async {
+    try {
+      final files = widget.pickInputFiles != null
+          ? await widget.pickInputFiles!()
+          : (await FilePicker.platform.pickFiles(
+                  allowMultiple: true,
+                ))?.paths.whereType<String>().toList() ??
+                <String>[];
+      if (mounted && files.isNotEmpty) {
+        await _acceptInput({'files': files}, paste: false);
+      }
+    } catch (error) {
+      if (mounted) _message('$error');
+    }
+  }
+
+  Future<void> _storeInputFile(InputAttachment file) => _inputAction(() async {
+    final draft = _input;
+    if (draft != null) {
+      await _selectInput(await _inputStore.store(draft, file.id), _path);
+    }
+  });
+
+  Future<void> _removeInput() => _inputAction(() async {
+    final draft = _input;
+    if (draft == null) return;
+    await _inputStore.remove(draft);
+    if (!mounted) return;
+    _inputModels.remove(draft.folder);
+    _previewController.close();
+    setState(() {
+      _selected = null;
+      _preview = null;
+      _history = null;
+    });
+    await _refresh();
+  });
 
   void _revealEntryTab() {
     if (!_pushMode || _entryRevealScheduled) return;
@@ -355,14 +546,29 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       final target = _entryTabKeys[_selected?.identityKey]?.currentContext
           ?.findRenderObject();
       if (target == null || !target.attached) return;
+      final duration = MediaQuery.disableAnimationsOf(context)
+          ? Duration.zero
+          : const Duration(milliseconds: 140);
+      if (_recent.firstOrNull?.identityKey == _selected?.identityKey) {
+        if (duration == Duration.zero) {
+          _entryTabsScroll.jumpTo(0);
+        } else {
+          unawaited(
+            _entryTabsScroll.animateTo(
+              0,
+              duration: duration,
+              curve: Curves.easeOut,
+            ),
+          );
+        }
+        return;
+      }
       // Reveal horizontally only; do not move the answer/media scroll position.
       unawaited(
         _entryTabsScroll.position.ensureVisible(
           target,
           alignment: 0.5,
-          duration: MediaQuery.disableAnimationsOf(context)
-              ? Duration.zero
-              : const Duration(milliseconds: 140),
+          duration: duration,
         ),
       );
     });
@@ -458,6 +664,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
 
   @override
   void dispose() {
+    unawaited(_saveInput().catchError((Object _) {}));
     widget.appState.removeListener(_appChanged);
     FocusManager.instance.removeEarlyKeyEventHandler(_earlyWhiteboardKey);
     WidgetsBinding.instance.removeObserver(this);
@@ -1160,9 +1367,19 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     }
   }
 
-  void _copyDropPrompt(RecentContext session) => unawaited(
-    _copyEntryText(session.agentPrompt, 'Prompt copied. Paste to your agent.'),
-  );
+  void _copyDropPrompt(RecentContext session) => unawaited(() async {
+    try {
+      await _saveInput();
+      if (mounted) {
+        await _copyEntryText(
+          session.agentPrompt,
+          'Prompt copied. Paste to your agent.',
+        );
+      }
+    } catch (error) {
+      if (mounted) _message('$error');
+    }
+  }());
 
   void _openEntry(RecentContext session) {
     _select(session);
@@ -1356,6 +1573,18 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
           Row(
             key: const ValueKey('whiteboard-publication-toolbar'),
             children: [
+              PassiveTooltip(
+                message: 'New input tab',
+                child: IconButton(
+                  key: const ValueKey('whiteboard-new-input'),
+                  style: style,
+                  onPressed: _inputBusy || _path.isEmpty
+                      ? null
+                      : () => unawaited(_newInput()),
+                  icon: const Icon(Icons.add_rounded, size: 19),
+                ),
+              ),
+              const SizedBox(width: 5),
               Expanded(
                 child: _recent.isEmpty
                     ? const SizedBox(height: 30)
@@ -1590,6 +1819,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
           key: _dropSurface,
           path: _path,
           enabled: _pushMode && _visible && widget.appState.sessionsReady,
+          onInput: _acceptInput,
           onPublished: () {
             _followLatest = true;
             _previewController.close();
@@ -1632,10 +1862,59 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
             children: [
               if (_preview != null)
                 ConstrainedBox(
-                  constraints: BoxConstraints(maxHeight: constraints.maxWidth),
+                  constraints: BoxConstraints(
+                    maxHeight: _input == null ? constraints.maxWidth : 320,
+                  ),
                   child: _filePreview(),
                 ),
-              _viewer(),
+              if (_input case final draft?)
+                WhiteboardInputEditor(
+                  key: ValueKey('input-editor-${draft.folder}'),
+                  draft: draft,
+                  busy: _inputBusy,
+                  status:
+                      _inputError ??
+                      (_pendingInput != null || _inputSaves > 0
+                          ? 'Saving...'
+                          : 'Saved'),
+                  onChanged: (change) {
+                    final current = _input;
+                    if (current != null) {
+                      _editInput(change(current));
+                    }
+                  },
+                  onAdd: () => unawaited(_pickInputFiles()),
+                  onCopy: () => unawaited(
+                    _saveInput()
+                        .then(
+                          (_) => _copyEntryText(
+                            draft.prompt,
+                            'Prompt copied. Paste to your agent.',
+                          ),
+                        )
+                        .catchError((Object error) {
+                          if (mounted) _message('$error');
+                        }),
+                  ),
+                  onDelete: () => unawaited(_removeInput()),
+                  onStore: (file) => unawaited(_storeInputFile(file)),
+                  onPreview: (file) => unawaited(
+                    _openPreview(
+                      file.path,
+                      _resolver!,
+                      gallery: draft.files
+                          .map((f) => f.path)
+                          .where(isWhiteboardPreview)
+                          .toList(),
+                    ),
+                  ),
+                  onReveal: (file) =>
+                      unawaited(_activate(file.path, reveal: true)),
+                  onExternal: (file) =>
+                      unawaited(_activate(file.path, external: true)),
+                )
+              else
+                _viewer(),
               if (!_pushMode) ...[_sectionDivider(), _sessions()],
             ],
           ),

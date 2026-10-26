@@ -277,6 +277,16 @@ void main() {
       '{12345678-1234-1234-1234-123456789abc}',
       ...plan().skip(3),
     ]);
+    await terminal.open(plan(), requiredWindow: ['1', '2', '3']);
+    expect(calls.last.method, 'openTabChecked');
+    expect((calls.last.arguments as List).take(6), [
+      '1',
+      '2',
+      '3',
+      '-w',
+      '0',
+      'new-tab',
+    ]);
     await expectLater(
       terminal.restartElevated(),
       throwsA(

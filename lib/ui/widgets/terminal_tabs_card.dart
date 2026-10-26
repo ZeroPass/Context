@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 
 import '../../app/models.dart';
 import '../../app/terminal_tabs.dart';
+import '../../app/terminal_schedules.dart';
+import '../../app/codex_downgrade.dart';
 import 'passive_tooltip.dart';
 
-class TerminalTabsCard extends StatelessWidget {
+class TerminalTabsCard extends StatefulWidget {
   const TerminalTabsCard({
     super.key,
     required this.monitor,
@@ -15,6 +17,11 @@ class TerminalTabsCard extends StatelessWidget {
     this.onOpen,
     this.onClose,
     this.onAlreadyOpen,
+    this.schedules,
+    this.downgrade,
+    this.path = '',
+    this.onKeepAlive,
+    this.onEditDowngrade,
   });
   final TerminalTabs? monitor;
   final List<ConfigItem> saved;
@@ -22,14 +29,43 @@ class TerminalTabsCard extends StatelessWidget {
   final void Function(TerminalTabGroup, TerminalSession?)? onOpen;
   final void Function(TerminalTabGroup)? onClose;
   final VoidCallback? onAlreadyOpen;
+  final TerminalSchedules? schedules;
+  final CodexResetDowngrade? downgrade;
+  final String path;
+  final void Function(TerminalTabGroup, bool)? onKeepAlive;
+  final VoidCallback? onEditDowngrade;
 
   @override
-  Widget build(BuildContext context) => monitor == null
-      ? _content(context)
-      : AnimatedBuilder(
-          animation: monitor!,
-          builder: (context, _) => _content(context),
-        );
+  State<TerminalTabsCard> createState() => _TerminalTabsCardState();
+}
+
+class _TerminalTabsCardState extends State<TerminalTabsCard> {
+  String? _expanded, _scope;
+  TerminalTabs? get monitor => widget.monitor;
+  List<ConfigItem> get saved => widget.saved;
+  Color Function(SessionProvider) get providerColor => widget.providerColor;
+  void Function(TerminalTabGroup, TerminalSession?)? get onOpen =>
+      widget.onOpen;
+  void Function(TerminalTabGroup)? get onClose => widget.onClose;
+  VoidCallback? get onAlreadyOpen => widget.onAlreadyOpen;
+
+  void _select(TerminalTabGroup group, [TerminalSession? session]) {
+    setState(() {
+      if (_expanded == group.id && _scope == session?.reference) {
+        _expanded = null;
+        _scope = null;
+      } else {
+        _expanded = group.id;
+        _scope = session?.reference;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([monitor, widget.schedules, widget.downgrade]),
+    builder: (context, _) => _content(context),
+  );
 
   Widget _content(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -89,6 +125,16 @@ class TerminalTabsCard extends StatelessWidget {
                 ).textTheme.bodySmall?.copyWith(color: scheme.error),
               ),
             ),
+          if (widget.schedules?.error != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 7),
+              child: Text(
+                widget.schedules!.error!,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ),
           if (sessions.isEmpty && groups.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 7),
@@ -124,13 +170,7 @@ class TerminalTabsCard extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(11),
-        onTap:
-            group == null ||
-                onOpen == null ||
-                monitor!.opening ||
-                group.members.isEmpty
-            ? null
-            : () => onOpen!(group, null),
+        onTap: group == null ? null : () => _select(group),
         child: Container(
           key: group == null
               ? const ValueKey('terminal-live-strip')
@@ -231,6 +271,14 @@ class TerminalTabsCard extends StatelessWidget {
                     );
                   },
                 ),
+              if (group != null)
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 170),
+                  alignment: Alignment.topCenter,
+                  child: _expanded == group.id
+                      ? _tasks(context, group)
+                      : const SizedBox.shrink(),
+                ),
             ],
           ),
         ),
@@ -240,6 +288,142 @@ class TerminalTabsCard extends StatelessWidget {
 
   Widget _group(BuildContext context, TerminalTabGroup group) =>
       _strip(context, monitor!.orderedSessions(group.members), group: group);
+
+  Widget _tasks(BuildContext context, TerminalTabGroup group) {
+    final scheme = Theme.of(context).colorScheme;
+    final session = group.members
+        .where((s) => s.reference == _scope)
+        .firstOrNull;
+    final all = _scope == null;
+    final job = widget.schedules?.jobFor(group.id);
+    final downgrade = widget.downgrade;
+    final hasDowngrade =
+        downgrade?.appliesTo(widget.path) == true &&
+        (all
+            ? group.members.any((s) => s.provider == SessionProvider.codex)
+            : session?.provider == SessionProvider.codex);
+    String clock(DateTime d) =>
+        '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    // Own the expanded panel's taps; they must not toggle the parent card.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {},
+      child: Padding(
+        key: ValueKey('terminal-tasks-${group.id}'),
+        padding: const EdgeInsets.only(top: 9),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Divider(
+              height: 1,
+              color: scheme.outlineVariant.withValues(alpha: 0.4),
+            ),
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    all
+                        ? 'All tabs · Tasks'
+                        : '${session?.provider.label ?? 'Tab'} ${session?.shortId ?? ''} · Tasks',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+                TextButton.icon(
+                  key: ValueKey('terminal-restore-${group.id}'),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 7),
+                  ),
+                  onPressed:
+                      onOpen == null ||
+                          monitor!.opening ||
+                          (!all && session == null)
+                      ? null
+                      : () => onOpen!(group, all ? null : session),
+                  icon: const Icon(Icons.open_in_new_rounded, size: 14),
+                  label: Text(all ? 'Restore missing' : 'Open tab'),
+                ),
+              ],
+            ),
+            if (all) ...[
+              Row(
+                children: [
+                  const Icon(Icons.favorite_border_rounded, size: 16),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: PassiveTooltip(
+                      message:
+                          'Every 15 min while Context is running. Restores missing tabs; continues confirmed temporary Codex failures. Usage errors wait for available quota. Closing the whole window stops this task.',
+                      child: Text(
+                        'Keep Alive',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '15 min',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    height: 29,
+                    child: Switch(
+                      key: ValueKey('terminal-keep-alive-${group.id}'),
+                      value: job?.enabled == true,
+                      onChanged:
+                          widget.onKeepAlive == null ||
+                              (job?.enabled != true &&
+                                  !monitor!.isActive(group))
+                          ? null
+                          : (value) => widget.onKeepAlive!(group, value),
+                    ),
+                  ),
+                ],
+              ),
+              if (job != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3, bottom: 4),
+                  child: Text(
+                    '${job.status}${job.enabled ? ' Next ${clock(job.nextCheck)}.' : ''}',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ] else if (!hasDowngrade)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(
+                  'No tasks scheduled for this tab.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            if (hasDowngrade)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.south_east_rounded, size: 16),
+                title: Text(
+                  'Downgrade · ${downgrade!.model} · ${downgrade.effort}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                subtitle: Text(
+                  'All Codex tabs · ${downgrade.status ?? 'Armed'}',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded, size: 16),
+                onTap: widget.onEditDowngrade,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Future<void> _rename(BuildContext context, TerminalTabGroup group) async {
     var value = group.name;
@@ -320,9 +504,7 @@ class TerminalTabsCard extends StatelessWidget {
           child: InkWell(
             onTap: group == null
                 ? onAlreadyOpen
-                : onOpen == null || monitor!.opening
-                ? null
-                : () => onOpen!(group, session),
+                : () => _select(group, session),
             borderRadius: BorderRadius.circular(7),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 7),

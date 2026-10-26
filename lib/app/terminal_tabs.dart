@@ -333,6 +333,10 @@ class TerminalTabs extends ChangeNotifier {
   bool isActive(TerminalTabGroup group) =>
       !group.closed && windows.any((w) => w.key == group.window.key);
 
+  bool get snapshotComplete => _processesComplete && _windowsComplete;
+  String get sourcePath => _path;
+  bool isClosing(TerminalWindow window) => _closing.containsKey(window.key);
+
   List<TerminalSession> orderedSessions([Iterable<TerminalSession>? input]) {
     final values = (input ?? sessions).toList();
     final original = {
@@ -646,6 +650,7 @@ class TerminalTabs extends ChangeNotifier {
     TerminalTabGroup group,
     TerminalGroupLauncher launch, {
     TerminalSession? only,
+    TerminalWindow? requiredWindow,
   }) async {
     if (opening) return 'A Terminal group is already opening.';
     opening = true;
@@ -655,6 +660,13 @@ class TerminalTabs extends ChangeNotifier {
       // Freeze the card's displayed order before refreshing duplicate checks.
       final entries = only == null ? orderedSessions(group.members) : [only];
       await ensureFresh();
+      if (requiredWindow != null &&
+          (!snapshotComplete ||
+              windows.length != 1 ||
+              windows.single.key != requiredWindow.key ||
+              isClosing(requiredWindow))) {
+        throw StateError('Cannot safely identify the target Terminal window.');
+      }
       final unique = {for (final s in entries) s.reference: s}.values;
       final now = _now();
       _pendingLaunches.removeWhere((_, v) => v.until.isBefore(now));
@@ -702,7 +714,8 @@ class TerminalTabs extends ChangeNotifier {
             .toList();
         _persistGroups();
       }
-      final target = only == null && !unique.any(isOpen)
+      final target =
+          requiredWindow == null && only == null && !unique.any(isOpen)
           ? 'context-${group.id}'
           : '0';
       for (final session in missing) {

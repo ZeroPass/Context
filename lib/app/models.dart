@@ -277,6 +277,7 @@ class RecentContext {
     this.workDir,
     this.localDrop = false,
     this.agentPrompt = '',
+    this.dropFolder = '',
   });
 
   factory RecentContext.fromJson(Map<String, dynamic> json) {
@@ -302,6 +303,7 @@ class RecentContext {
   final String? workDir;
   final bool localDrop;
   final String agentPrompt;
+  final String dropFolder;
 
   Map<String, dynamic> toJson() => {
     'provider': provider.key,

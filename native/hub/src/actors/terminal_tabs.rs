@@ -109,15 +109,23 @@ fn read(path: &str) -> Result<serde_json::Value> {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("powershell.exe");
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            TAB_SCRIPT,
-        ]);
+        let broker = std::env::var_os("CONTEXT_TERMINAL_BROKER").is_some();
+        let mut command = if broker {
+            let mut command = Command::new(std::env::current_exe()?);
+            command.arg("--context-terminal-read-tabs");
+            command
+        } else {
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                TAB_SCRIPT,
+            ]);
+            command
+        };
         match bounded_output(&mut command, None)
             .and_then(|bytes| Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?))
         {

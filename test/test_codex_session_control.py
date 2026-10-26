@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location('control', Path(__file__).resolve().parents[1] / 'scripts/codex-session-control.py')
@@ -104,6 +105,122 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(result['updated'], ['a', 'b'])
         self.assertEqual(result['live_failed'], ['a'])
         self.assertEqual([params['threadId'] for method, params in rpc.calls if method == 'thread/settings/update'], ['a', 'b'])
+
+
+class RecoveryRpc:
+    def __init__(self, code='serverOverloaded', allowed=None):
+        self.calls = []
+        self.thread = {'status': {'type': 'idle'}, 'model': 'sol'}
+        self.turn = {'id': 'failed-1', 'status': 'failed',
+                     'error': {'codexErrorInfo': code}}
+        self.goal = None
+        self.allowed = allowed
+        self.change_on_recheck = False
+        self.reads = 0
+
+    def request(self, method, params):
+        self.calls.append((method, params))
+        if method == 'thread/read':
+            self.reads += 1
+            if self.change_on_recheck and self.reads > 1:
+                return {'thread': {'status': {'type': 'active'}}}
+            return {'thread': self.thread}
+        if method == 'thread/turns/list':
+            return {'data': [self.turn]}
+        if method == 'thread/goal/get':
+            return {'goal': self.goal}
+        if method == 'account/rateLimits/read':
+            return {'ordinaryUsageAllowed': self.allowed, 'rateLimits': {}}
+        if method == 'turn/start':
+            return {'turn': {'id': 'new-1'}}
+        raise AssertionError(method)
+
+    def close(self):
+        pass
+
+
+class RecoveryTests(unittest.TestCase):
+    target = {'id': 'a', 'pid': '123', 'start': '456', 'turn_id': 'failed-1'}
+    live = [{'launch_session_id': 'a', 'pid': 123, 'start': '456'}]
+
+    def recover(self, rpc, action='recover', live=None, target=None):
+        return control.keep_alive(rpc, {'action': action, 'targets': [target or self.target]},
+                                  self.live if live is None else live)['sessions'][0]['state']
+
+    def test_status_is_read_only_and_recover_uses_fixed_continuation_only(self):
+        rpc = RecoveryRpc()
+        self.assertEqual(self.recover(rpc, 'status'), 'retryable')
+        self.assertFalse(any(m == 'turn/start' for m, _ in rpc.calls))
+        self.assertEqual(self.recover(rpc), 'retried')
+        self.assertEqual([p for m, p in rpc.calls if m == 'turn/start'], [{
+            'threadId': 'a', 'input': [{'type': 'text', 'text': control.RETRY_TEXT}]}])
+        self.assertFalse(any(m in ('thread/resume', 'turn/interrupt', 'thread/settings/update')
+                             for m, _ in rpc.calls))
+
+    def test_exact_selected_model_capacity_message_continues_same_model(self):
+        for code in (None, 'other', 'serverOverloaded'):
+            rpc = RecoveryRpc(code)
+            rpc.turn['error']['message'] = 'Selected model is at capacity. Please try a different model.'
+            self.assertEqual(self.recover(rpc, 'status'), 'retryable')
+            self.assertEqual(self.recover(rpc), 'retried')
+            self.assertFalse(any(m in ('model/list', 'thread/settings/update') for m, _ in rpc.calls))
+        rpc = RecoveryRpc('unauthorized')
+        rpc.turn['error']['message'] = 'Selected model is at capacity. Please try a different model.'
+        self.assertEqual(self.recover(rpc), 'attention')
+
+    def test_busy_completed_interrupted_and_subagents_are_untouched(self):
+        for state in ('active', 'notLoaded', 'systemError'):
+            rpc = RecoveryRpc(); rpc.thread['status']['type'] = state
+            self.assertEqual(self.recover(rpc), 'untouched')
+        for state in ('completed', 'interrupted', 'inProgress'):
+            rpc = RecoveryRpc(); rpc.turn['status'] = state
+            self.assertEqual(self.recover(rpc), 'untouched')
+        rpc = RecoveryRpc(); rpc.thread['parentThreadId'] = 'parent'
+        self.assertEqual(self.recover(rpc), 'untouched')
+
+    def test_quota_requires_fresh_explicit_permission_not_percentages(self):
+        for allowed in (None, False):
+            rpc = RecoveryRpc('usageLimitExceeded', allowed)
+            self.assertEqual(self.recover(rpc), 'waiting_usage')
+            self.assertFalse(any(m == 'turn/start' for m, _ in rpc.calls))
+        self.assertEqual(self.recover(RecoveryRpc('usageLimitExceeded', True)), 'retried')
+        self.assertEqual(self.recover(RecoveryRpc('rateLimitExceeded', True)), 'retried')
+
+    def test_manual_or_hard_errors_and_paused_goals_are_not_retried(self):
+        for code in ('unauthorized', 'badRequest', 'contextWindowExceeded',
+                     'sessionBudgetExceeded', 'cyberPolicy', 'sandboxError', 'other', 'unknown'):
+            self.assertEqual(self.recover(RecoveryRpc(code)), 'attention')
+        for status in ('paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'):
+            rpc = RecoveryRpc(); rpc.goal = {'status': status}
+            self.assertEqual(self.recover(rpc), 'attention')
+
+    def test_identity_other_home_duplicate_id_and_new_turn_block_retry(self):
+        for live in ([], self.live * 2, [{**self.live[0], 'unsupported_home': True}],
+                     [{**self.live[0], 'start': '789'}]):
+            rpc = RecoveryRpc()
+            self.assertEqual(self.recover(rpc, live=live), 'unavailable')
+            self.assertEqual(rpc.calls, [])
+        rpc = RecoveryRpc()
+        self.assertEqual(self.recover(rpc, target={**self.target, 'turn_id': 'stale'}), 'changed')
+        rpc = RecoveryRpc(); rpc.change_on_recheck = True
+        self.assertEqual(self.recover(rpc), 'changed')
+        self.assertFalse(any(m == 'turn/start' for m, _ in rpc.calls))
+
+    def test_network_errors_allow_only_temporary_statuses(self):
+        for status in (None, 408, 500, 502, 503, 504):
+            code = {'responseStreamDisconnected': {'httpStatusCode': status}}
+            self.assertEqual(self.recover(RecoveryRpc(code)), 'retried')
+        for status in (400, 401, 403, 404):
+            code = {'httpConnectionFailed': {'httpStatusCode': status}}
+            self.assertEqual(self.recover(RecoveryRpc(code)), 'attention')
+
+    def test_partial_process_inventory_never_authorizes_recovery(self):
+        rpc = RecoveryRpc()
+        with patch.object(control, 'CodexRpc', return_value=rpc):
+            with self.assertRaisesRegex(control.ControlError, 'inventory is incomplete'):
+                control.run({'action': 'status', 'targets': [self.target]},
+                            'def process_sessions():\n return [], ["PID 123: permission denied"]')
+        self.assertEqual(rpc.calls, [])
 
 
 class WebSocketTests(unittest.TestCase):

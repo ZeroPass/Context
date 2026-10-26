@@ -87,19 +87,54 @@ fn drop_owner(parent: &Path, folder: &str) -> io::Result<(PathBuf, DropOwner)> {
 fn remove_owned_drop(path: &Path) -> io::Result<()> {
     // Never recurse into a folder or follow a link. Originals are only listed
     // inside README.md, and are never deletion targets.
-    const FILES: [&str; 5] = [
+    const FILES: [&str; 6] = [
         DROP_MARKER,
         "README.md",
         "message.md",
         "clipboard.png",
         "clipboard.bmp",
+        ".input.json",
     ];
+    let mut allowed = FILES.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let input = path.join(".input.json");
+    if let Ok(metadata) = fs::symlink_metadata(&input) {
+        if !metadata.is_file() || is_link(&metadata) || metadata.len() > 2 * 1024 * 1024 {
+            return Err(io::Error::other("Invalid input manifest"));
+        }
+        let value: serde_json::Value = serde_json::from_reader(File::open(input)?)?;
+        if value["schema"] != "context.whiteboard.input.v1"
+            || value["folder"].as_str() != path.file_name().and_then(|s| s.to_str())
+        {
+            return Err(io::Error::other("Input ownership mismatch"));
+        }
+        let owned = value["owned_files"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("Missing owned files"))?;
+        if owned.len() > 128 {
+            return Err(io::Error::other("Too many owned files"));
+        }
+        for name in owned {
+            let name = name
+                .as_str()
+                .ok_or_else(|| io::Error::other("Invalid owned file"))?;
+            if !name.starts_with("attachment-")
+                || name.len() > 240
+                || name
+                    .bytes()
+                    .any(|b| b < 32 || b == 127 || b"/\\:".contains(&b))
+                || Path::new(name).components().count() != 1
+            {
+                return Err(io::Error::other("Invalid owned filename"));
+            }
+            allowed.push(name.to_string());
+        }
+    }
     let mut files = Vec::new();
-    for entry in fs::read_dir(path)?.take(FILES.len() + 1) {
+    for entry in fs::read_dir(path)?.take(allowed.len() + 1) {
         let entry = entry?;
         let name = entry.file_name();
         let metadata = fs::symlink_metadata(entry.path())?;
-        if !FILES.iter().any(|allowed| name == *allowed)
+        if !allowed.iter().any(|allowed| name == allowed.as_str())
             || !metadata.is_file()
             || is_link(&metadata)
         {
@@ -301,6 +336,16 @@ impl Drop for BoardLock {
 }
 
 fn write_board(path: &Path, post: Option<Post>, init: bool) -> io::Result<usize> {
+    write_board_with(path, post, init, false, None)
+}
+
+fn write_board_with(
+    path: &Path,
+    post: Option<Post>,
+    init: bool,
+    replace: bool,
+    remove: Option<&str>,
+) -> io::Result<usize> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("Whiteboard needs a parent folder."))?;
@@ -311,14 +356,44 @@ fn write_board(path: &Path, post: Option<Post>, init: bool) -> io::Result<usize>
         return Ok(parse(&text).len());
     }
     let mut posts = parse(&text);
-    if let Some(post) = post {
-        posts.push(post);
+    let mut removed = Vec::new();
+    if let Some(folder) = remove {
+        drop_owner(parent, folder)?;
+        let position = posts
+            .iter()
+            .position(|p| p.metadata.local_drop && p.metadata.drop_folder == folder)
+            .ok_or_else(|| io::Error::other("Input tab is no longer on the Whiteboard"))?;
+        removed.push(posts.remove(position));
     }
-    let removed = if posts.len() > MAX_ENTRIES {
-        posts.drain(..posts.len() - MAX_ENTRIES).collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    if let Some(post) = post {
+        if replace {
+            let folder = &post.metadata.drop_folder;
+            let (_, owner) = drop_owner(parent, folder)?;
+            if owner.retired {
+                return Err(io::Error::other("Input tab has expired"));
+            }
+            let positions = posts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.metadata.local_drop && p.metadata.drop_folder == *folder)
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            if positions.len() != 1 {
+                return Err(io::Error::other("Input tab has expired or is ambiguous"));
+            }
+            let current = &mut posts[positions[0]];
+            current.body = post.body;
+            current.metadata.body_bytes = post.metadata.body_bytes;
+            current.metadata.body_chars = post.metadata.body_chars;
+            current.metadata.title = post.metadata.title;
+            current.metadata.agent_prompt = post.metadata.agent_prompt;
+        } else {
+            posts.push(post);
+        }
+    }
+    if posts.len() > MAX_ENTRIES {
+        removed.extend(posts.drain(..posts.len() - MAX_ENTRIES));
+    }
     let mut output = header(&text, path);
     for post in &posts {
         let metadata = serde_json::to_string(&post.metadata).map_err(io::Error::other)?;
@@ -364,6 +439,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent_prompt = String::new();
     let mut local_drop = false;
     let mut drop_folder = String::new();
+    let mut replace = false;
+    let mut remove = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--file" => path = Some(PathBuf::from(args.next().ok_or("Missing --file value")?)),
@@ -374,6 +451,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--local-drop" => local_drop = true,
             "--drop-folder" => drop_folder = args.next().ok_or("Missing --drop-folder value")?,
             "--agent-prompt" => agent_prompt = args.next().ok_or("Missing --agent-prompt value")?,
+            "--replace-drop" => replace = true,
+            "--remove-drop" => remove = Some(args.next().ok_or("Missing --remove-drop value")?),
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
@@ -383,6 +462,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         std::env::current_dir()?.join(path)
     };
+    if (replace && (init || prune || remove.is_some() || !local_drop || drop_folder.is_empty()))
+        || (remove.is_some() && (init || prune || local_drop || !drop_folder.is_empty()))
+    {
+        return Err("Invalid input mutation arguments".into());
+    }
     if !drop_folder.is_empty() {
         if !local_drop {
             return Err("--drop-folder requires --local-drop".into());
@@ -390,7 +474,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         drop_owner(path.parent().ok_or("Missing board folder")?, &drop_folder)?;
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
-    let post = if init || prune {
+    let post = if init || prune || remove.is_some() {
         None
     } else {
         let mut body = String::new();
@@ -424,7 +508,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             body,
         })
     };
-    let count = write_board(&path, post, init)?;
+    let count = if replace || remove.is_some() {
+        write_board_with(&path, post, init, replace, remove.as_deref())?
+    } else {
+        write_board(&path, post, init)?
+    };
     println!(
         "{}",
         serde_json::json!({"published": !init && !prune, "entries": count, "file": path})
@@ -471,6 +559,111 @@ mod tests {
             );
             assert_eq!(header(&old, path), current);
         }
+    }
+
+    #[test]
+    fn input_updates_keep_position_identity_and_do_not_resurrect_expired_tabs() -> io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("context-input-update-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let board = root.join("whiteboard.md");
+        owned_drop(&root, "input-1")?;
+        let mut original = post(1);
+        original.metadata.local_drop = true;
+        original.metadata.drop_folder = "input-1".into();
+        write_board(&board, Some(original.clone()), false)?;
+        write_board(&board, Some(post(2)), false)?;
+        let mut edited = original.clone();
+        edited.body = "File note: revised".into();
+        edited.metadata.body_bytes = edited.body.len();
+        edited.metadata.body_chars = edited.body.encode_utf16().count();
+        edited.metadata.id = "must-not-replace-id".into();
+        write_board_with(&board, Some(edited.clone()), false, true, None)?;
+        let entries = parse(&fs::read_to_string(&board)?);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].metadata.id, original.metadata.id);
+        assert_eq!(
+            entries[0].metadata.published_at_ms,
+            original.metadata.published_at_ms
+        );
+        assert_eq!(entries[0].body, edited.body);
+        assert_eq!(entries[1].metadata.id, "2");
+        write_board_with(&board, None, false, false, Some("input-1"))?;
+        assert!(write_board_with(&board, Some(edited), false, true, None).is_err());
+        assert_eq!(parse(&fs::read_to_string(&board)?).len(), 1);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn input_cleanup_removes_manifest_owned_copies_but_not_linked_originals() -> io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("context-input-cleanup-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let board = root.join("whiteboard.md");
+        let folder = owned_drop(&root, "input-2")?;
+        let original = root.join("original.dat");
+        fs::write(&original, "keep original")?;
+        fs::write(folder.join("attachment-1-original.dat"), "copy")?;
+        fs::write(
+            folder.join(".input.json"),
+            serde_json::json!({"schema":"context.whiteboard.input.v1",
+          "folder":"input-2", "owned_files":["attachment-1-original.dat"]})
+            .to_string(),
+        )?;
+        let mut entry = post(1);
+        entry.metadata.local_drop = true;
+        entry.metadata.drop_folder = "input-2".into();
+        write_board(&board, Some(entry), false)?;
+        write_board_with(&board, None, false, false, Some("input-2"))?;
+        assert!(!folder.exists());
+        assert_eq!(fs::read_to_string(original)?, "keep original");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn input_cleanup_waits_for_live_edits_and_rejects_forged_ownership() -> io::Result<()> {
+        let root = std::env::temp_dir().join(format!("context-input-lease-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let board = root.join("whiteboard.md");
+        let folder = owned_drop(&root, "leased-input")?;
+        fs::write(folder.join(".input-write.lock"), "editing")?;
+        let mut entry = post(1);
+        entry.metadata.local_drop = true;
+        entry.metadata.drop_folder = "leased-input".into();
+        write_board(&board, Some(entry), false)?;
+        for id in 2..8 {
+            write_board(&board, Some(post(id)), false)?;
+        }
+        assert!(folder.exists());
+        assert!(drop_owner(&root, "leased-input")?.1.retired);
+        fs::remove_file(folder.join(".input-write.lock"))?;
+        let original = root.join("attachment-original.txt");
+        fs::write(&original, "not owned")?;
+        fs::write(
+            folder.join(".input.json"),
+            serde_json::json!({
+                "schema":"context.whiteboard.input.v1", "folder":"leased-input",
+                "owned_files":["../attachment-original.txt"]
+            })
+            .to_string(),
+        )?;
+        write_board(&board, None, false)?;
+        assert!(folder.exists());
+        assert_eq!(fs::read_to_string(&original)?, "not owned");
+        fs::write(
+            folder.join(".input.json"),
+            serde_json::json!({
+                "schema":"context.whiteboard.input.v1", "folder":"leased-input", "owned_files":[]
+            })
+            .to_string(),
+        )?;
+        write_board(&board, None, false)?;
+        assert!(!folder.exists());
+        assert_eq!(fs::read_to_string(original)?, "not owned");
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

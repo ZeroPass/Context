@@ -33,8 +33,9 @@ preserves its last observed sessions. Restoring a group opens only missing
 sessions, leaving already-open tabs alone.
 
 Tabs open in WSL using the session's working directory. Context can request
-administrator approval once at startup to reuse elevated Terminal windows
-without a prompt for each tab; this is configurable in Settings.
+administrator approval once for a small Terminal helper, while the UI stays at
+normal rights so Explorer drag/drop works. The helper exits with Context; no
+service is installed. Startup approval is configurable.
 
 ## Codex Accounts
 
@@ -51,8 +52,9 @@ Account switching and pacing are Codex-specific.
 
 ## Whiteboard
 
-Whiteboard displays published Markdown from agents, with the newest six entries
-in a tab strip. Agents publish through a helper into `whiteboard.md`; Context
+Whiteboard is two-way: agents publish outputs, and you prepare input tabs with
+files and notes for agents. The newest six entries appear in a tab strip.
+Agents publish through a helper into `whiteboard.md`; Context
 reads that file rather than pulling the full chat history.
 
 - Images, videos, and Markdown files open in the built-in viewer.
@@ -61,9 +63,11 @@ reads that file rather than pulling the full chat history.
 - File-location controls reveal files, with an option to open their default app.
 - Relative paths are checked against the publication's working directory and configured locations.
 
-Files, folders, images, and text can also be dropped or pasted into Whiteboard.
-These create entries with a short file-path prompt to copy back to an agent.
-Existing files are referenced in place; pasted content uses temporary local storage.
+Use **+** before the tabs to start an input. Dropping files appends to the active
+input tab, or creates one when an output is selected. Each file has a note field,
+a compact preview where supported, a folder control, and an optional copy-into-Context
+button. Drops keep original paths by default; pasted files and images are stored
+locally. Only Context-owned copies are removed when their input tab expires.
 
 **Copy first prompt** gives an agent the active Whiteboard path and points it
 to the publishing instructions in the file header. In a configured workspace,

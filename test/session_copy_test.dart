@@ -135,11 +135,11 @@ void main() {
       elevated = false;
       final state = await mount(tester);
       await tester.pumpAndSettle();
-      expect(find.text('Restart Context as administrator?'), findsNothing);
+      expect(find.text('Approve Terminal access?'), findsNothing);
       expect(state.openSessionsInTerminal, isFalse);
       state.notifyListeners();
       await tester.pumpAndSettle();
-      expect(find.text('Restart Context as administrator?'), findsNothing);
+      expect(find.text('Approve Terminal access?'), findsNothing);
       expect(
         terminalCalls.where((call) => call.method == 'isElevated'),
         isEmpty,
@@ -164,11 +164,11 @@ void main() {
     final state = await mount(tester, preferences: prefs);
     await tester.pumpAndSettle();
     expect(terminalCalls, isEmpty);
-    expect(find.text('Restart Context as administrator?'), findsNothing);
+    expect(find.text('Approve Terminal access?'), findsNothing);
     state.openSessionsInTerminal = true;
     await tester.tap(find.text('7d40'));
     await tester.pumpAndSettle();
-    expect(find.text('Restart Context as administrator?'), findsOneWidget);
+    expect(find.text('Approve Terminal access?'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -388,7 +388,7 @@ void main() {
 
   for (final cancelled in [false, true]) {
     windowsTest(
-      'explicit terminal restart preserves copy default (cancelled: $cancelled)',
+      'helper approval preserves copy default (cancelled: $cancelled)',
       (tester) async {
         elevated = false;
         cancelElevation = cancelled;
@@ -401,12 +401,13 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('Open in Terminal'));
         await tester.pumpAndSettle();
-        expect(find.text('Restart Context as administrator?'), findsOneWidget);
-        await tester.tap(find.text('Restart as administrator'));
+        expect(find.text('Approve Terminal access?'), findsOneWidget);
+        await tester.tap(find.text('Approve Terminal access'));
         await tester.pumpAndSettle();
         expect(terminalCalls.map((call) => call.method), [
           'isElevated',
           'restartElevated',
+          if (!cancelled) ...['readSettings', 'openTab'],
         ]);
         expect(state.openSessionsInTerminal, isFalse);
         final prefs = await SharedPreferences.getInstance();
@@ -510,7 +511,7 @@ void main() {
     state.openSessionsInTerminal = true;
     await tester.tap(find.text('7d40'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Restart as administrator'));
+    await tester.tap(find.text('Approve Terminal access'));
     await tester.pumpAndSettle();
     expect(terminalCalls.map((call) => call.method), [
       'isElevated',
@@ -592,14 +593,14 @@ void main() {
   );
 
   windowsTest(
-    'normal Context requests an explicit restart instead of launching per-tab UAC',
+    'normal Context requests helper approval instead of per-tab UAC',
     (tester) async {
       elevated = false;
       final state = await mount(tester);
       state.openSessionsInTerminal = true;
       await tester.tap(find.text('7d40'));
       await tester.pumpAndSettle();
-      expect(find.text('Restart Context as administrator?'), findsOneWidget);
+      expect(find.text('Approve Terminal access?'), findsOneWidget);
       expect(terminalCalls.map((call) => call.method), ['isElevated']);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();

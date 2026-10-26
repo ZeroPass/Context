@@ -691,6 +691,7 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
       if (!monitor.isActive(current)) {
+        await state.terminalSchedules.stop(current.id);
         await monitor.deleteGroup(current.id);
         _terminalNotice('Saved Terminal group deleted.');
         return;
@@ -719,6 +720,7 @@ class _HomeScreenState extends State<HomeScreen> {
           !await _enableTerminal(context, state)) {
         return;
       }
+      await state.terminalSchedules.stop(current.id);
       await const SessionTerminal().closeWindow(
         current.window.handle,
         current.window.pid,
@@ -736,6 +738,19 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _terminalAvailable(SessionProvider provider) =>
       Theme.of(context).platform == TargetPlatform.windows &&
       canOpenSessionInTerminal(provider);
+
+  Future<void> _setKeepAlive(
+    AppState state,
+    TerminalTabGroup group,
+    bool value,
+  ) async {
+    try {
+      if (value && !await _enableTerminal(context, state)) return;
+      await state.terminalSchedules.setEnabled(group, value);
+    } catch (error) {
+      if (mounted) await _showError(context, error);
+    }
+  }
 
   bool _launchesInTerminal(AppState state, SessionProvider provider) =>
       state.openSessionsInTerminal && _terminalAvailable(provider);
@@ -765,13 +780,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final approved = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Restart Context as administrator?'),
+        title: const Text('Approve Terminal access?'),
         content: const Text(
-          'Windows needs one administrator approval so Context can add tabs '
-          'to your admin Terminal without asking again for each session.\n\n'
-          'Current session-list edits will be saved before restarting. '
-          'After the restart, open your session again. No helper or service '
-          'is installed. Approval is needed again if Context starts normally.',
+          'A small helper needs administrator approval to add tabs to your '
+          'admin Terminal and read its tab labels. Context itself stays at '
+          'normal rights so file drag/drop works.\n\n'
+          'Approve once while Context is running, not once per tab. '
+          'The helper exits with Context; no service is installed.',
         ),
         actions: [
           TextButton(
@@ -780,7 +795,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Restart as administrator'),
+            child: const Text('Approve Terminal access'),
           ),
         ],
       ),
@@ -788,7 +803,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (approved != true) return false;
     final previous = state.openSessionsInTerminal;
     try {
-      if (state.dirty) await state.saveConfig();
       if (enableDefault && !previous) {
         await state.setOpenSessionsInTerminal(true);
       }
@@ -799,7 +813,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       rethrow;
     }
-    return false;
+    return true;
   }
 
   Future<void> _setTerminalMode(
@@ -4050,11 +4064,25 @@ class _HomeScreenState extends State<HomeScreen> {
                       decoration: cardDecoration,
                       clipBehavior: Clip.antiAlias,
                       child: Selector<AppState, Object>(
-                        selector: (_, state) =>
-                            (state.terminalTabs, state.items),
+                        selector: (_, state) => (
+                          state.terminalTabs,
+                          state.items,
+                          state.sessionsMarkdownPath,
+                        ),
                         builder: (context, _, _) => TerminalTabsCard(
                           monitor: state.terminalTabs,
                           saved: state.items,
+                          schedules: state.terminalSchedules,
+                          downgrade: state.codexDowngrade,
+                          path: state.sessionsMarkdownPath,
+                          onKeepAlive: (group, value) =>
+                              _setKeepAlive(state, group, value),
+                          onEditDowngrade: () => showCodexDowngradeDialog(
+                            context,
+                            controller: state.codexDowngrade,
+                            path: state.sessionsMarkdownPath,
+                            accounts: state.codexAccounts,
+                          ),
                           providerColor: (provider) =>
                               _providerColor(scheme, provider),
                           onOpen: (group, only) =>

@@ -873,7 +873,7 @@ void main() {
   );
 
   testWidgets(
-    'whole group card restores without play; chips and X remain separate',
+    'group and chip open separate task scopes; restore and X stay explicit',
     (tester) async {
       final monitor = TerminalTabs(reader: (_) async => windowSnapshot([1, 2]));
       monitor.follow(groupPath, active: true);
@@ -903,9 +903,19 @@ void main() {
       expect(find.byIcon(Icons.play_arrow_rounded), findsNothing);
       final card = find.byKey(ValueKey('terminal-group-${group.id}'));
       await tester.tapAt(tester.getBottomRight(card) - const Offset(3, 3));
+      await tester.pumpAndSettle();
+      expect(opens, 0);
+      expect(find.text('All tabs · Tasks'), findsOneWidget);
+      expect(find.text('Keep Alive'), findsOneWidget);
+      await tester.tap(find.text('Restore missing'));
       expect(opens, 1);
       expect(clicked, isNull);
       await tester.tap(find.text('Codex on-1'));
+      await tester.pumpAndSettle();
+      expect(opens, 1);
+      expect(find.text('Keep Alive'), findsNothing);
+      expect(find.text('No tasks scheduled for this tab.'), findsOneWidget);
+      await tester.tap(find.text('Open tab'));
       expect(opens, 2);
       expect(clicked?.id, 'session-1');
       await tester.tap(find.byKey(ValueKey('terminal-close-${group.id}')));
@@ -913,14 +923,14 @@ void main() {
       expect(opens, 2);
       await tester.tap(find.text('Terminal 1'));
       await tester.pump(const Duration(milliseconds: 350));
-      expect(opens, 3);
-      expect(clicked, isNull);
+      expect(opens, 2);
+      expect(find.text('Keep Alive'), findsOneWidget);
       await tester.tap(find.text('Terminal 1'));
       await tester.pump(const Duration(milliseconds: 40));
       await tester.tap(find.text('Terminal 1'));
       await tester.pumpAndSettle();
       expect(find.text('Group name'), findsOneWidget);
-      expect(opens, 3);
+      expect(opens, 2);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox.shrink());

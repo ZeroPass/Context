@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 project(runner LANGUAGES CXX)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/probe-terminal-tabs.ps1")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/probe-terminal-tabs.ps1" CONTEXT_TERMINAL_PROBE_SCRIPT)
+configure_file("terminal_probe.h.in" "${CMAKE_CURRENT_BINARY_DIR}/terminal_probe.h" @ONLY)
 
 # Define the application target. To change its name, change BINARY_NAME in the
 # top-level CMakeLists.txt, not the value here, or `flutter run` will no longer
@@ -11,6 +14,7 @@ add_executable(${BINARY_NAME} WIN32
   "clipboard_writer.cpp"
   "whiteboard_input.cpp"
   "session_terminal.cpp"
+  "terminal_broker.cpp"
   "whiteboard_notifications.cpp"
   "workspace_window.cpp"
   "main.cpp"
@@ -41,7 +45,8 @@ target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "windowsapp.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib")
-target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib" "advapi32.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib" "advapi32.lib" "crypt32.lib")
+target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
