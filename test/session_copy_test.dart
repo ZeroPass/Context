@@ -95,21 +95,27 @@ void main() {
     WidgetTester tester, {
     String name = 'Reported session',
     SessionProvider provider = SessionProvider.codex,
+    SharedPreferences? preferences,
   }) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final state = AppState.forTesting(sendRequest: (_) {})
-      ..sessionsMarkdownPath = '/test/codex-out/codex sessions.md'
-      ..items = [
-        ConfigItem.session(commandId: arduId, name: name, provider: provider),
-        ConfigItem.session(
-          commandId: otherId,
-          name: 'Other',
-          provider: SessionProvider.codex,
-        ),
-      ];
+    final state =
+        AppState.forTesting(sendRequest: (_) {}, preferences: preferences)
+          ..sessionsMarkdownPath = '/test/codex-out/codex sessions.md'
+          ..items = [
+            ConfigItem.session(
+              commandId: arduId,
+              name: name,
+              provider: provider,
+            ),
+            ConfigItem.session(
+              commandId: otherId,
+              name: 'Other',
+              provider: SessionProvider.codex,
+            ),
+          ];
     await tester.pumpWidget(
       ChangeNotifierProvider.value(value: state, child: const ContextView()),
     );
@@ -122,6 +128,77 @@ void main() {
       await tester.pump(const Duration(milliseconds: 50));
     }
   }
+
+  windowsTest(
+    'main UI never opens a startup restart dialog or requests elevation',
+    (tester) async {
+      elevated = false;
+      final state = await mount(tester);
+      await tester.pumpAndSettle();
+      expect(find.text('Restart Context as administrator?'), findsNothing);
+      expect(state.openSessionsInTerminal, isFalse);
+      state.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(find.text('Restart Context as administrator?'), findsNothing);
+      expect(
+        terminalCalls.where((call) => call.method == 'isElevated'),
+        isEmpty,
+      );
+      expect(
+        terminalCalls.where((call) => call.method == 'restartElevated'),
+        isEmpty,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      state.dispose();
+    },
+  );
+
+  windowsTest('deferred startup approval waits for a Terminal action', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'askTerminalAdminAtStartup': false,
+    });
+    final prefs = await SharedPreferences.getInstance();
+    elevated = false;
+    final state = await mount(tester, preferences: prefs);
+    await tester.pumpAndSettle();
+    expect(terminalCalls, isEmpty);
+    expect(find.text('Restart Context as administrator?'), findsNothing);
+    state.openSessionsInTerminal = true;
+    await tester.tap(find.text('7d40'));
+    await tester.pumpAndSettle();
+    expect(find.text('Restart Context as administrator?'), findsOneWidget);
+    expect(find.text('Cancel'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    state.dispose();
+  });
+
+  windowsTest(
+    'Settings exposes and saves startup approval without elevating now',
+    (tester) async {
+      final prefs = await SharedPreferences.getInstance();
+      final state = await mount(tester, preferences: prefs);
+      await tester.tap(find.byIcon(Icons.settings_outlined));
+      await tester.pumpAndSettle();
+      final option = find.byKey(const ValueKey('terminal-startup-admin'));
+      await tester.ensureVisible(option);
+      await tester.pumpAndSettle();
+      expect(tester.widget<SwitchListTile>(option).value, isTrue);
+      await tester.tap(option);
+      await tester.pumpAndSettle();
+      expect(tester.widget<SwitchListTile>(option).value, isFalse);
+      expect(prefs.getBool('askTerminalAdminAtStartup'), isFalse);
+      expect(terminalCalls, isEmpty);
+      expect(state.openSessionsInTerminal, isFalse);
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink());
+      state.dispose();
+    },
+  );
 
   windowsTest(
     'Terminal group X closes a live window and only deletes a closed group',

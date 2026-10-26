@@ -15,6 +15,7 @@ import 'whiteboard_publications.dart';
 import 'workspace_paths.dart';
 import 'workspace_window.dart';
 import 'terminal_tabs.dart';
+import 'codex_downgrade.dart';
 
 enum _PendingOpKind {
   load,
@@ -64,6 +65,7 @@ class _JsonListCache<T> {
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
   AppState() : _testRequestSender = null {
     publishedWhiteboard = WhiteboardPublications();
+    codexDowngrade = CodexResetDowngrade();
   }
 
   @visibleForTesting
@@ -74,11 +76,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     WhiteboardPublications? publications,
     bool sessionsReady = true,
     this.terminalTabs,
+    CodexResetDowngrade? downgrade,
   }) : _testRequestSender = sendRequest {
     _recentReader = recentReader;
     publishedWhiteboard = publications;
     _sessionConfigReady = sessionsReady;
     _prefs = preferences;
+    codexDowngrade = downgrade ?? CodexResetDowngrade();
+    if (preferences != null) codexDowngrade.restore(preferences);
+    askTerminalAdminAtStartup =
+        _prefs?.getBool('askTerminalAdminAtStartup') ?? true;
     openSessionsInTerminal = _prefs?.getBool('openSessionsInTerminal') ?? false;
     whiteboardEnabled = _prefs?.getBool('whiteboardEnabled') ?? false;
     whiteboardSplit = whiteboardContextFraction(_prefs?.get('whiteboardSplit'));
@@ -118,8 +125,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   WhiteboardReader? _recentReader;
   WhiteboardPublications? publishedWhiteboard;
   TerminalTabs? terminalTabs;
+  late final CodexResetDowngrade codexDowngrade;
   bool whiteboardNotificationsEnabled = true;
   bool openSessionsInTerminal = false;
+  bool askTerminalAdminAtStartup = true;
   bool _disposed = false;
   bool _sessionConfigReady = false;
   bool _viewFocused = true;
@@ -227,6 +236,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _sessionCheckTimer?.cancel();
     _workspaceWindow?.dispose();
     terminalTabs?.dispose();
+    codexDowngrade.dispose();
     _recentReader?.dispose();
     publishedWhiteboard?.dispose();
     _museRefreshTimer?.cancel();
@@ -252,6 +262,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
     _prefs = await SharedPreferences.getInstance();
+    codexDowngrade.restore(_prefs!);
     terminalTabs = TerminalTabs(
       preferences: _prefs,
       savedSessions: () => items,
@@ -283,6 +294,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _prefs?.getBool('whiteboardNotificationsEnabled') ?? true;
     publishedWhiteboard?.notificationsEnabled = whiteboardNotificationsEnabled;
     openSessionsInTerminal = _prefs?.getBool('openSessionsInTerminal') ?? false;
+    askTerminalAdminAtStartup =
+        _prefs?.getBool('askTerminalAdminAtStartup') ?? true;
     publishedWhiteboard?.follow(sessionsMarkdownPath);
     recentProvider = SessionProviderInfo.parse(
       _prefs?.getString('recentProvider'),
@@ -333,6 +346,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _scheduleSessionChecks() {
+    codexDowngrade.follow(sessionsMarkdownPath);
     terminalTabs?.follow(
       sessionsMarkdownPath,
       active: sessionWindowActive && _sessionConfigReady,
@@ -406,10 +420,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  Future<void> setAskTerminalAdminAtStartup(bool enabled) async {
+    final prefs = _prefs ??= await SharedPreferences.getInstance();
+    if (!await prefs.setBool('askTerminalAdminAtStartup', enabled)) {
+      throw StateError('Could not save the administrator prompt setting.');
+    }
+    askTerminalAdminAtStartup = enabled;
+    notifyListeners();
+  }
+
   void _startRecentRefreshTimer() {
     _scheduleSessionChecks();
     _recentRefreshTimer?.cancel();
     _recentRefreshTimer = Timer.periodic(_recentRefreshInterval, (_) {
+      codexDowngrade.follow(sessionsMarkdownPath);
       if (_recentReader == null) unawaited(refreshRecent());
       unawaited(loadCodexAccounts());
     });
@@ -1272,6 +1296,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         recentStatus = null;
       }
       sessionsMarkdownPath = requestedPath;
+      codexDowngrade.follow(requestedPath);
       publishedWhiteboard?.follow(requestedPath);
       _prefs?.setString('sessionsMarkdownPath', requestedPath);
     }
@@ -1948,6 +1973,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     codexAccountBusy = state.codexAccountBusy || _codexAccountRequestInFlight;
     codexAccountStatus = state.codexAccountStatus;
     codexAccountError = state.codexAccountError;
+    if (!state.codexAccountBusy && state.codexAccountError == null) {
+      codexDowngrade.observe(
+        state.sessionsMarkdownPath,
+        codexAccounts,
+        codexActiveAccount,
+      );
+    }
     museAccounts = _museAccountsCache.decode(
       state.museAccountsJson,
       _decodeMuseAccounts,
@@ -1987,6 +2019,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _pendingRecentRefresh = true;
     }
     sessionsMarkdownPath = state.sessionsMarkdownPath;
+    codexDowngrade.follow(sessionsMarkdownPath);
     terminalTabs?.follow(
       sessionsMarkdownPath,
       active: sessionWindowActive && _sessionConfigReady && !busy,

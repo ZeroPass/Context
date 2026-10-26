@@ -3,13 +3,16 @@ import 'package:provider/provider.dart';
 import 'package:rinf/rinf.dart';
 
 import 'app/app_state.dart';
+import 'app/startup.dart';
 import 'src/bindings/bindings.dart';
 import 'ui/home_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initializeRust(assignRustSignal);
-  runApp(const ContextApp());
+  await startContext(
+    initializeBackend: () => initializeRust(assignRustSignal),
+    showApplication: () => runApp(const ContextApp()),
+  );
 }
 
 class ContextApp extends StatelessWidget {

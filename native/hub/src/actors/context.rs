@@ -15,6 +15,8 @@ mod kimi_index;
 
 #[path = "claude_sessions.rs"]
 mod claude_sessions;
+#[path = "codex_session_control.rs"]
+mod codex_session_control;
 #[path = "terminal_tabs.rs"]
 mod terminal_tabs;
 
@@ -161,6 +163,10 @@ struct CodexAccountMetadata {
     weekly_window_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_observed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_account_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1267,6 +1273,7 @@ impl ContextActor {
 
 pub async fn create_actors() {
     tokio::spawn(terminal_tabs::listen());
+    tokio::spawn(codex_session_control::listen());
     tokio::spawn(whiteboard::listen());
     tokio::spawn(whiteboard::listen_files());
     tokio::spawn(whiteboard::listen_paths());
@@ -4152,6 +4159,10 @@ where
     let manual_reset_at = effective_codex_manual_reset_at(accounts_dir, &mut labels)?;
     let mut accounts = Vec::with_capacity(fetched_accounts.len());
     for (slot, updated_at, account_key, usage) in fetched_accounts {
+        let usage_observed_at = usage
+            .as_ref()
+            .ok()
+            .map(|query| query.timing.response_received_at_ms);
         let name = labels
             .labels
             .get(&slot)
@@ -4196,6 +4207,8 @@ where
             manual_reset_at,
             weekly_window_seconds,
             weekly_error,
+            usage_observed_at,
+            usage_account_key: account_key,
         });
     }
     if labels_changed {
@@ -5295,7 +5308,9 @@ fn parse_session_command(line: &str) -> Option<ParsedSessionCommand> {
 
     if executable == PROVIDER_CLAUDE {
         for (index, token) in tokens.iter().enumerate().skip(1) {
-            let (flag, inline) = token.split_once('=').map_or((*token, None), |(a, b)| (a, Some(b)));
+            let (flag, inline) = token
+                .split_once('=')
+                .map_or((*token, None), |(a, b)| (a, Some(b)));
             if matches!(flag, "--resume" | "-r" | "--session-id") {
                 let id = inline.or_else(|| tokens.get(index + 1).copied())?;
                 return Some(ParsedSessionCommand {
@@ -5444,7 +5459,10 @@ fn normalize_session_id(value: &str, provider: &str) -> Option<String> {
 
 fn normalize_provider(value: &str) -> String {
     let normalized = value.trim().to_ascii_lowercase();
-    if matches!(normalized.as_str(), "claude" | "claude-code" | "claude code") {
+    if matches!(
+        normalized.as_str(),
+        "claude" | "claude-code" | "claude code"
+    ) {
         PROVIDER_CLAUDE.to_owned()
     } else if normalized == PROVIDER_KIMI {
         PROVIDER_KIMI.to_owned()

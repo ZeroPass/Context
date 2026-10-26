@@ -192,6 +192,8 @@ def process_sessions(proc=Path("/proc")):
             if row["_home"] == home and row["provider"] == "codex":
                 row["name"] = names.get(row["launch_session_id"])
     for row in records:
+        if row["provider"] == "codex":
+            row["codex_home"] = row["_home"]
         del row["_home"]
     return sorted(records, key=lambda row: row["pid"]), warnings
 

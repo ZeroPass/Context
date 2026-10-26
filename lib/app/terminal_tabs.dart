@@ -161,6 +161,7 @@ class TerminalTabs extends ChangeNotifier {
   final _shrinking = <String, ({String members, DateTime since})>{};
   int _groupSequence = 0;
   bool _disposed = false, _active = false;
+  bool _hasCompleteSnapshot = false;
   String _path = '';
   int _generation = 0;
   DateTime? _checked;
@@ -179,7 +180,7 @@ class TerminalTabs extends ChangeNotifier {
         requestId: id,
         sessionsMarkdownPath: path,
       ).sendSignalToRust();
-      return await completion.future.timeout(const Duration(seconds: 20));
+      return await completion.future.timeout(const Duration(seconds: 40));
     } finally {
       _pending.remove(id);
     }
@@ -198,6 +199,7 @@ class TerminalTabs extends ChangeNotifier {
       error = null;
       windows = const [];
       _processesComplete = _windowsComplete = false;
+      _hasCompleteSnapshot = false;
     }
     _active = active;
     if (!active) {
@@ -229,15 +231,15 @@ class TerminalTabs extends ChangeNotifier {
     try {
       final data = await _reader(_path);
       if (_disposed || generation != _generation) return;
-      sessions = (data['sessions'] as List? ?? const [])
+      final nextSessions = (data['sessions'] as List? ?? const [])
           .whereType<Map>()
           .where(
             (s) => SessionProvider.values.any((p) => p.key == s['provider']),
           )
           .map((s) => TerminalSession(Map<String, dynamic>.from(s)))
           .toList();
-      tabs = [];
-      windows = [];
+      final nextTabs = <Map<String, dynamic>>[];
+      final nextWindows = <TerminalWindow>[];
       _processesComplete =
           data['sessions'] is List &&
           !(data['warnings'] as List? ?? []).any(
@@ -252,14 +254,14 @@ class TerminalTabs extends ChangeNotifier {
           in (data['windows'] as List? ?? const []).whereType<Map>()) {
         final identity = TerminalWindow(Map<String, dynamic>.from(window));
         if (identity.valid) {
-          windows.add(identity);
+          nextWindows.add(identity);
         } else {
           _windowsComplete = false;
         }
         var index = 0;
         for (final tab
             in (window['tabs'] as List? ?? const []).whereType<Map>()) {
-          tabs.add({
+          nextTabs.add({
             ...Map<String, dynamic>.from(tab),
             'number': ++index,
             'window': window['hwnd'],
@@ -272,9 +274,20 @@ class TerminalTabs extends ChangeNotifier {
           _windowsComplete = false;
         }
       }
-      error = warnings.isEmpty ? null : warnings.join(' ');
+      final complete = _processesComplete && _windowsComplete;
+      if (complete || !_hasCompleteSnapshot) {
+        sessions = nextSessions;
+        tabs = nextTabs;
+        windows = nextWindows;
+      }
+      error = warnings.isEmpty
+          ? null
+          : '${warnings.join(' ')}${!complete && _hasCompleteSnapshot ? ' Keeping the previous Terminal snapshot.' : ''}';
       _checked = _now();
-      if (_processesComplete && _windowsComplete) _syncGroups();
+      if (complete) {
+        _hasCompleteSnapshot = true;
+        _syncGroups();
+      }
     } catch (e) {
       if (!_disposed && generation == _generation) {
         error = 'Refresh unavailable; previous snapshot retained. $e';
@@ -342,13 +355,23 @@ class TerminalTabs extends ChangeNotifier {
   }
 
   List<TerminalSession> get ungroupedSessions {
-    final assigned = groups
-        .where(isActive)
-        .expand((g) => g.members)
-        .map((s) => s.identity)
+    final restoring = _pendingLaunches.values
+        .where((reservation) => reservation.until.isAfter(_now()))
+        .map((reservation) => reservation.group)
+        .whereType<String>()
         .toSet();
+    final assigned = groups
+        .where((group) => isActive(group) || restoring.contains(group.id))
+        .expand((group) => group.members)
+        .toList();
     return orderedSessions(
-      sessions.where((s) => !assigned.contains(s.identity)),
+      sessions.where(
+        (session) => !assigned.any(
+          (member) =>
+              member.identity == session.identity ||
+              (member.id.isNotEmpty && member.reference == session.reference),
+        ),
+      ),
     );
   }
 
@@ -559,7 +582,15 @@ class TerminalTabs extends ChangeNotifier {
         .toList();
     _closing.removeWhere((key, _) => !byWindow.containsKey(key));
     _pendingLaunches.removeWhere(
-      (key, _) => sessions.any((s) => s.reference == key),
+      (key, reservation) =>
+          sessions.any((s) => s.reference == key) &&
+          (reservation.group == null ||
+              groups.any(
+                (group) =>
+                    group.id == reservation.group &&
+                    isActive(group) &&
+                    group.members.any((session) => session.reference == key),
+              )),
     );
     _persistGroups();
   }
@@ -621,8 +652,9 @@ class TerminalTabs extends ChangeNotifier {
     notifyListeners();
     var opened = 0;
     try {
+      // Freeze the card's displayed order before refreshing duplicate checks.
+      final entries = only == null ? orderedSessions(group.members) : [only];
       await ensureFresh();
-      final entries = only == null ? group.members : [only];
       final unique = {for (final s in entries) s.reference: s}.values;
       final now = _now();
       _pendingLaunches.removeWhere((_, v) => v.until.isBefore(now));
@@ -676,7 +708,7 @@ class TerminalTabs extends ChangeNotifier {
       for (final session in missing) {
         if (_disposed) break;
         _pendingLaunches[session.reference] = (
-          until: _now().add(const Duration(seconds: 45)),
+          until: _now().add(const Duration(minutes: 2)),
           group: target == '0' ? null : group.id,
         );
         try {

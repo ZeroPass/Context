@@ -560,6 +560,81 @@ void main() {
   );
 
   testWidgets(
+    'restore sends saved display order sequentially despite fresh Terminal titles',
+    (tester) async {
+      var data = windowSnapshot([3, 1, 2]);
+      final monitor = TerminalTabs(reader: (_) async => data);
+      monitor.follow(groupPath, active: true);
+      await tester.pump();
+      final saved = monitor.groups.single;
+      // Titles without live agents cannot override the saved display order.
+      data = windowSnapshot([3, 1, 2], window: 2)..['sessions'] = [];
+      await monitor.refresh(force: true);
+      expect(saved.members.map((s) => s.id), [
+        'session-3',
+        'session-1',
+        'session-2',
+      ]);
+      expect(monitor.orderedSessions(saved.members).map((s) => s.id), [
+        'session-3',
+        'session-1',
+        'session-2',
+      ]);
+      data = windowSnapshot([2, 1, 3], window: 3)..['sessions'] = [];
+      final sent = <String>[];
+      final targets = <String>[];
+      final gates = {
+        for (final i in [1, 2, 3]) 'session-$i': Completer<bool>(),
+      };
+      final restoring = monitor.openGroup(saved, (session, target) {
+        sent.add(session.id);
+        targets.add(target);
+        return gates[session.id]!.future;
+      });
+      await tester.pump();
+      expect(sent, ['session-3']);
+      gates['session-3']!.complete(true);
+      await tester.pump();
+      expect(sent, ['session-3', 'session-1']);
+      gates['session-1']!.complete(true);
+      await tester.pump();
+      expect(sent, ['session-3', 'session-1', 'session-2']);
+      gates['session-2']!.complete(true);
+      expect(await restoring, 'Opened 3 tabs.');
+      expect(targets, everyElement('context-${saved.id}'));
+      monitor.dispose();
+    },
+  );
+
+  testWidgets(
+    'partial restore keeps displayed relative order when skipping open sessions',
+    (tester) async {
+      var data = windowSnapshot([3, 1, 2]);
+      final monitor = TerminalTabs(reader: (_) async => data);
+      monitor.follow(groupPath, active: true);
+      await tester.pump();
+      final saved = monitor.groups.single;
+      data = windowSnapshot([3, 1, 2], window: 2);
+      data['sessions'] = [(data['sessions'] as List)[1]];
+      await monitor.refresh(force: true);
+      expect(monitor.orderedSessions(saved.members).map((s) => s.id), [
+        'session-1',
+        'session-3',
+        'session-2',
+      ]);
+      final sent = <String>[];
+      final result = await monitor.openGroup(saved, (session, target) async {
+        sent.add(session.id);
+        expect(target, '0');
+        return true;
+      });
+      expect(sent, ['session-3', 'session-2']);
+      expect(result, 'Opened 2 tabs; 1 already open.');
+      monitor.dispose();
+    },
+  );
+
+  testWidgets(
     'pending launches and simultaneous clicks do not duplicate tabs',
     (tester) async {
       var data = windowSnapshot([1, 2]);
@@ -671,6 +746,83 @@ void main() {
   );
 
   testWidgets(
+    'partial discovery preserves the last complete snapshot without duplicate strips',
+    (tester) async {
+      var data = windowSnapshot([1, 2]);
+      final monitor = TerminalTabs(reader: (_) async => data);
+      monitor.follow(groupPath, active: true);
+      await tester.pump();
+      final group = monitor.groups.single;
+      final previousSessions = monitor.sessions;
+      final previousWindows = monitor.windows;
+      data = {
+        ...windowSnapshot([1, 2], window: 2),
+        'windows': [],
+        'tab_error': 'Terminal discovery timed out.',
+      };
+      await monitor.refresh(force: true);
+      expect(identical(monitor.sessions, previousSessions), isTrue);
+      expect(identical(monitor.windows, previousWindows), isTrue);
+      expect(monitor.groups.single.id, group.id);
+      expect(monitor.isActive(group), isTrue);
+      expect(monitor.ungroupedSessions, isEmpty);
+      expect(monitor.error, contains('Keeping the previous'));
+      data = windowSnapshot([1, 2]);
+      await monitor.refresh(force: true);
+      expect(monitor.groups.single.id, group.id);
+      expect(monitor.error, isNull);
+      monitor.dispose();
+    },
+  );
+
+  testWidgets(
+    'restore keeps group identity after unmapped processes and a discovery timeout',
+    (tester) async {
+      var now = DateTime(2026, 10, 24);
+      var data = windowSnapshot([1, 2]);
+      var fail = false;
+      final monitor = TerminalTabs(
+        now: () => now,
+        reader: (_) async {
+          if (fail) throw TimeoutException('Terminal discovery timed out.');
+          return data;
+        },
+      );
+      monitor.follow(groupPath, active: true);
+      await tester.pump();
+      final saved = monitor.groups.single;
+      data = windowSnapshot([], present: false);
+      await monitor.refresh(force: true);
+      await monitor.openGroup(saved, (_, _) async => true);
+      now = now.add(const Duration(seconds: 20));
+      data = windowSnapshot([1, 2], window: 2);
+      ((data['windows'] as List).single as Map)['tabs'] = [];
+      (data['windows'] as List).add(
+        (windowSnapshot([], window: 3)['windows'] as List).single,
+      );
+      await monitor.refresh(force: true);
+      expect(monitor.groups.single.id, saved.id);
+      expect(monitor.ungroupedSessions, isEmpty);
+      fail = true;
+      await monitor.refresh(force: true);
+      expect(monitor.groups.single.id, saved.id);
+      now = now.add(const Duration(seconds: 40));
+      fail = false;
+      data = windowSnapshot([1, 2], window: 2);
+      (data['windows'] as List).add(
+        (windowSnapshot([], window: 3)['windows'] as List).single,
+      );
+      await monitor.refresh(force: true);
+      expect(monitor.groups, hasLength(1));
+      expect(monitor.groups.single.id, saved.id);
+      expect(monitor.groups.single.window.handle, '2');
+      expect(monitor.groups.single.pending, isEmpty);
+      expect(monitor.ungroupedSessions, isEmpty);
+      monitor.dispose();
+    },
+  );
+
+  testWidgets(
     'tab groups use the observed tab order and keep windows separate',
     (tester) async {
       final a = windowSnapshot([2, 1]);
@@ -721,7 +873,7 @@ void main() {
   );
 
   testWidgets(
-    'group strip exposes restore and close actions with compact tooltips',
+    'whole group card restores without play; chips and X remain separate',
     (tester) async {
       final monitor = TerminalTabs(reader: (_) async => windowSnapshot([1, 2]));
       monitor.follow(groupPath, active: true);
@@ -748,7 +900,9 @@ void main() {
       expect(find.text('Terminal 1'), findsOneWidget);
       expect(find.text('Open'), findsOneWidget);
       expect(find.textContaining('PID'), findsNothing);
-      await tester.tap(find.byKey(ValueKey('terminal-open-${group.id}')));
+      expect(find.byIcon(Icons.play_arrow_rounded), findsNothing);
+      final card = find.byKey(ValueKey('terminal-group-${group.id}'));
+      await tester.tapAt(tester.getBottomRight(card) - const Offset(3, 3));
       expect(opens, 1);
       expect(clicked, isNull);
       await tester.tap(find.text('Codex on-1'));
@@ -756,6 +910,19 @@ void main() {
       expect(clicked?.id, 'session-1');
       await tester.tap(find.byKey(ValueKey('terminal-close-${group.id}')));
       expect(closes, 1);
+      expect(opens, 2);
+      await tester.tap(find.text('Terminal 1'));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(opens, 3);
+      expect(clicked, isNull);
+      await tester.tap(find.text('Terminal 1'));
+      await tester.pump(const Duration(milliseconds: 40));
+      await tester.tap(find.text('Terminal 1'));
+      await tester.pumpAndSettle();
+      expect(find.text('Group name'), findsOneWidget);
+      expect(opens, 3);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox.shrink());
       monitor.dispose();
     },

@@ -212,6 +212,7 @@ fn usage_reads_overlap_with_a_bound_after_serial_credential_preparation() -> Res
         if account.slot == "10" || account.slot == "12" {
             assert!(account.weekly_used_percent.is_none());
             assert!(account.weekly_error.is_some());
+            assert!(account.usage_observed_at.is_none());
         } else {
             assert_eq!(
                 account.weekly_used_percent,
@@ -219,6 +220,7 @@ fn usage_reads_overlap_with_a_bound_after_serial_credential_preparation() -> Res
             );
             assert_eq!(account.weekly_reset_at, Some(now + 604_800_000));
             assert!(account.weekly_error.is_none());
+            assert!(account.usage_observed_at.is_some());
         }
     }
     Ok(())
@@ -256,6 +258,8 @@ fn loaded(manual: Option<i64>, api_reset: i64) -> LoadedCodexAccounts {
             manual_reset_at: manual,
             weekly_window_seconds: Some(604_800),
             weekly_error: None,
+            usage_observed_at: None,
+            usage_account_key: None,
         }],
         active_slot: Some("1".to_owned()),
         active_slot_error: None,

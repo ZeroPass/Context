@@ -57,6 +57,8 @@ class CodexAccount {
     this.manualResetAt,
     this.weeklyWindowSeconds,
     this.weeklyError,
+    this.usageObservedAt,
+    this.usageAccountKey,
   });
 
   factory CodexAccount.fromJson(Map<String, dynamic> json) {
@@ -78,6 +80,8 @@ class CodexAccount {
       manualResetAt: _optionalInt(json['manual_reset_at']),
       weeklyWindowSeconds: _optionalInt(json['weekly_window_seconds']),
       weeklyError: _optionalTrimmedString(json['weekly_error']),
+      usageObservedAt: _optionalInt(json['usage_observed_at']),
+      usageAccountKey: _optionalTrimmedString(json['usage_account_key']),
     );
   }
 
@@ -89,6 +93,8 @@ class CodexAccount {
   final int? manualResetAt;
   final int? weeklyWindowSeconds;
   final String? weeklyError;
+  final int? usageObservedAt;
+  final String? usageAccountKey;
 
   String get displayName => name.trim().isEmpty ? slot : name.trim();
 

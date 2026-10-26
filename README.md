@@ -64,8 +64,12 @@ saved one. Double-click a group name to rename it. X closes a live window after
 confirmation, using Terminal's normal close path; X on a closed group deletes
 only that saved group.
 
-Play restores missing sessions and skips those already open or starting. If
-none are open, the restored group uses its own named Terminal window; otherwise
+Click the group card background to restore missing sessions and skip those
+already open or starting; there is no separate play button. Individual session
+chips still open only that session; X and double-click rename stay separate.
+Launch requests follow the displayed order, one at a time. The order is captured
+on click, before fresh duplicate checks; no extra delay is added. If none are
+open, the restored group uses its own named Terminal window; otherwise
 missing tabs append to the latest window. Clicking a single saved item also
 opens only that item in the latest Terminal window. Failed launches stay in
 the remembered group for retry. Existing tabs are never
@@ -76,6 +80,11 @@ Discovery runs after Markdown loading, on app focus, every 30 seconds while
 active, and on refresh. Group actions perform a fresh check plus two bounded
 follow-ups. A short removal debounce preserves a window's snapshot while it
 closes. Changes made entirely between snapshots cannot be reconstructed.
+An incomplete refresh keeps the last complete visible snapshot instead of
+temporarily showing duplicate groups. Restore associations are retained until
+the launched sessions are matched to a window (up to two minutes), not merely
+until their processes appear. Slow discovery helpers have a bounded 15-second
+allowance each; the UI request allows 40 seconds. Normal refresh frequency is unchanged.
 
 The native worker reads a bounded WSL process snapshot with Python 3 and uses
 Windows UI Automation for tab labels and selection. Codex, Claude Code, Kimi,
@@ -92,6 +101,22 @@ saving entries, copying/resuming with `claude --resume <id>`, and forking with
 `claude --resume <id> --fork-session`. Claude credentials, account switching and
 usage are not read or managed. Install Claude separately in WSL and sign in there.
 
+### Sessions Card
+
+The session count sits beside **Sessions**, with the group count as its small
+badge. A single **Save / Saved** button combines saving and its current state.
+The filter stays on the right of that same header line, including its clear
+button while typing. The card is not pinned while scrolling.
+
+The card initially has space for ten sessions. Hover anywhere over its rows and
+use the wheel to scroll through the full list, without expanding it. At either
+end, further scrolling continues through the surrounding Context pane. **Show all**
+at its bottom removes the inner height limit, and **Show less** collapses it again.
+This expansion is temporary: each app launch starts collapsed. Filtering still
+searches every saved entry. Both views retain the full group structure and map
+drag positions back to the full config, never deleting offscreen sessions or
+separating offscreen members from a group that is moved.
+
 ### Opening Sessions
 
 Settings has an opt-in **Open sessions in Terminal** switch. On Windows, clicking
@@ -105,13 +130,22 @@ keep their existing behavior. ZCode remains copy-only because it has no
 supported terminal resume command.
 
 To reuse an administrator Terminal without a UAC prompt for every tab, Context
-offers a one-time administrator restart when enabling this experimental mode.
-It saves pending session-list edits before restarting; cancellation leaves the
-current app open. No service, scheduled task, or background helper is installed.
+requests Windows' administrator approval **before the main window appears** by
+default. There is no in-app startup dialog or visible restart. The hidden
+bootstrap starts an elevated replacement before the session list, Rust workers
+or background refreshes load. Already-elevated instances proceed directly.
+Cancelling UAC opens Context normally, without retrying during that launch.
+In Settings, turn off
+**Ask for administrator at startup** to defer approval to a Terminal action
+instead. Changing this preference affects the next launch and does not change
+whether ordinary session clicks copy or open tabs.
+Deferred Terminal actions still save pending session-list edits before their
+required elevation handoff; cancellation leaves the current app open. No
+service, scheduled task, or background helper is installed.
 Windows keeps administrator and ordinary Terminal windows separate, so this
 mode targets administrator windows. If Context is started normally again,
-it will ask before restarting as administrator. Turning the switch off restores
-click-to-copy.
+the next launch requests approval while the window is still hidden. Turning off
+**Open sessions in Terminal** restores click-to-copy independently.
 
 The sideloaded APPX declares `allowElevation` for this explicit administrator
 restart. Context still starts normally; this capability does not install a
@@ -130,6 +164,47 @@ Context explicitly selects the matching Ubuntu/WSL Terminal profile so its
 icon, font, colors and other appearance settings are retained. It reads Terminal
 settings only when launching a tab and never edits them. If no matching Linux
 profile is available, it reports an error rather than using a CMD-looking tab.
+
+### One-Shot Downgrade
+
+The small arrow beside Codex's manual-reset control arms a **one-shot** action.
+Choose a model and thinking level from the running Codex daemon's catalog;
+the initial selection is **GPT-6.1 Sol / High / non-fast**. Fast and Ultrafast
+are always cleared when the action runs. You can edit or disarm it in the same
+popup, and arming survives restarting Context.
+
+Switch between **Reset** and **Hours**. Reset keeps the quota trigger below.
+Hours uses a one-time delay from pressing **Arm once**; its carousel offers
+1-24 hours and starts at **2 hours**. Updating an arm starts the newly selected
+delay from confirmation. Cancelling the dialog does not change an existing arm.
+The original deadline is saved, not restarted on app launch. If Context was
+closed when it elapsed, it runs once after reopening the matching workspace.
+Hours mode ignores usage resets and does not need a successful account refresh.
+
+The existing account refresh supplies fresh weekly usage readings. A reset is
+detected when the verified active saved account reports exactly **100% left**
+after nonzero usage, or a later reset boundary appears while it is still unused.
+Arming an already-unused account does not fire immediately. Manual dates, errors,
+other accounts' resets and repeated UI state do not fire the action.
+
+When the selected trigger fires, Context takes a new WSL Terminal process snapshot and sends
+`thread/settings/update` to each identified, still-loaded Codex tab through its
+existing local app-server Unix socket, plus `turn/settings/update` for an
+in-progress turn. In-flight requests cannot be undone; subsequent model calls
+use the updated live settings. All thread defaults are saved first. Live-turn
+lookups have a three-second per-tab budget within the bounded operation; a slow
+or unavailable busy turn is reported separately, and its future replies still
+use the new defaults. Current work is not interrupted. No input is typed, new
+turn started, terminal focused, daemon started, or global Codex configuration rewritten. The action
+does not affect other coding agents or subagents. It needs a recent Codex with
+the shared daemon and live settings API. Unknown session IDs, other Codex homes,
+closed tabs and unavailable endpoints are reported rather than guessed.
+
+The one-shot claim is saved **before** settings are sent. Partial failures or an
+interrupted app require manual re-arming, never an automatic replay. There is
+no additional polling timer or permanently connected control client. Hours mode
+uses one deadline timer only, cancelled on disarm/exit; existing resume/focus
+events and refresh ticks also catch deadlines overdue after sleep or a clock change.
 
 ## Whiteboard
 
@@ -190,7 +265,9 @@ Whiteboard has one scroll area for previews, outputs, and published entries;
 sections use their content height instead of fixed viewport fractions. Embedded
 previews grow with their content, up to a square matching the pane's width.
 Long Markdown documents scroll inside that cap; app-wide expansion is unchanged.
-It shows at most four compact published entries and automatically opens the newest.
+It shows at most four published entries as compact tabs on one horizontal line,
+with the selected tab highlighted, and automatically opens the newest. Narrow
+panes scroll the tabs sideways instead of wrapping them into extra rows.
 Selecting an older entry pins it while publications arrive; a pruned entry cannot
 remain selected. The right pane has no provider tabs, session-log pulls, expansion
 to ten, or per-session Last 3 control. Context's provider tabs and recents on the
@@ -201,6 +278,8 @@ Drag files, folders, or text onto the Whiteboard pane, or focus it and press
 overlay marks the target. Each submission becomes a silent **Drop** entry;
 clicking it opens the output and copies a minimal `Read <README path>` prompt
 for your agent. A small copy icon also copies that prompt without changing views.
+Entry and first-prompt copy feedback appears in the section header, keeping
+the tab row clickable instead of covering it with a notification.
 Existing files are referenced in place (no video copies or folder scans), so
 keep them at that location. Clipboard images/text and a short README are stored
 in private temporary `whiteboard-drops/` beside the active `whiteboard.md`. WSL agents get

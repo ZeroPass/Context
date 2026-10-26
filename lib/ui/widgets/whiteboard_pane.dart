@@ -8,6 +8,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import '../../app/app_state.dart';
+import '../../app/clipboard_writer.dart';
 import '../../app/file_references.dart';
 import '../../app/models.dart';
 import '../../app/preview_actions.dart';
@@ -49,6 +50,9 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   WhiteboardPublications? _publications;
   late final WhiteboardPreviewController _previewController;
   final _paneScroll = ScrollController();
+  final _entryTabsScroll = ScrollController();
+  final _entryTabKeys = <String, GlobalKey>{};
+  bool _entryRevealScheduled = false;
   final _whiteboardFocus = FocusNode(debugLabel: 'Whiteboard pane');
   final _dropSurface = GlobalKey<WhiteboardDropSurfaceState>();
   bool _initialNavigationRunning = false;
@@ -63,6 +67,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
   FileReferenceResolver? _resolver;
   String? _preview;
   String? _recentError;
+  String? _entryCopyStatus;
   String? _responseError;
   String _path = '';
   String _rootsKey = '';
@@ -201,6 +206,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       _followLatest = true;
       _historyCache.clear();
       _recent = const [];
+      _entryCopyStatus = null;
       _selected = null;
       _history = null;
       _preview = null;
@@ -251,6 +257,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       setState(() {
         _recentBusy = true;
         _recentError = null;
+        _entryCopyStatus = null;
       });
     }
     try {
@@ -264,7 +271,9 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
         setState(() {
           _recent = items;
           _recentError = null;
+          _entryCopyStatus = null;
         });
+        _revealEntryTab();
       }
       if (_selected == null && items.isNotEmpty) {
         _select(items.first, userInitiated: false);
@@ -316,6 +325,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     if (cached != null) _historyCache[session.identityKey] = cached;
     setState(() {
       if (userInitiated) {
+        _entryCopyStatus = null;
         _followLatest = _recent.firstOrNull?.identityKey == session.identityKey;
         _preview = null;
         _moreResponses = false;
@@ -328,8 +338,31 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
       _repeatHistory = false;
     });
     _makeResolver();
+    _revealEntryTab();
     if (userInitiated && _paneScroll.hasClients) _paneScroll.jumpTo(0);
     unawaited(_loadHistory(background: cached != null));
+  }
+
+  void _revealEntryTab() {
+    if (!_pushMode || _entryRevealScheduled) return;
+    _entryRevealScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _entryRevealScheduled = false;
+      if (!mounted || !_entryTabsScroll.hasClients) return;
+      final target = _entryTabKeys[_selected?.identityKey]?.currentContext
+          ?.findRenderObject();
+      if (target == null || !target.attached) return;
+      // Reveal horizontally only; do not move the answer/media scroll position.
+      unawaited(
+        _entryTabsScroll.position.ensureVisible(
+          target,
+          alignment: 0.5,
+          duration: MediaQuery.disableAnimationsOf(context)
+              ? Duration.zero
+              : const Duration(milliseconds: 140),
+        ),
+      );
+    });
   }
 
   bool _sameHistory(ResponseHistory result) {
@@ -428,6 +461,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     _timer?.cancel();
     unawaited(_fileChanges?.cancel());
     _paneScroll.dispose();
+    _entryTabsScroll.dispose();
     _whiteboardFocus.dispose();
     _previewController.dispose();
     if (widget.reader == null && _publications == null) _reader.dispose();
@@ -1102,6 +1136,165 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
     },
   );
 
+  Future<void> _copyEntryText(String text, String message) async {
+    final path = _path;
+    setState(() => _entryCopyStatus = null);
+    try {
+      if (!await clipboardWriter.copy(text) || !mounted || path != _path) {
+        return;
+      }
+      setState(() => _entryCopyStatus = message);
+    } on ClipboardCopyException catch (error) {
+      if (mounted && path == _path) {
+        setState(() => _entryCopyStatus = error.toString());
+      }
+    }
+  }
+
+  void _copyDropPrompt(RecentContext session) => unawaited(
+    _copyEntryText(session.agentPrompt, 'Prompt copied. Paste to your agent.'),
+  );
+
+  void _openEntry(RecentContext session) {
+    _select(session);
+    if (session.localDrop && session.agentPrompt.isNotEmpty) {
+      _copyDropPrompt(session);
+    }
+  }
+
+  Widget? _dropCopyButton(RecentContext session) =>
+      session.localDrop && session.agentPrompt.isNotEmpty
+      ? PassiveTooltip(
+          message: 'Copy prompt for your agent',
+          child: IconButton(
+            key: ValueKey('whiteboard-drop-copy-${session.id}'),
+            icon: const Icon(Icons.copy_rounded, size: 15),
+            style: IconButton.styleFrom(
+              minimumSize: const Size(28, 28),
+              fixedSize: const Size(28, 28),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              padding: EdgeInsets.zero,
+            ),
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _copyDropPrompt(session),
+          ),
+        )
+      : null;
+
+  Widget _publishedTabs() {
+    final entries = _recent.take(4).toList(growable: false);
+    final retained = entries.map((entry) => entry.identityKey).toSet();
+    _entryTabKeys.removeWhere((id, _) => !retained.contains(id));
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width =
+            ((constraints.maxWidth - (entries.length - 1) * 6) / entries.length)
+                .clamp(128.0, 240.0)
+                .toDouble();
+        return SingleChildScrollView(
+          key: const ValueKey('whiteboard-published-tabs'),
+          controller: _entryTabsScroll,
+          scrollDirection: Axis.horizontal,
+          primary: false,
+          child: Row(
+            children: [
+              for (final (index, session) in entries.indexed) ...[
+                if (index > 0) const SizedBox(width: 6),
+                SizedBox(width: width, child: _publishedTab(session)),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _publishedTab(RecentContext session) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final selected = _selected?.identityKey == session.identityKey;
+    final title = _title(session);
+    final copyButton = _dropCopyButton(session);
+    return Semantics(
+      key: ValueKey('whiteboard-session-${session.id}'),
+      button: true,
+      selected: selected,
+      child: AnimatedContainer(
+        key: _entryTabKeys.putIfAbsent(session.identityKey, GlobalKey.new),
+        duration: const Duration(milliseconds: 150),
+        height: 36,
+        decoration: BoxDecoration(
+          color: selected
+              ? scheme.primary.withValues(alpha: 0.16)
+              : scheme.surfaceContainerLowest.withValues(alpha: 0.62),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(
+            color: selected
+                ? scheme.primary.withValues(alpha: 0.55)
+                : scheme.outlineVariant.withValues(alpha: 0.6),
+            width: 0.8,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: PassiveTooltip(
+                  message:
+                      '$title\n${session.localDrop ? 'Click to view and copy the agent prompt' : 'Click to view this published output'}',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(9),
+                    onTap: () => _openEntry(session),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 9),
+                      child: Row(
+                        children: [
+                          Icon(
+                            session.localDrop
+                                ? Icons.drive_folder_upload_outlined
+                                : Icons.article_outlined,
+                            size: 15,
+                            color: selected
+                                ? scheme.primary
+                                : scheme.onSurfaceVariant,
+                            semanticLabel: session.localDrop
+                                ? 'Drop'
+                                : 'Published output',
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: selected
+                                    ? scheme.onSurface
+                                    : scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (copyButton != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 3),
+                  child: Center(child: copyButton),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _sessions() {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -1155,7 +1348,8 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
                 ? 'Refreshing...'
                 : _recentError != null
                 ? 'Refresh unavailable'
-                : '${_recent.length} ${_pushMode ? 'published' : 'loaded'}',
+                : _entryCopyStatus ??
+                      '${_recent.length} ${_pushMode ? 'published' : 'loaded'}',
             busy: _recentBusy,
             refreshTip: _pushMode
                 ? 'Refresh whiteboard.md'
@@ -1170,8 +1364,7 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
                       onPressed: _path.trim().isEmpty
                           ? null
                           : () => unawaited(
-                              copyWithFeedback(
-                                context,
+                              _copyEntryText(
                                 whiteboardPublishPrompt(_path),
                                 'First prompt copied. Paste it to your agent.',
                               ),
@@ -1233,58 +1426,20 @@ class _WhiteboardPaneState extends State<WhiteboardPane>
                       ),
                     ),
                   ),
-                for (final session in _recent.take(
-                  _pushMode ? 4 : (_moreSessions ? 10 : 3),
-                ))
-                  RecentSessionCard(
-                    key: ValueKey('whiteboard-session-${session.id}'),
-                    session: session,
-                    badgeLabel: _pushMode
-                        ? (session.localDrop ? 'Drop' : 'WB')
-                        : null,
-                    compact: _pushMode,
-                    title: _title(session),
-                    color: scheme.primary,
-                    selected: _selected?.identityKey == session.identityKey,
-                    tip: session.localDrop
-                        ? 'Click to view and copy the agent prompt'
-                        : _pushMode
-                        ? 'Click to view this published output'
-                        : 'Click card to view the last response',
-                    onTap: () {
-                      _select(session);
-                      if (session.localDrop && session.agentPrompt.isNotEmpty) {
-                        unawaited(
-                          copyWithFeedback(
-                            context,
-                            session.agentPrompt,
-                            'Prompt copied. Paste to your agent.',
-                          ),
-                        );
-                      }
-                    },
-                    trailing:
-                        session.localDrop && session.agentPrompt.isNotEmpty
-                        ? PassiveTooltip(
-                            message: 'Copy prompt for your agent',
-                            child: IconButton(
-                              icon: const Icon(Icons.copy_rounded, size: 15),
-                              style: IconButton.styleFrom(
-                                minimumSize: const Size(28, 28),
-                                fixedSize: const Size(28, 28),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                padding: EdgeInsets.zero,
-                              ),
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () => copyWithFeedback(
-                                context,
-                                session.agentPrompt,
-                                'Prompt copied. Paste to your agent.',
-                              ),
-                            ),
-                          )
-                        : null,
-                  ),
+                if (_pushMode && _recent.isNotEmpty)
+                  _publishedTabs()
+                else
+                  for (final session in _recent.take(_moreSessions ? 10 : 3))
+                    RecentSessionCard(
+                      key: ValueKey('whiteboard-session-${session.id}'),
+                      session: session,
+                      title: _title(session),
+                      color: scheme.primary,
+                      selected: _selected?.identityKey == session.identityKey,
+                      tip: 'Click card to view the last response',
+                      onTap: () => _openEntry(session),
+                      trailing: _dropCopyButton(session),
+                    ),
               ],
             ),
           ),

@@ -120,124 +120,120 @@ class TerminalTabsCard extends StatelessWidget {
   }) {
     final scheme = Theme.of(context).colorScheme;
     final active = group == null || monitor!.isActive(group);
-    return Container(
-      key: group == null
-          ? const ValueKey('terminal-live-strip')
-          : ValueKey('terminal-group-${group.id}'),
-      padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest.withValues(
-          alpha: active ? 0.14 : 0.06,
-        ),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(11),
-        border: Border.all(
-          color: scheme.outlineVariant.withValues(alpha: active ? 0.7 : 0.4),
-          width: 0.7,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
+        onTap:
+            group == null ||
+                onOpen == null ||
+                monitor!.opening ||
+                group.members.isEmpty
+            ? null
+            : () => onOpen!(group, null),
+        child: Container(
+          key: group == null
+              ? const ValueKey('terminal-live-strip')
+              : ValueKey('terminal-group-${group.id}'),
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest.withValues(
+              alpha: active ? 0.14 : 0.06,
+            ),
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(
+                alpha: active ? 0.7 : 0.4,
+              ),
+              width: 0.7,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              PassiveTooltip(
-                message: 'Ubuntu',
-                child: CustomPaint(
-                  size: const Size(14, 14),
-                  painter: _UbuntuMark(scheme.onSurfaceVariant),
-                ),
-              ),
-              const SizedBox(width: 7),
-              Expanded(
-                child: GestureDetector(
-                  onDoubleTap: group == null
-                      ? null
-                      : () => _rename(context, group),
-                  child: Text(
-                    group?.name ?? 'Open tabs',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+              Row(
+                children: [
+                  PassiveTooltip(
+                    message: 'Ubuntu',
+                    child: CustomPaint(
+                      size: const Size(14, 14),
+                      painter: _UbuntuMark(scheme.onSurfaceVariant),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: GestureDetector(
+                      onDoubleTap: group == null
+                          ? null
+                          : () => _rename(context, group),
+                      child: Text(
+                        group?.name ?? 'Open tabs',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ),
+                  if (group != null) ...[
+                    Text(
+                      active ? 'Open' : 'Saved',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+                      ),
+                    ),
+                    const SizedBox(width: 3),
+                    PassiveTooltip(
+                      message: active
+                          ? 'Close Terminal window'
+                          : 'Delete saved group',
+                      child: IconButton(
+                        key: ValueKey('terminal-close-${group.id}'),
+                        constraints: const BoxConstraints.tightFor(
+                          width: 28,
+                          height: 28,
+                        ),
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: onClose == null || monitor!.opening
+                            ? null
+                            : () => onClose!(group),
+                        icon: const Icon(Icons.close_rounded, size: 15),
+                      ),
+                    ),
+                  ] else
+                    const SizedBox(height: 28),
+                ],
               ),
-              if (group != null) ...[
+              if (sessions.isEmpty)
                 Text(
-                  active ? 'Open' : 'Saved',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+                  'No coding sessions in this window.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
                   ),
+                )
+              else
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width = ((constraints.maxWidth - 18) / 4).clamp(
+                      0.0,
+                      104.0,
+                    );
+                    return Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final session in sessions)
+                          SizedBox(
+                            width: width,
+                            child: _item(context, session, group: group),
+                          ),
+                      ],
+                    );
+                  },
                 ),
-                const SizedBox(width: 3),
-                PassiveTooltip(
-                  message: 'Open missing tabs',
-                  child: IconButton(
-                    key: ValueKey('terminal-open-${group.id}'),
-                    constraints: const BoxConstraints.tightFor(
-                      width: 28,
-                      height: 28,
-                    ),
-                    padding: EdgeInsets.zero,
-                    visualDensity: VisualDensity.compact,
-                    onPressed:
-                        onOpen == null ||
-                            monitor!.opening ||
-                            group.members.isEmpty
-                        ? null
-                        : () => onOpen!(group, null),
-                    icon: const Icon(Icons.play_arrow_rounded, size: 17),
-                  ),
-                ),
-                PassiveTooltip(
-                  message: active
-                      ? 'Close Terminal window'
-                      : 'Delete saved group',
-                  child: IconButton(
-                    key: ValueKey('terminal-close-${group.id}'),
-                    constraints: const BoxConstraints.tightFor(
-                      width: 28,
-                      height: 28,
-                    ),
-                    padding: EdgeInsets.zero,
-                    visualDensity: VisualDensity.compact,
-                    onPressed: onClose == null || monitor!.opening
-                        ? null
-                        : () => onClose!(group),
-                    icon: const Icon(Icons.close_rounded, size: 15),
-                  ),
-                ),
-              ] else
-                const SizedBox(height: 28),
             ],
           ),
-          if (sessions.isEmpty)
-            Text(
-              'No coding sessions in this window.',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-            )
-          else
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final width = ((constraints.maxWidth - 18) / 4).clamp(
-                  0.0,
-                  104.0,
-                );
-                return Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final session in sessions)
-                      SizedBox(
-                        width: width,
-                        child: _item(context, session, group: group),
-                      ),
-                  ],
-                );
-              },
-            ),
-        ],
+        ),
       ),
     );
   }

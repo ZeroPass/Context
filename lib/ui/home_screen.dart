@@ -5,7 +5,6 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -14,18 +13,27 @@ import '../app/app_state.dart';
 import '../app/codex_reset.dart';
 import '../app/models.dart';
 import '../app/session_terminal.dart';
+import '../app/session_list.dart';
 import '../app/terminal_tabs.dart';
 import '../app/workspace_paths.dart';
 import 'copy_feedback.dart';
 import 'widgets/codex_account_card.dart';
+import 'widgets/codex_downgrade_button.dart';
 import 'widgets/whiteboard_workspace.dart';
 import 'widgets/whiteboard_pane.dart';
 import 'widgets/passive_tooltip.dart';
 import 'widgets/recent_sessions.dart';
 import 'widgets/terminal_tabs_card.dart';
 import 'widgets/add_session_dialog.dart';
+import 'widgets/one_step_picker.dart';
 
 enum _DeleteGroupMode { groupOnly, groupAndCards }
+
+const _sessionRowHeight = 38.0;
+const _sessionRowGap = 6.0;
+const _groupRowHeight = 36.0;
+const _groupEndHeight = 10.0;
+const _groupEndGap = 8.0;
 
 class _CodexWeeklyUsage {
   const _CodexWeeklyUsage({
@@ -47,100 +55,6 @@ class _CodexWeeklyUsage {
 }
 
 const _codexPaceTolerancePercent = 0.5;
-
-class _OneStepCupertinoPickerItem extends StatelessWidget {
-  const _OneStepCupertinoPickerItem({required this.child});
-
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final pickerState = context
-        .findAncestorStateOfType<_OneStepCupertinoPickerState>();
-    return Listener(
-      onPointerSignal: pickerState?._handlePointerSignal,
-      child: child,
-    );
-  }
-}
-
-class _OneStepCupertinoPicker extends StatefulWidget {
-  const _OneStepCupertinoPicker({
-    required this.controller,
-    required this.itemCount,
-    required this.child,
-  }) : assert(itemCount > 0);
-
-  final FixedExtentScrollController controller;
-  final int itemCount;
-  final Widget child;
-
-  @override
-  State<_OneStepCupertinoPicker> createState() =>
-      _OneStepCupertinoPickerState();
-}
-
-class _OneStepCupertinoPickerState extends State<_OneStepCupertinoPicker> {
-  int? _pendingWheelTarget;
-  PointerSignalEvent? _registeredWheelEvent;
-
-  void _handlePointerSignal(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent ||
-        event.scrollDelta.dy == 0 ||
-        !widget.controller.hasClients) {
-      return;
-    }
-    if (identical(_registeredWheelEvent, event)) {
-      return;
-    }
-
-    final currentItem = widget.controller.selectedItem;
-    final direction = event.scrollDelta.dy.sign.toInt();
-    final targetItem = (currentItem + direction)
-        .clamp(0, widget.itemCount - 1)
-        .toInt();
-    _pendingWheelTarget = targetItem;
-    _registeredWheelEvent = event;
-
-    GestureBinding.instance.pointerSignalResolver.register(event, (
-      resolvedEvent,
-    ) {
-      _registeredWheelEvent = null;
-      _pendingWheelTarget = null;
-      (resolvedEvent as PointerScrollEvent).respond(
-        allowPlatformDefault: false,
-      );
-      if (mounted && widget.controller.hasClients) {
-        widget.controller.jumpToItem(targetItem);
-      }
-    });
-  }
-
-  bool _handleScrollNotification(ScrollNotification notification) {
-    final targetItem = _pendingWheelTarget;
-    if (targetItem == null || notification is! ScrollUpdateNotification) {
-      return false;
-    }
-
-    _registeredWheelEvent = null;
-    _pendingWheelTarget = null;
-    if (widget.controller.hasClients) {
-      widget.controller.jumpToItem(targetItem);
-    }
-    return false;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return NotificationListener<ScrollNotification>(
-      onNotification: _handleScrollNotification,
-      child: Listener(
-        onPointerSignal: _handlePointerSignal,
-        child: widget.child,
-      ),
-    );
-  }
-}
 
 class _CodexWeeklyUsageBackgroundPainter extends CustomPainter {
   const _CodexWeeklyUsageBackgroundPainter({
@@ -690,7 +604,10 @@ enum _SessionAction { copy, terminal }
 class _HomeScreenState extends State<HomeScreen> {
   final _filterController = TextEditingController();
   final _filterFocus = FocusNode();
+  final _sessionsScrollController = ScrollController(keepScrollOffset: false);
   bool _terminalActionBusy = false;
+  bool _sessionsExpanded = false;
+  final _sessionsHeaderAnchor = GlobalKey();
 
   void _terminalNotice(String text) {
     if (!mounted) return;
@@ -1041,6 +958,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _filterController.dispose();
     _filterFocus.dispose();
+    _sessionsScrollController.dispose();
     super.dispose();
   }
 
@@ -1498,7 +1416,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: SizedBox(
                 height: 108,
-                child: _OneStepCupertinoPicker(
+                child: OneStepPicker(
                   controller: controller,
                   itemCount: values.length,
                   child: CupertinoPicker(
@@ -1521,7 +1439,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     useMagnifier: true,
                     children: [
                       for (final value in values)
-                        _OneStepCupertinoPickerItem(
+                        OneStepPickerItem(
                           child: Center(
                             child: Text(
                               '$value $unit',
@@ -2212,6 +2130,26 @@ class _HomeScreenState extends State<HomeScreen> {
                                 }
                               },
                       ),
+                    if (Theme.of(context).platform == TargetPlatform.windows)
+                      SwitchListTile(
+                        key: const ValueKey('terminal-startup-admin'),
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Ask for administrator at startup'),
+                        subtitle: const Text(
+                          'Ask before Context opens. Off: ask when using Terminal actions. Applies on the next launch.',
+                        ),
+                        value: state.askTerminalAdminAtStartup,
+                        onChanged: (value) async {
+                          try {
+                            await state.setAskTerminalAdminAtStartup(value);
+                            if (dialogContext.mounted) setDialogState(() {});
+                          } catch (error) {
+                            if (context.mounted) {
+                              await _showError(context, error);
+                            }
+                          }
+                        },
+                      ),
                     const Divider(height: 28),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -2348,26 +2286,39 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildCounterChip(
-    BuildContext context, {
-    required String label,
-    required String value,
-  }) {
+  Widget _buildSessionCounter(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    final total = state.sessionCount;
+    final count = state.hasFilter
+        ? '${state.filteredSessionIndices.length}/$total'
+        : '$total';
+    final counter = Container(
+      key: const ValueKey('sessions-count'),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: scheme.outlineVariant, width: 0.65),
       ),
       child: Text(
-        '$label $value',
+        count,
         style: Theme.of(context).textTheme.bodySmall?.copyWith(
           fontWeight: FontWeight.w600,
           color: scheme.onSurface,
         ),
+      ),
+    );
+    return _tooltip(
+      '$total sessions, ${state.groupCount} groups',
+      Badge(
+        key: const ValueKey('sessions-group-badge'),
+        backgroundColor: scheme.secondaryContainer,
+        textColor: scheme.onSecondaryContainer,
+        alignment: Alignment.topRight,
+        offset: const Offset(4, -4),
+        isLabelVisible: state.groupCount > 0,
+        label: Text('${state.groupCount}', style: const TextStyle(fontSize: 9)),
+        child: counter,
       ),
     );
   }
@@ -2381,13 +2332,23 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
     return TextField(
+      key: const ValueKey('context-filter'),
       controller: _filterController,
       focusNode: _filterFocus,
       onChanged: state.setFilterQuery,
+      style: Theme.of(context).textTheme.bodySmall,
       decoration: InputDecoration(
         isDense: true,
         hintText: 'Filter contexts',
-        prefixIcon: const Icon(Icons.search_rounded, size: 18),
+        prefixIcon: const Icon(Icons.search_rounded, size: 16),
+        prefixIconConstraints: const BoxConstraints(
+          minWidth: 28,
+          minHeight: 30,
+        ),
+        suffixIconConstraints: const BoxConstraints(
+          minWidth: 28,
+          minHeight: 30,
+        ),
         suffixIcon: state.filterQuery.isEmpty
             ? null
             : _tooltip(
@@ -2401,18 +2362,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                   icon: const Icon(
                     Icons.close_rounded,
-                    size: 18,
+                    size: 16,
                     semanticLabel: 'Clear filter',
                   ),
                   visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 28,
+                    minHeight: 30,
+                  ),
                 ),
               ),
         filled: true,
         fillColor: scheme.surfaceContainerLowest.withValues(alpha: 0.7),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 10,
-        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
           borderSide: BorderSide(color: scheme.outlineVariant, width: 0.7),
@@ -2462,8 +2425,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildPanelHeader(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
+      key: _sessionsHeaderAnchor,
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -2480,54 +2444,41 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Sessions',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                _buildCounterChip(
+          Row(
+            key: const ValueKey('sessions-header-row'),
+            children: [
+              Text(
+                'Sessions',
+                style: Theme.of(
                   context,
-                  label: 'Sessions',
-                  value: '${state.sessionCount}',
-                ),
-                const SizedBox(width: 8),
-                _buildCounterChip(
-                  context,
-                  label: 'Groups',
-                  value: '${state.groupCount}',
-                ),
-                if (state.hasFilter) ...[
-                  const SizedBox(width: 8),
-                  _buildCounterChip(
-                    context,
-                    label: 'Shown',
-                    value: '${state.filteredSessionIndices.length}',
+                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(width: 6),
+              _buildSessionCounter(context, state),
+              const SizedBox(width: 9),
+              FilledButton.tonalIcon(
+                key: const ValueKey('sessions-save'),
+                onPressed: state.busy || !state.dirty
+                    ? null
+                    : () => _save(context, state),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(68, 30),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
                   ),
-                ],
-                const SizedBox(width: 12),
-                Text(
-                  state.dirty ? 'Unsaved' : 'Saved',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  textStyle: Theme.of(context).textTheme.labelSmall,
+                  visualDensity: VisualDensity.compact,
                 ),
-                const SizedBox(width: 8),
-                FilledButton.icon(
-                  onPressed: state.busy || !state.dirty
-                      ? null
-                      : () => _save(context, state),
-                  icon: const Icon(Icons.save_outlined, size: 18),
-                  label: const Text('Save'),
+                icon: Icon(
+                  state.dirty ? Icons.save_outlined : Icons.check_rounded,
+                  size: 15,
                 ),
-              ],
-            ),
+                label: Text(state.dirty ? 'Save' : 'Saved'),
+              ),
+              const SizedBox(width: 8),
+              Expanded(child: _buildSearchField(context, state)),
+            ],
           ),
           SizedBox(
             key: const ValueKey('context-load-progress'),
@@ -2537,7 +2488,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ? const Center(child: LinearProgressIndicator(minHeight: 2))
                 : null,
           ),
-          _buildSearchField(context, state),
         ],
       ),
     );
@@ -2767,6 +2717,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       minHeight: 30,
                     ),
                   ),
+                ),
+                CodexDowngradeButton(
+                  controller: state.codexDowngrade,
+                  path: state.sessionsMarkdownPath,
+                  accounts: state.codexAccounts,
                 ),
                 if (hasConfiguredManualReset)
                   Tooltip(
@@ -4086,6 +4041,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 context,
               ).copyWith(scrollbars: false),
               child: CustomScrollView(
+                key: const ValueKey('context-scroll'),
                 controller: scrollController,
                 slivers: [
                   SliverToBoxAdapter(
@@ -4134,6 +4090,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             state.busy,
                             state.filterQuery,
                             state.openSessionsInTerminal,
+                            _sessionsExpanded,
                           ),
                           builder: (context, _, _) =>
                               _buildSessionSliver(context, state),
@@ -4221,6 +4178,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildSessionSliver(BuildContext context, AppState state) {
     final filteredSessionIndices = state.filteredSessionIndices;
+    final view = SessionListView(
+      state.items,
+      expanded: true,
+      matches: state.hasFilter ? filteredSessionIndices : null,
+    );
     if (state.hasFilter && filteredSessionIndices.isEmpty) {
       return const SliverToBoxAdapter(
         child: Padding(
@@ -4239,10 +4201,11 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
+    Widget list;
     if (state.hasFilter) {
-      return SliverList(
+      list = SliverList(
         delegate: SliverChildBuilderDelegate((context, filteredIndex) {
-          final actualIndex = filteredSessionIndices[filteredIndex];
+          final actualIndex = view.indices[filteredIndex];
           return _buildSessionCard(
             context,
             state,
@@ -4251,21 +4214,109 @@ class _HomeScreenState extends State<HomeScreen> {
             forceUngrouped: true,
             showDragHandle: false,
           );
-        }, childCount: filteredSessionIndices.length),
+        }, childCount: view.indices.length),
+      );
+    } else {
+      list = SliverReorderableList(
+        itemCount: view.indices.length,
+        onReorderItem: state.busy
+            ? (_, _) {}
+            : (oldIndex, adjustedIndex) {
+                state.reorderItems(
+                  view.indices[oldIndex],
+                  view.insertionIndex(oldIndex, adjustedIndex),
+                );
+              },
+        itemBuilder: (context, index) {
+          final actual = view.indices[index];
+          return _buildItem(context, state, state.items[actual], actual);
+        },
       );
     }
-    return SliverReorderableList(
-      itemCount: state.items.length,
-      onReorderItem: state.busy
-          ? (_, _) {}
-          : (oldIndex, adjustedIndex) {
-              final legacyIndex = adjustedIndex >= oldIndex
-                  ? adjustedIndex + 1
-                  : adjustedIndex;
-              state.reorderItems(oldIndex, legacyIndex);
-            },
-      itemBuilder: (context, index) =>
-          _buildItem(context, state, state.items[index], index),
+    if (!view.canExpand) return list;
+    if (!_sessionsExpanded) {
+      final compact = SessionListView(
+        state.items,
+        expanded: false,
+        matches: state.hasFilter ? filteredSessionIndices : null,
+      );
+      var previous = -1;
+      final height = compact.indices.fold<double>(0, (height, index) {
+        final item = state.items[index];
+        // A projected closing lip after hidden members is not a real row here.
+        if (item.isGroupEnd && index != previous + 1) return height;
+        previous = index;
+        if (item.isGroup) return height + _groupRowHeight;
+        if (item.isGroupEnd) {
+          return height +
+              _groupEndGap +
+              (state.groupForItem(index) == null ? 6 : _groupEndHeight);
+        }
+        return height +
+            _sessionRowHeight +
+            (!state.hasFilter && state.groupForItem(index) != null
+                ? 0
+                : _sessionRowGap);
+      });
+      // Keep ten rows' worth of space, not just ten rows of data. The inner
+      // scrollable handles the wheel; at its bounds Flutter falls back outward.
+      list = SliverToBoxAdapter(
+        child: SizedBox(
+          height: height,
+          child: Scrollbar(
+            controller: _sessionsScrollController,
+            child: CustomScrollView(
+              key: const ValueKey('sessions-scroll'),
+              controller: _sessionsScrollController,
+              primary: false,
+              slivers: [list],
+            ),
+          ),
+        ),
+      );
+    }
+    return SliverMainAxisGroup(
+      slivers: [
+        list,
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+            child: TextButton.icon(
+              key: const ValueKey('sessions-expand'),
+              onPressed: () {
+                setState(() {
+                  _sessionsExpanded = !_sessionsExpanded;
+                });
+                if (!_sessionsExpanded) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    final anchor = _sessionsHeaderAnchor.currentContext;
+                    if (mounted && anchor != null) {
+                      Scrollable.ensureVisible(
+                        anchor,
+                        duration: const Duration(milliseconds: 180),
+                        alignment: 0,
+                      );
+                    }
+                  });
+                }
+              },
+              icon: Icon(
+                _sessionsExpanded
+                    ? Icons.expand_less_rounded
+                    : Icons.expand_more_rounded,
+                size: 18,
+              ),
+              label: Text(
+                _sessionsExpanded ? 'Show less' : 'Show all ${view.total}',
+              ),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                minimumSize: const Size(0, 30),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -4369,7 +4420,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Container(
             width: 10,
-            height: 36,
+            height: _groupRowHeight,
             decoration: BoxDecoration(
               color: color,
               borderRadius: BorderRadius.only(
@@ -4380,7 +4431,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           Expanded(
             child: Container(
-              height: 36,
+              height: _groupRowHeight,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.only(
                   topRight: const Radius.circular(11),
@@ -4454,7 +4505,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final isLastInGroup = forceUngrouped
         ? true
         : state.isLastSessionInGroup(index);
-    final bottomSpacing = isGrouped ? 0.0 : 6.0;
+    final bottomSpacing = isGrouped ? 0.0 : _sessionRowGap;
     final borderRadius = isGrouped
         ? BorderRadius.vertical(
             top: Radius.circular(isFirstInGroup ? 0 : 0),
@@ -4468,10 +4519,14 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(
         children: [
           if (isGrouped)
-            Container(width: 10, height: 38, color: resolvedGroupColor),
+            Container(
+              width: 10,
+              height: _sessionRowHeight,
+              color: resolvedGroupColor,
+            ),
           Expanded(
             child: Container(
-              height: 38,
+              height: _sessionRowHeight,
               decoration: BoxDecoration(
                 border: Border.all(
                   color: isGrouped
@@ -4638,7 +4693,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (group == null) {
       return Container(
         key: ValueKey('group-end-${item.id}'),
-        margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        margin: const EdgeInsets.fromLTRB(12, 0, 12, _groupEndGap),
         height: 6,
       );
     }
@@ -4646,12 +4701,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final color = _colorFromHex(group.colorHex);
     return Container(
       key: ValueKey('group-end-${item.id}'),
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, _groupEndGap),
       child: Row(
         children: [
           Container(
             width: 10,
-            height: 10,
+            height: _groupEndHeight,
             decoration: BoxDecoration(
               color: color,
               borderRadius: const BorderRadius.only(
@@ -4661,7 +4716,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           Expanded(
             child: Container(
-              height: 10,
+              height: _groupEndHeight,
               decoration: BoxDecoration(
                 color: color.withValues(alpha: 0.10),
                 border: Border.all(

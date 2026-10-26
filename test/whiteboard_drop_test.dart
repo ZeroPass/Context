@@ -385,11 +385,22 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final tabY = tester
+          .getCenter(find.byKey(const ValueKey('whiteboard-session-drop-0')))
+          .dy;
       for (var i = 0; i < 4; i++) {
         final row = find.byKey(ValueKey('whiteboard-session-drop-$i'));
         expect(row, findsOneWidget);
         expect(tester.getSize(row).height, lessThanOrEqualTo(42));
+        expect(tester.getCenter(row).dy, tabY);
       }
+      await tester.tap(
+        find.byKey(const ValueKey('whiteboard-drop-copy-drop-2')),
+      );
+      await tester.pumpAndSettle();
+      expect(copied, 'Read `/drop-2/README.md`.');
+      expect(find.text('Material for drop-0'), findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
       await tester.tap(find.text('Drop item 1'));
       await tester.pumpAndSettle();
       expect(copied, 'Read `/drop-1/README.md`.');

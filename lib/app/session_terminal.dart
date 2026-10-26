@@ -124,6 +124,9 @@ class SessionTerminal {
   Future<void> restartElevated() =>
       sessionTerminalChannel.invokeMethod<void>('restartElevated');
 
+  Future<void> finishStartup() =>
+      sessionTerminalChannel.invokeMethod<void>('finishStartup');
+
   Future<void> closeWindow(String handle, String pid, String started) =>
       sessionTerminalChannel.invokeMethod<void>('closeWindow', [
         handle,

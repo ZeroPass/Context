@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:context/app/app_state.dart';
 import 'package:context/app/models.dart';
+import 'package:context/app/whiteboard.dart';
 import 'package:context/app/whiteboard_file.dart';
 import 'package:context/app/workspace_paths.dart';
 import 'package:context/ui/widgets/whiteboard_pane.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -33,8 +36,206 @@ class ExampleState extends AppState {
   }
 }
 
+class PublishedTabsReader extends FileWhiteboardReader {
+  final updates = StreamController<void>.broadcast();
+  List<RecentContext> entries = List.generate(
+    4,
+    (i) => RecentContext(
+      provider: SessionProvider.codex,
+      id: 'tab-$i',
+      title: 'Report $i with a deliberately long descriptive title',
+      updatedAt: 10 - i,
+    ),
+  );
+
+  @override
+  Stream<void> changes(String path) => updates.stream;
+
+  @override
+  Future<List<RecentContext>> recent(
+    String path,
+    SessionProvider provider,
+    int limit,
+  ) async => entries.take(limit).toList();
+
+  @override
+  Future<ResponseHistory> history(
+    String path,
+    RecentContext session,
+    int limit,
+  ) async => ResponseHistory(
+    [
+      SessionResponse(
+        text: 'Published body for ${session.id}',
+        timestamp: '',
+        turnId: session.id,
+      ),
+    ],
+    null,
+    false,
+  );
+
+  @override
+  void dispose() {
+    unawaited(updates.close());
+    super.dispose();
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(() async {
+    final manifest =
+        jsonDecode(await rootBundle.loadString('FontManifest.json')) as List;
+    for (final entry in manifest.cast<Map<String, dynamic>>()) {
+      final loader = FontLoader(entry['family'] as String);
+      for (final font
+          in (entry['fonts'] as List).cast<Map<String, dynamic>>()) {
+        loader.addFont(rootBundle.load(font['asset'] as String));
+      }
+      await loader.load();
+    }
+  });
+
+  Future<void> captureTabs(WidgetTester tester, double width) async {
+    final destination = Platform.environment['CONTEXT_UI_EVIDENCE_DIR'];
+    if (destination == null) return;
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byKey(const ValueKey('published-tabs-snapshot')),
+    );
+    await tester.runAsync(() async {
+      final image = await boundary.toImage();
+      try {
+        final data = await image.toByteData(format: ui.ImageByteFormat.png);
+        await File(
+          '$destination/published-tabs-${width.toInt()}.png',
+        ).writeAsBytes(data!.buffer.asUint8List());
+      } finally {
+        image.dispose();
+      }
+    });
+  }
+
+  Future<(AppState, PublishedTabsReader)> mountTabs(
+    WidgetTester tester, {
+    double width = 1000,
+  }) async {
+    tester.view.physicalSize = Size(width, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final state = AppState.forTesting(sendRequest: (_) {})
+      ..sessionsMarkdownPath = '/test/Context/sessions.md';
+    final reader = PublishedTabsReader();
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox());
+      reader.dispose();
+      state.dispose();
+    });
+    await tester.pumpWidget(
+      RepaintBoundary(
+        key: const ValueKey('published-tabs-snapshot'),
+        child: MaterialApp(
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFFB09C61),
+            ),
+            fontFamily: 'Oxanium',
+          ),
+          home: Scaffold(
+            body: WhiteboardPane(appState: state, reader: reader),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    return (state, reader);
+  }
+
+  Finder tab(String id) => find.byKey(ValueKey('whiteboard-session-$id'));
+  bool selected(WidgetTester tester, String id) =>
+      tester.widget<Semantics>(tab(id)).properties.selected!;
+
+  for (final width in [1000.0, 260.0]) {
+    testWidgets(
+      'published tabs stay on one line and select output at $width px',
+      (tester) async {
+        await mountTabs(tester, width: width);
+        final y = tester.getCenter(tab('tab-0')).dy;
+        for (var i = 0; i < 4; i++) {
+          expect(tester.getCenter(tab('tab-$i')).dy, y);
+          expect(tester.getSize(tab('tab-$i')).height, 36);
+          expect(selected(tester, 'tab-$i'), i == 0);
+          if (i > 0) {
+            expect(
+              tester.getRect(tab('tab-$i')).left,
+              greaterThan(tester.getRect(tab('tab-${i - 1}')).right),
+            );
+          }
+        }
+        expect(find.text('Published body for tab-0'), findsOneWidget);
+        final strip = find.byKey(const ValueKey('whiteboard-published-tabs'));
+        final scroll = tester.widget<SingleChildScrollView>(strip).controller!;
+        if (width < 500) {
+          expect(scroll.position.maxScrollExtent, greaterThan(0));
+          await tester.drag(strip, const Offset(-500, 0));
+          await tester.pumpAndSettle();
+          expect(scroll.offset, greaterThan(0));
+        } else {
+          expect(scroll.position.maxScrollExtent, 0);
+        }
+        await tester.tap(tab('tab-3'));
+        await tester.pumpAndSettle();
+        expect(find.text('Published body for tab-3'), findsOneWidget);
+        expect(selected(tester, 'tab-3'), isTrue);
+        expect(selected(tester, 'tab-0'), isFalse);
+        expect(tester.takeException(), isNull);
+        await captureTabs(tester, width);
+      },
+    );
+  }
+
+  testWidgets(
+    'published tabs retain pinning, follow new output and handle pruning',
+    (tester) async {
+      final (_, reader) = await mountTabs(tester, width: 260);
+      final strip = find.byKey(const ValueKey('whiteboard-published-tabs'));
+      await tester.drag(strip, const Offset(-500, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(tab('tab-2'));
+      await tester.pumpAndSettle();
+      final newEntry = RecentContext(
+        provider: SessionProvider.codex,
+        id: 'tab-new',
+        title: 'Newest published report',
+        updatedAt: 20,
+      );
+      reader.entries = [newEntry, ...reader.entries.take(3)];
+      reader.updates.add(null);
+      await tester.pumpAndSettle();
+      expect(find.text('Published body for tab-2'), findsOneWidget);
+      expect(selected(tester, 'tab-2'), isTrue);
+      expect(tab('tab-3'), findsNothing);
+
+      // Pruning the pinned entry falls back to the newest retained tab.
+      reader.entries = reader.entries.take(3).toList();
+      reader.updates.add(null);
+      await tester.pumpAndSettle();
+      expect(find.text('Published body for tab-new'), findsOneWidget);
+      expect(selected(tester, 'tab-new'), isTrue);
+      expect(tester.widget<SingleChildScrollView>(strip).controller!.offset, 0);
+      reader.entries = [];
+      reader.updates.add(null);
+      await tester.pumpAndSettle();
+      expect(strip, findsNothing);
+      expect(
+        find.text('No published entries yet. Ask an agent: wb.md'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   test('publishing prompt has the dynamic full location and no embedded rules', () {
     expect(
       whiteboardPublishPrompt('/home/alex/My Context/sessions.md'),

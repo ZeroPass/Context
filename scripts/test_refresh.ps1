@@ -22,6 +22,12 @@ New-Item -ItemType Directory -Force -Path $evidence, $work | Out-Null
 $reportPath = Join-Path $evidence "report.txt"
 if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force }
 $inputs = @(
+  "lib\app\startup.dart", "test\startup_test.dart",
+  "lib\app\session_list.dart", "test\session_list_test.dart",
+  "lib\app\codex_downgrade.dart", "lib\ui\widgets\codex_downgrade_button.dart",
+  "lib\ui\widgets\one_step_picker.dart", "test\codex_downgrade_timer_test.dart",
+  "test\codex_downgrade_test.dart", "native\hub\src\actors\codex_session_control.rs",
+  "scripts\codex-session-control.py", "test\test_codex_session_control.py",
   "lib\app\whiteboard_drop.dart", "lib\ui\widgets\whiteboard_drop_surface.dart", "test\whiteboard_drop_test.dart",
   "windows\runner\whiteboard_input.cpp", "windows\runner\whiteboard_input.h",
   "native\hub\src\actors\context.rs",
@@ -125,6 +131,10 @@ try {
   $formatFiles += @("lib/app/terminal_profiles.dart")
   $formatFiles += @("lib/app/workspace_window.dart", "test/workspace_window_test.dart")
   $formatFiles += @("lib/app/terminal_tabs.dart", "lib/ui/widgets/terminal_tabs_card.dart", "test/terminal_tabs_test.dart")
+  $formatFiles += @("lib/app/codex_downgrade.dart", "lib/ui/widgets/codex_downgrade_button.dart", "test/codex_downgrade_test.dart")
+  $formatFiles += @("lib/ui/widgets/one_step_picker.dart", "test/codex_downgrade_timer_test.dart")
+  $formatFiles += @("lib/main.dart", "lib/app/startup.dart", "test/startup_test.dart")
+  $formatFiles += @("lib/app/session_list.dart", "test/session_list_test.dart")
   Run-Check "dart-format" $dart (@("format", "--output=none", "--set-exit-if-changed") + $formatFiles)
 
   # Flutter's batch launcher needs an NTFS working directory, not a WSL UNC path.
@@ -144,6 +154,10 @@ try {
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
+    Run-Check "flutter-startup-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/startup_test.dart")
+    Run-Check "flutter-session-list-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_list_test.dart")
+    Run-Check "flutter-downgrade-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/codex_downgrade_test.dart")
+    Run-Check "flutter-downgrade-timer-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/codex_downgrade_timer_test.dart")
     Run-Check "flutter-drop-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_drop_test.dart")
     Run-Check "flutter-terminal-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_terminal_test.dart")
     Run-Check "flutter-workspace-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/workspace_window_test.dart")

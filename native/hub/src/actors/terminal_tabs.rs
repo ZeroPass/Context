@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const PROCESS_SCRIPT: &str = include_str!(concat!(
+pub(super) const PROCESS_SCRIPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../scripts/probe-terminal-sessions.py"
 ));
@@ -36,7 +36,7 @@ pub(super) async fn listen() {
     }
 }
 
-fn wsl_target(path: &str) -> Result<Option<(String, String)>> {
+pub(super) fn wsl_target(path: &str) -> Result<Option<(String, String)>> {
     let normalized = path.replace('\\', "/");
     if !normalized.starts_with("//") {
         return Ok(None);
@@ -78,7 +78,7 @@ fn read(path: &str) -> Result<serde_json::Value> {
     };
     let mut payload: serde_json::Value = serde_json::from_slice(&bounded_output(
         &mut command,
-        Some(PROCESS_SCRIPT.as_bytes()),
+        Some(PROCESS_SCRIPT.as_bytes().to_vec()),
     )?)?;
     // Enrich only providers actually running. Cached metadata reads share the
     // normal recent-session loader; no credentials or transcript bodies leave it.
@@ -136,7 +136,7 @@ fn read(path: &str) -> Result<serde_json::Value> {
     Ok(payload)
 }
 
-fn bounded_output(command: &mut Command, input: Option<&'static [u8]>) -> Result<Vec<u8>> {
+pub(super) fn bounded_output(command: &mut Command, input: Option<Vec<u8>>) -> Result<Vec<u8>> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -157,7 +157,7 @@ fn bounded_output(command: &mut Command, input: Option<&'static [u8]>) -> Result
             .take()
             .ok_or_else(|| anyhow!("No process input."))?;
         std::thread::spawn(move || {
-            let _ = stdin.write_all(input);
+            let _ = stdin.write_all(&input);
         });
     }
     let stdout = child
@@ -170,7 +170,7 @@ fn bounded_output(command: &mut Command, input: Option<&'static [u8]>) -> Result
         let result = stdout.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes);
         let _ = send.send(result.map(|_| bytes));
     });
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut captured = None;
     loop {
         if let Ok(result) = recv.try_recv() {

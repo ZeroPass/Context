@@ -1166,7 +1166,7 @@ void main() {
       await tester.pump();
       expect(find.text('Saved session'), findsNothing);
       expect(find.text('Renamed session'), findsOneWidget);
-      expect(find.text('Unsaved'), findsOneWidget);
+      expect(find.text('Save'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );

@@ -307,6 +307,29 @@ void main() {
   );
 
   test(
+    'startup administrator request defaults on and persists independently',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final state = AppState.forTesting(
+        sendRequest: (_) {},
+        preferences: prefs,
+      );
+      expect(state.askTerminalAdminAtStartup, isTrue);
+      expect(state.openSessionsInTerminal, isFalse);
+      await state.setAskTerminalAdminAtStartup(false);
+      final next = AppState.forTesting(sendRequest: (_) {}, preferences: prefs);
+      expect(next.askTerminalAdminAtStartup, isFalse);
+      expect(next.openSessionsInTerminal, isFalse);
+      await next.setAskTerminalAdminAtStartup(true);
+      expect(prefs.getBool('askTerminalAdminAtStartup'), isTrue);
+      expect(next.dirty, isFalse);
+      state.dispose();
+      next.dispose();
+    },
+  );
+
+  test(
     'missing Ubuntu profile never launches a generic Terminal tab',
     () async {
       final calls = <MethodCall>[];
