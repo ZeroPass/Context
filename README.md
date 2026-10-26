@@ -1,6 +1,6 @@
 # Context
 
-**Your coding sessions. Back in context.**
+**Manage your contexts**
 
 Working with coding agents means keeping track of more than code: which
 conversation belongs to which project, which Terminal tabs you had open, how
