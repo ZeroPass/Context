@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ENTRIES: usize = 6;
 const START: &str = "<!-- context:whiteboard:entry ";
 const HEADER_START: &str = "<!-- context:whiteboard:instructions:v1";
 const HEADER_END: &str = "<!-- context:whiteboard:header-end -->";
@@ -229,7 +230,8 @@ fn header(text: &str, path: &Path) -> String {
         && let Some(end) = text[start..].find(HEADER_END)
     {
         return format!("{}\n", &text[start..start + end + HEADER_END.len()])
-            .replace("than the newest three,", "than the newest four,");
+            .replace("than the newest three,", "than the newest six,")
+            .replace("than the newest four,", "than the newest six,");
     }
     let root = path.parent().unwrap_or_else(|| Path::new("."));
     let helper = if cfg!(windows) {
@@ -312,8 +314,8 @@ fn write_board(path: &Path, post: Option<Post>, init: bool) -> io::Result<usize>
     if let Some(post) = post {
         posts.push(post);
     }
-    let removed = if posts.len() > 4 {
-        posts.drain(..posts.len() - 4).collect::<Vec<_>>()
+    let removed = if posts.len() > MAX_ENTRIES {
+        posts.drain(..posts.len() - MAX_ENTRIES).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -459,6 +461,19 @@ mod tests {
         }
     }
     #[test]
+    fn legacy_header_limits_upgrade_without_losing_custom_instructions() {
+        let path = Path::new("/work/Context/whiteboard.md");
+        let current = header("", path).replace("Context Whiteboard -", "Custom instructions -");
+        for legacy in ["three", "four"] {
+            let old = current.replace(
+                "than the newest six,",
+                &format!("than the newest {legacy},"),
+            );
+            assert_eq!(header(&old, path), current);
+        }
+    }
+
+    #[test]
     fn append_cleans_all_surplus_debris_preserves_header_and_body() -> io::Result<()> {
         let root =
             std::env::temp_dir().join(format!("context-whiteboard-prune-{}", std::process::id()));
@@ -475,14 +490,14 @@ mod tests {
         }
         text.push_str("<!-- context:whiteboard:entry broken -->\nunfinished garbage");
         fs::write(&path, text)?;
-        assert_eq!(write_board(&path, Some(post(9)), false)?, 4);
+        assert_eq!(write_board(&path, Some(post(9)), false)?, MAX_ENTRIES);
         let text = bounded_read(&path)?;
         let entries = parse(&text);
         assert_eq!(
             entries.iter().map(|p| &p.metadata.id).collect::<Vec<_>>(),
-            ["6", "7", "8", "9"]
+            ["4", "5", "6", "7", "8", "9"]
         );
-        assert_eq!(entries[3].body, post(9).body);
+        assert_eq!(entries[MAX_ENTRIES - 1].body, post(9).body);
         assert!(text.contains("Custom instructions"));
         assert!(!text.contains("TRASH") && !text.contains("unfinished garbage"));
         fs::remove_dir_all(root)?;
@@ -535,10 +550,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         for handle in handles {
-            assert!((1..=4).contains(&handle.join().unwrap()?));
+            assert!((1..=MAX_ENTRIES).contains(&handle.join().unwrap()?));
         }
         let entries = parse(&bounded_read(&path)?);
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), MAX_ENTRIES);
         assert!(
             entries
                 .iter()
@@ -565,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn fifth_entry_removes_only_expired_drop_not_original_or_staging() -> io::Result<()> {
+    fn seventh_entry_removes_only_expired_drop_not_original_or_staging() -> io::Result<()> {
         let root =
             std::env::temp_dir().join(format!("context-drop-retention-{}", std::process::id()));
         fs::create_dir_all(&root)?;
@@ -574,7 +589,7 @@ mod tests {
         fs::write(&original, b"original")?;
         let staging = owned_drop(&root, "staging")?;
         let mut folders = Vec::new();
-        for id in 0..4 {
+        for id in 0..MAX_ENTRIES {
             let folder = format!("drop-{id}");
             folders.push(owned_drop(&root, &folder)?);
             let mut entry = post(id);
@@ -583,7 +598,7 @@ mod tests {
             write_board(&board, Some(entry), false)?;
         }
         assert!(folders.iter().all(|path| path.is_dir()));
-        write_board(&board, Some(post(4)), false)?;
+        write_board(&board, Some(post(MAX_ENTRIES)), false)?;
         assert!(!folders[0].exists());
         assert!(folders[1..].iter().all(|path| path.is_dir()));
         assert!(staging.join("clipboard.png").exists());
@@ -602,11 +617,11 @@ mod tests {
         entry.metadata.local_drop = true;
         entry.metadata.drop_folder = "drop-0".into();
         write_board(&board, Some(entry), false)?;
-        for id in 1..4 {
+        for id in 1..MAX_ENTRIES {
             write_board(&board, Some(post(id)), false)?;
         }
         let before = fs::read(&board)?;
-        let mut oversized = post(4);
+        let mut oversized = post(MAX_ENTRIES);
         oversized.body = "x".repeat(MAX_BYTES as usize);
         assert!(write_board(&board, Some(oversized), false).is_err());
         assert_eq!(fs::read(&board)?, before);
@@ -614,7 +629,7 @@ mod tests {
         // Unknown files are never deleted. Once the owner removes that file,
         // a later prune retries the retired folder even though its entry is gone.
         fs::write(folder.join("not-ours.txt"), "keep")?;
-        write_board(&board, Some(post(4)), false)?;
+        write_board(&board, Some(post(MAX_ENTRIES)), false)?;
         assert!(folder.join("README.md").exists());
         fs::remove_file(folder.join("not-ours.txt"))?;
         write_board(&board, None, false)?;

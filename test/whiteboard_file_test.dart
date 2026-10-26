@@ -38,8 +38,11 @@ class ExampleState extends AppState {
 
 class PublishedTabsReader extends FileWhiteboardReader {
   final updates = StreamController<void>.broadcast();
+  String? body;
+  int recentReads = 0;
+  Completer<List<RecentContext>>? pending;
   List<RecentContext> entries = List.generate(
-    4,
+    whiteboardSlotCount,
     (i) => RecentContext(
       provider: SessionProvider.codex,
       id: 'tab-$i',
@@ -56,7 +59,10 @@ class PublishedTabsReader extends FileWhiteboardReader {
     String path,
     SessionProvider provider,
     int limit,
-  ) async => entries.take(limit).toList();
+  ) async {
+    recentReads++;
+    return pending?.future ?? entries.take(limit).toList();
+  }
 
   @override
   Future<ResponseHistory> history(
@@ -66,7 +72,7 @@ class PublishedTabsReader extends FileWhiteboardReader {
   ) async => ResponseHistory(
     [
       SessionResponse(
-        text: 'Published body for ${session.id}',
+        text: body ?? 'Published body for ${session.id}',
         timestamp: '',
         turnId: session.id,
       ),
@@ -97,7 +103,11 @@ void main() {
     }
   });
 
-  Future<void> captureTabs(WidgetTester tester, double width) async {
+  Future<void> captureTabs(
+    WidgetTester tester,
+    double width, {
+    String suffix = '',
+  }) async {
     final destination = Platform.environment['CONTEXT_UI_EVIDENCE_DIR'];
     if (destination == null) return;
     final boundary = tester.renderObject<RenderRepaintBoundary>(
@@ -108,7 +118,7 @@ void main() {
       try {
         final data = await image.toByteData(format: ui.ImageByteFormat.png);
         await File(
-          '$destination/published-tabs-${width.toInt()}.png',
+          '$destination/published-tabs-${width.toInt()}$suffix.png',
         ).writeAsBytes(data!.buffer.asUint8List());
       } finally {
         image.dispose();
@@ -119,6 +129,7 @@ void main() {
   Future<(AppState, PublishedTabsReader)> mountTabs(
     WidgetTester tester, {
     double width = 1000,
+    PublishedTabsReader? source,
   }) async {
     tester.view.physicalSize = Size(width, 700);
     tester.view.devicePixelRatio = 1;
@@ -126,7 +137,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final state = AppState.forTesting(sendRequest: (_) {})
       ..sessionsMarkdownPath = '/test/Context/sessions.md';
-    final reader = PublishedTabsReader();
+    final reader = source ?? PublishedTabsReader();
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox());
       reader.dispose();
@@ -158,37 +169,70 @@ void main() {
 
   for (final width in [1000.0, 260.0]) {
     testWidgets(
-      'published tabs stay on one line and select output at $width px',
+      'six shorter tabs taper in one top row and stay clickable at $width px',
       (tester) async {
         await mountTabs(tester, width: width);
+        expect(find.text('Published entries'), findsNothing);
+        expect(find.text('6 published'), findsNothing);
         final y = tester.getCenter(tab('tab-0')).dy;
-        for (var i = 0; i < 4; i++) {
+        for (var i = 0; i < whiteboardSlotCount; i++) {
           expect(tester.getCenter(tab('tab-$i')).dy, y);
-          expect(tester.getSize(tab('tab-$i')).height, 36);
+          expect(tester.getSize(tab('tab-$i')).height, 30);
           expect(selected(tester, 'tab-$i'), i == 0);
           if (i > 0) {
             expect(
               tester.getRect(tab('tab-$i')).left,
               greaterThan(tester.getRect(tab('tab-${i - 1}')).right),
             );
+            expect(
+              tester.getSize(tab('tab-$i')).width,
+              lessThan(tester.getSize(tab('tab-${i - 1}')).width),
+            );
           }
         }
         expect(find.text('Published body for tab-0'), findsOneWidget);
+        expect(
+          tester.getRect(tab('tab-0')).bottom,
+          lessThan(tester.getRect(find.text('Published body for tab-0')).top),
+        );
+        final fade = find.byKey(const ValueKey('whiteboard-aging-tab-5'));
+        expect(tester.widget<ShaderMask>(fade).blendMode, BlendMode.dstIn);
+        await captureTabs(tester, width, suffix: '-latest');
         final strip = find.byKey(const ValueKey('whiteboard-published-tabs'));
+        final toolbar = find.byKey(
+          const ValueKey('whiteboard-publication-toolbar'),
+        );
+        final copy = find.byKey(const ValueKey('whiteboard-copy-prompt'));
+        final refresh = find.byKey(
+          const ValueKey('whiteboard-publication-refresh'),
+        );
+        expect(tester.getSize(toolbar).height, 30);
+        for (final action in [copy, refresh]) {
+          expect(tester.getCenter(action).dy, closeTo(y, 0.1));
+          expect(
+            tester.getRect(action).left,
+            greaterThan(tester.getRect(strip).right),
+          );
+          expect(action.hitTestable(), findsOneWidget);
+        }
+        final copyRect = tester.getRect(copy);
+        final refreshRect = tester.getRect(refresh);
         final scroll = tester.widget<SingleChildScrollView>(strip).controller!;
         if (width < 500) {
           expect(scroll.position.maxScrollExtent, greaterThan(0));
-          await tester.drag(strip, const Offset(-500, 0));
+          await tester.drag(strip, const Offset(-900, 0));
           await tester.pumpAndSettle();
           expect(scroll.offset, greaterThan(0));
         } else {
           expect(scroll.position.maxScrollExtent, 0);
         }
-        await tester.tap(tab('tab-3'));
+        await tester.tap(tab('tab-5'));
         await tester.pumpAndSettle();
-        expect(find.text('Published body for tab-3'), findsOneWidget);
-        expect(selected(tester, 'tab-3'), isTrue);
+        expect(find.text('Published body for tab-5'), findsOneWidget);
+        expect(selected(tester, 'tab-5'), isTrue);
         expect(selected(tester, 'tab-0'), isFalse);
+        expect(tester.getRect(copy), copyRect);
+        expect(tester.getRect(refresh), refreshRect);
         expect(tester.takeException(), isNull);
         await captureTabs(tester, width);
       },
@@ -200,9 +244,9 @@ void main() {
     (tester) async {
       final (_, reader) = await mountTabs(tester, width: 260);
       final strip = find.byKey(const ValueKey('whiteboard-published-tabs'));
-      await tester.drag(strip, const Offset(-500, 0));
+      await tester.drag(strip, const Offset(-900, 0));
       await tester.pumpAndSettle();
-      await tester.tap(tab('tab-2'));
+      await tester.tap(tab('tab-4'));
       await tester.pumpAndSettle();
       final newEntry = RecentContext(
         provider: SessionProvider.codex,
@@ -210,15 +254,15 @@ void main() {
         title: 'Newest published report',
         updatedAt: 20,
       );
-      reader.entries = [newEntry, ...reader.entries.take(3)];
+      reader.entries = [newEntry, ...reader.entries.take(5)];
       reader.updates.add(null);
       await tester.pumpAndSettle();
-      expect(find.text('Published body for tab-2'), findsOneWidget);
-      expect(selected(tester, 'tab-2'), isTrue);
-      expect(tab('tab-3'), findsNothing);
+      expect(find.text('Published body for tab-4'), findsOneWidget);
+      expect(selected(tester, 'tab-4'), isTrue);
+      expect(tab('tab-5'), findsNothing);
 
       // Pruning the pinned entry falls back to the newest retained tab.
-      reader.entries = reader.entries.take(3).toList();
+      reader.entries = reader.entries.take(5).toList();
       reader.updates.add(null);
       await tester.pumpAndSettle();
       expect(find.text('Published body for tab-new'), findsOneWidget);
@@ -235,6 +279,71 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets(
+    'toolbar refresh keeps its size and actions fixed while loading',
+    (tester) async {
+      final (_, reader) = await mountTabs(tester);
+      final toolbar = find.byKey(
+        const ValueKey('whiteboard-publication-toolbar'),
+      );
+      final refresh = find.byKey(
+        const ValueKey('whiteboard-publication-refresh'),
+      );
+      final copy = find.byKey(const ValueKey('whiteboard-copy-prompt'));
+      final rect = tester.getRect(toolbar);
+      final refreshRect = tester.getRect(refresh);
+      final reads = reader.recentReads;
+      reader.pending = Completer<List<RecentContext>>();
+      await tester.tap(refresh);
+      await tester.pump();
+      expect(reader.recentReads, reads + 1);
+      expect(tester.widget<IconButton>(refresh).onPressed, isNull);
+      expect(tester.widget<IconButton>(copy).onPressed, isNotNull);
+      expect(tester.getRect(toolbar), rect);
+      expect(tester.getRect(refresh), refreshRect);
+      expect(
+        find.descendant(
+          of: refresh,
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsOneWidget,
+      );
+      reader.pending!.complete(reader.entries);
+      reader.pending = null;
+      await tester.pumpAndSettle();
+      expect(tester.widget<IconButton>(refresh).onPressed, isNotNull);
+      expect(tester.getRect(toolbar), rect);
+      expect(tester.getRect(refresh), refreshRect);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('top publication strip stays fixed while a long output scrolls', (
+    tester,
+  ) async {
+    final reader = PublishedTabsReader()
+      ..body = List.generate(80, (i) => 'Report paragraph $i.').join('\n\n');
+    await mountTabs(tester, source: reader);
+    final strip = find.byKey(const ValueKey('whiteboard-published-tabs'));
+    final scroll = tester
+        .widget<SingleChildScrollView>(
+          find.byKey(const ValueKey('whiteboard-scroll')),
+        )
+        .controller!;
+    final top = tester.getRect(strip).top;
+    expect(top, lessThan(100));
+    expect(scroll.position.maxScrollExtent, greaterThan(0));
+    scroll.jumpTo(scroll.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    expect(tester.getRect(strip).top, top);
+    expect(tab('tab-5').hitTestable(), findsOneWidget);
+    await tester.tap(tab('tab-5'));
+    await tester.pumpAndSettle();
+    expect(selected(tester, 'tab-5'), isTrue);
+    expect(scroll.offset, 0);
+    expect(tester.takeException(), isNull);
+  });
 
   test('publishing prompt has the dynamic full location and no embedded rules', () {
     expect(
@@ -266,7 +375,7 @@ void main() {
     );
   });
   test(
-    'parser keeps newest four and ignores debris without changing Markdown',
+    'parser keeps newest six and ignores debris without changing Markdown',
     () {
       final body = '# Full output\n\n[notes](notes.md)\n\n```text\n---\n```\n';
       final entries = List.generate(
@@ -277,7 +386,14 @@ void main() {
           '<!-- instructions -->\n$entries'
           '<!-- context:whiteboard:entry broken -->\nunfinished';
       final posts = parseWhiteboard(text);
-      expect(posts.map((p) => p.id), ['post-7', 'post-6', 'post-5', 'post-4']);
+      expect(posts.map((p) => p.id), [
+        'post-7',
+        'post-6',
+        'post-5',
+        'post-4',
+        'post-3',
+        'post-2',
+      ]);
       expect(posts.every((p) => p.body == body), isTrue);
       expect(parseWhiteboard(entry(1) + entry(2) + entry(1)).map((p) => p.id), [
         'post-1',
@@ -432,16 +548,29 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 30));
     }
-    expect(find.text('Published entries'), findsOneWidget);
+    expect(find.text('Published entries'), findsNothing);
     final copyPrompt = find.byKey(const ValueKey('whiteboard-copy-prompt'));
     expect(copyPrompt, findsOneWidget);
     await tester.tap(copyPrompt);
     await tester.pump(const Duration(milliseconds: 300));
     expect(clipboard, whiteboardPublishPrompt(state.sessionsMarkdownPath));
     expect(
-      find.text('First prompt copied. Paste it to your agent.'),
+      tester
+          .widget<Semantics>(
+            find.byKey(const ValueKey('whiteboard-copy-feedback')),
+          )
+          .properties
+          .label,
+      contains('First prompt copied. Paste it to your agent.'),
+    );
+    expect(
+      find.descendant(
+        of: copyPrompt,
+        matching: find.byIcon(Icons.check_rounded),
+      ),
       findsOneWidget,
     );
+    expect(find.byType(SnackBar), findsNothing);
     expect(find.text('Output 2'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
     expect(find.text('Last 3'), findsNothing);

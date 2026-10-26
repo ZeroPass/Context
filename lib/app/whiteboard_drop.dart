@@ -175,7 +175,7 @@ class WhiteboardDrop {
       'Ask if the intended task is unclear. Originals are referenced, not moved.\n\n',
     );
     instructions.writeln(
-      'Temporary drop: removed when it leaves the newest four Whiteboard entries.\n',
+      'Temporary drop: removed when it leaves the newest six Whiteboard entries.\n',
     );
     for (final path in files) {
       instructions.writeln('- `${agentPath(path)}`');

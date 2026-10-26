@@ -8,6 +8,7 @@ import 'whiteboard.dart';
 import 'workspace_paths.dart';
 
 const _maxWhiteboardBytes = 8 * 1024 * 1024;
+const whiteboardSlotCount = 6;
 const _entryStart = '<!-- context:whiteboard:entry ';
 
 class WhiteboardPost {
@@ -68,13 +69,13 @@ List<WhiteboardPost> parseWhiteboard(String text) {
       );
       posts.remove(id);
       posts[id] = post;
-      if (posts.length > 4) posts.remove(posts.keys.first);
+      if (posts.length > whiteboardSlotCount) posts.remove(posts.keys.first);
       cursor = end + endMarker.length;
     } on Object {
       // Ignore malformed/orphaned entries; the publisher cleans them on its next write.
     }
   }
-  return posts.values.toList().reversed.take(4).toList();
+  return posts.values.toList().reversed.take(whiteboardSlotCount).toList();
 }
 
 typedef _Stamp = (FileSystemEntityType, int, DateTime, DateTime);

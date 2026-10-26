@@ -231,7 +231,7 @@ HTML comments at its beginning instruct agents. The local workspace `AGENTS.md`
 points to it: `wb.md` alone means publish the preceding completed answer. Only
 the requested final Markdown goes there, not thinking or tool traces.
 
-The **Copy first prompt** icon beside **Published entries** copies a short first-contact prompt
+The **Copy first prompt** icon at the right of the Whiteboard tabs copies a short first-contact prompt
 with the full active Whiteboard path. WSL locations include both Linux and
 Windows paths; the detailed publishing rules stay in the file's header.
 Paste it to an agent the first time to introduce your Whiteboard.
@@ -250,8 +250,8 @@ when needed (Rust 1.89+) and defaults to this project's `whiteboard.md`. Windows
 agents can pipe output into `scripts/publish-whiteboard.ps1 -Title Report -Provider
 codex`. The APPX also bundles `context-whiteboard.exe` for direct use with `--file`.
 The helper records the time/working directory, serializes writers with an atomic
-lock-directory claim (shared by Windows and WSL), and publishes the newest four entries. It removes **all**
-surplus older entries and unframed debris, not merely the fifth entry. Surviving
+lock-directory claim (shared by Windows and WSL), and publishes the newest six entries. It removes **all**
+surplus older entries and unframed debris, not merely the seventh entry. Surviving
 output and the instruction header are preserved. `--init` creates the header if
 missing; `--prune` cleans without adding output. Input/files are capped at 8 MiB;
 oversized input fails without replacing the board. Live files and locks/temp
@@ -261,13 +261,16 @@ If a publisher is forcibly killed, `.whiteboard-write.lock` may remain. The help
 fails closed rather than stealing it. Remove that empty directory only after
 confirming no publisher is running. Normal completion and errors release it.
 
-Whiteboard has one scroll area for previews, outputs, and published entries;
-sections use their content height instead of fixed viewport fractions. Embedded
+Whiteboard keeps its publication strip at the top, above one scroll area for
+previews and outputs. Content uses its natural height instead of fixed viewport fractions. Embedded
 previews grow with their content, up to a square matching the pane's width.
 Long Markdown documents scroll inside that cap; app-wide expansion is unchanged.
-It shows at most four published entries as compact tabs on one horizontal line,
-with the selected tab highlighted, and automatically opens the newest. Narrow
-panes scroll the tabs sideways instead of wrapping them into extra rows.
+It shows at most six published entries as slim, 30-pixel-high tabs on one horizontal
+line. Newer tabs are wider, each older tab is narrower, and the oldest has a
+feathered right edge to suggest it will drop off. Selecting it softens that fade
+so its content stays readable and all controls remain clickable. The selected tab
+is highlighted, and the newest opens automatically. Narrow panes scroll the tabs
+sideways instead of wrapping them into extra rows.
 Selecting an older entry pins it while publications arrive; a pruned entry cannot
 remain selected. The right pane has no provider tabs, session-log pulls, expansion
 to ten, or per-session Last 3 control. Context's provider tabs and recents on the
@@ -278,18 +281,20 @@ Drag files, folders, or text onto the Whiteboard pane, or focus it and press
 overlay marks the target. Each submission becomes a silent **Drop** entry;
 clicking it opens the output and copies a minimal `Read <README path>` prompt
 for your agent. A small copy icon also copies that prompt without changing views.
-Entry and first-prompt copy feedback appears in the section header, keeping
-the tab row clickable instead of covering it with a notification.
+The top bar contains only tabs, with copy and refresh icons fixed at their right;
+there is no repeated section heading or publication counter. Entry and first-prompt
+copy feedback appears on the copy icon and its tooltip, with a screen-reader
+announcement, so it neither adds another row nor covers the tabs.
 Existing files are referenced in place (no video copies or folder scans), so
 keep them at that location. Clipboard images/text and a short README are stored
 in private temporary `whiteboard-drops/` beside the active `whiteboard.md`. WSL agents get
 Linux paths, including `/mnt/<drive>` for Windows files. After a successful
 publication, the helper deletes Context-owned temporary folders for entries
-older than the newest four. This also applies when an agent publishes while
+older than the newest six. This also applies when an agent publishes while
 Context is closed. Original referenced files are never deleted; staged/unpublished
 drops, unmarked folders, and links are left alone. Locked temporary files are
 retried on a later publish/prune, without an extra background timer. Prompts for
-entries that have left the four slots expire with their temporary README.
+entries that have left the six slots expire with their temporary README.
 These local drops never trigger a Windows notification. Typing fields keep
 normal paste behavior. Windows may block Explorer drag/drop into an elevated
 Context window; Ctrl+V is the alternative, without weakening UAC protections.

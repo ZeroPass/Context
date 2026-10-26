@@ -28,6 +28,7 @@ class PublicationReader extends FileWhiteboardReader {
   bool closed = false;
   int reads = 0;
   int watches = 0;
+  int? lastLimit;
 
   @override
   Stream<void> changes(String markdownPath) {
@@ -42,8 +43,9 @@ class PublicationReader extends FileWhiteboardReader {
     int limit,
   ) async {
     reads++;
+    lastLimit = limit;
     if (fail) throw const FileSystemException('fixture unavailable');
-    return pending?.future ?? posts;
+    return pending?.future ?? posts.take(limit).toList();
   }
 
   @override
@@ -89,6 +91,26 @@ String framed(String id) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'publication monitor requests and delivers all six retained slots',
+    () async {
+      final reader = PublicationReader();
+      final delivered = <String>[];
+      final monitor = WhiteboardPublications(
+        reader: reader,
+        notify: (item) async => delivered.add(item.id),
+      );
+      addTearDown(monitor.dispose);
+      monitor.follow('/work/sessions.md');
+      await settle();
+      reader.posts = List.generate(6, (i) => post('new-$i'));
+      reader.events.add(null);
+      await settle();
+      expect(reader.lastLimit, whiteboardSlotCount);
+      expect(delivered, ['new-5', 'new-4', 'new-3', 'new-2', 'new-1', 'new-0']);
+    },
+  );
 
   test(
     'local drops are silent while adjacent agent outputs still notify',

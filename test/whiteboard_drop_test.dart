@@ -22,7 +22,7 @@ class DropReader extends FileWhiteboardReader {
     SessionProvider provider,
     int limit,
   ) async => List.generate(
-    4,
+    whiteboardSlotCount,
     (i) => RecentContext(
       provider: SessionProvider.codex,
       id: 'drop-$i',
@@ -346,7 +346,7 @@ void main() {
   });
 
   testWidgets(
-    'four slim drops copy prompts; Ctrl+V stays out of editable fields',
+    'six slim drop tabs copy prompts; Ctrl+V stays out of editable fields',
     (tester) async {
       var copied = '';
       var pastes = 0;
@@ -388,10 +388,10 @@ void main() {
       final tabY = tester
           .getCenter(find.byKey(const ValueKey('whiteboard-session-drop-0')))
           .dy;
-      for (var i = 0; i < 4; i++) {
+      for (var i = 0; i < whiteboardSlotCount; i++) {
         final row = find.byKey(ValueKey('whiteboard-session-drop-$i'));
         expect(row, findsOneWidget);
-        expect(tester.getSize(row).height, lessThanOrEqualTo(42));
+        expect(tester.getSize(row).height, 30);
         expect(tester.getCenter(row).dy, tabY);
       }
       await tester.tap(

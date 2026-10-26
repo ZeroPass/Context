@@ -77,7 +77,11 @@ class WhiteboardPublications {
     try {
       do {
         _repeat = false;
-        final posts = await reader.recent(_path, SessionProvider.codex, 4);
+        final posts = await reader.recent(
+          _path,
+          SessionProvider.codex,
+          whiteboardSlotCount,
+        );
         if (_disposed || generation != _generation) return;
         final fresh = posts.where((post) => !_seen.contains(post.id)).toList();
         for (final post in posts.reversed) {
