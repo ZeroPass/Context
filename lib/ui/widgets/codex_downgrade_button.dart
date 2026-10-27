@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/codex_downgrade.dart';
 import '../../app/models.dart';
+import '../copy_feedback.dart';
 import 'passive_tooltip.dart';
 import 'one_step_picker.dart';
 
@@ -32,10 +33,19 @@ class CodexDowngradeButton extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: controller,
     builder: (context, _) => PassiveTooltip(
-      message: controller.status ?? 'Downgrade active Codex tabs once',
+      message:
+          controller.status ??
+          (controller.defaultsOnly
+              ? 'Set Claude defaults once after a reset or timer'
+              : 'Downgrade active Codex tabs once'),
       child: IconButton(
-        key: const ValueKey('codex-reset-downgrade'),
-        onPressed: controller.busy
+        key: ValueKey(
+          controller.defaultsOnly
+              ? 'claude-reset-downgrade'
+              : 'codex-reset-downgrade',
+        ),
+        onPressed:
+            controller.busy || (controller.defaultsOnly && accounts.isEmpty)
             ? null
             : () => showCodexDowngradeDialog(
                 context,
@@ -150,7 +160,7 @@ class _DowngradeDialogState extends State<_DowngradeDialog> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('All active Codex tabs.'),
+                  Text(widget.controller.scopeLabel),
                   const SizedBox(height: 12),
                   SegmentedButton<CodexDowngradeTrigger>(
                     key: const ValueKey('downgrade-trigger'),
@@ -176,7 +186,7 @@ class _DowngradeDialogState extends State<_DowngradeDialog> {
                   ),
                   const SizedBox(height: 8),
                   if (_trigger == CodexDowngradeTrigger.reset)
-                    const Text('When the active account returns to 100% left.')
+                    Text(widget.controller.resetLabel)
                   else ...[
                     Text(
                       'After arming',
@@ -236,7 +246,7 @@ class _DowngradeDialogState extends State<_DowngradeDialog> {
                     const LinearProgressIndicator(minHeight: 2)
                   else if (snapshot.hasError)
                     Text(
-                      'Could not read models from the running Codex daemon. ${snapshot.error}',
+                      'Could not read ${widget.controller.providerLabel} models. ${snapshot.error}',
                     )
                   else ...[
                     DropdownButtonFormField<String>(
@@ -293,6 +303,31 @@ class _DowngradeDialogState extends State<_DowngradeDialog> {
                     ),
                     const SizedBox(height: 12),
                     const Text('Fast off'),
+                    if (widget.controller.defaultsOnly) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'For running tabs (one command at a time):',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      for (final command in [
+                        '/model $_model',
+                        '/effort $_effort',
+                        '/fast off',
+                      ])
+                        TextButton.icon(
+                          onPressed: () => copyWithFeedback(
+                            context,
+                            command,
+                            'Command copied.',
+                          ),
+                          icon: const Icon(Icons.copy_rounded, size: 14),
+                          label: Text(command),
+                          style: TextButton.styleFrom(
+                            alignment: Alignment.centerLeft,
+                            textStyle: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                    ],
                   ],
                   if (widget.controller.status != null) ...[
                     const SizedBox(height: 12),

@@ -18,7 +18,8 @@ class CodexSessionControlClient {
   final CodexControlRequest? _override;
   StreamSubscription<RustSignalPack<CodexSessionControlResult>>? _subscription;
   final _pending = <Uint64, Completer<Map<String, dynamic>>>{};
-  BigInt _serial = BigInt.one;
+  // Results share one broadcast channel across provider clients.
+  static BigInt _serial = BigInt.one;
   bool _disposed = false;
 
   Future<Map<String, dynamic>> request(

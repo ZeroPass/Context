@@ -2,8 +2,8 @@
 
 **Manage your contexts**
 
-A Windows desktop app for organizing coding-agent sessions, managing Codex
-accounts, and sharing outputs and files through a local Whiteboard.
+A Windows desktop app for organizing coding-agent sessions, tracking account
+usage and pace, and sharing outputs and files through a local Whiteboard.
 
 Supports **Codex, Claude Code, Kimi Code, OpenCode, Qwen Code, Muse, and ZCode**.
 Session data comes from the agents' local stores. Terminal integration uses WSL.
@@ -37,7 +37,9 @@ administrator approval once for a small Terminal helper, while the UI stays at
 normal rights so Explorer drag/drop works. The helper exits with Context; no
 service is installed. Startup approval is configurable.
 
-## Codex Accounts
+## Accounts
+
+Account usage, reset times, pacing, and one-shot downgrades where supported.
 
 Save the current Codex sign-in under a name, then switch between saved accounts
 from their cards. Each card shows usage, reset time, and pace relative to the
@@ -48,7 +50,10 @@ can be edited or removed and expires automatically. Usage refreshes every 30 sec
 
 The one-shot downgrade control applies a selected model and thinking level
 after a quota reset or a delay in hours. Fast mode is turned off when it runs.
-Account switching and pacing are Codex-specific.
+
+Claude reads the current login's weekly and five-hour limits. Its downgrade
+saves defaults for new or resumed sessions; running tabs are unchanged.
+See the [guide](docs/GUIDE.md) for provider-specific behavior.
 
 ## Whiteboard
 

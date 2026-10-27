@@ -4,7 +4,9 @@
 
 Usage details and developer reference for the published app. Run commands from the repository root unless stated otherwise.
 
-Context session manager for Codex, Claude Code, Kimi Code, OpenCode, Qwen Code, Muse, and ZCode. Offers account switching and pacing on Codex as well.
+Context session manager for Codex, Claude Code, Kimi Code, OpenCode, Qwen Code,
+Muse, and ZCode. Includes usage and pacing for Codex and Claude, plus saved-account
+switching for Codex.
 
 - Flutter (UI)
 - Rust (backend) via [Rinf](https://pub.dev/packages/rinf)
@@ -95,12 +97,41 @@ for unique title matches. The approved Terminal helper reads elevated window
 labels while Context's UI stays at normal rights. Without approval, process
 discovery can still work without those labels.
 
-**Claude Code** is available in the Accounts provider tabs, including hide/show.
+The **Claude** tab is available in Accounts, including hide/show.
 Its last three main sessions are read from local Claude project JSONL files,
 with bounded header/tail reads and no subagent-directory traversal. It supports
 saving entries, copying/resuming with `claude --resume <id>`, and forking with
-`claude --resume <id> --fork-session`. Claude credentials, account switching and
-usage are not read or managed. Install Claude separately in WSL and sign in there.
+`claude --resume <id> --fork-session`. Install Claude separately in WSL and sign
+in there. Its account section reads the current subscription's weekly and
+five-hour quota windows separately; weekly quota drives pace. The removable
+manual weekly reset is local to Context and expires automatically. It changes
+pace calculations, not Claude's actual limits or the reset trigger.
+
+Context reads the current Linux/WSL login's existing OAuth credential only for
+a fixed, read-only request to Anthropic's internal `/api/oauth/usage` endpoint.
+This is best-effort, not a published API contract. No chat prompt is sent, no
+credentials are copied into Context, and Context does not refresh or overwrite
+Claude's credentials. A rejected/expired login needs Claude to refresh it or a
+new `claude auth login`. Account identity keys keep old quota from being reused
+for a different login. Cached quota/error information contains no tokens.
+
+Automatic usage reads occur at most every five minutes while the Claude tab is
+visible and the app active, or while its downgrade action is armed. Manual
+refresh is limited to once a minute. Network, authentication and rate-limit
+errors preserve clearly marked last readings. Missing weekly data is never
+replaced with the five-hour percentage or a fabricated zero.
+
+Claude downgrade is a separate persistent, one-shot Reset/Hours action. Reset
+means a fresh weekly reading returning to 100% left; the five-hour reset and
+manual pace override do not trigger it. Its default is Sonnet 5.5, High, fast off.
+It saves user defaults in `~/.claude/settings.json`, preserving unrelated keys
+and per-model settings, and binds the action to the login selected when armed.
+It never types into a terminal or interrupts a turn. Claude reads model/effort
+defaults at startup, so existing tabs are unchanged: the dialog has individual
+copy buttons for `/model`, `/effort`, and `/fast off`. Project, CLI, environment
+or managed settings can override user defaults. Persisted effort choices are
+Low/Medium/High/Extra high; Max is session-only. The current model catalog
+requires Claude Code 2.1.293 or newer. Multi-account switching is not implemented.
 
 ### Sessions Card
 

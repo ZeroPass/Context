@@ -48,24 +48,42 @@ class _Usage {
 /// Persistent one-shot policy. Reset mode uses existing account polling;
 /// timed mode owns only a single deadline timer.
 class CodexResetDowngrade extends ChangeNotifier {
-  CodexResetDowngrade({CodexControlRequest? request, DateTime Function()? now})
-    : control = CodexSessionControlClient(request: request),
-      _now = now ?? DateTime.now;
+  CodexResetDowngrade({
+    CodexControlRequest? request,
+    DateTime Function()? now,
+    String storageKey = preferenceKey,
+    String initialModel = defaultModel,
+    this.providerLabel = 'Codex',
+    this.defaultsOnly = false,
+  }) : control = CodexSessionControlClient(request: request),
+       _now = now ?? DateTime.now,
+       _storageKey = storageKey,
+       model = initialModel;
   static const preferenceKey = 'codexResetDowngradeV1';
   static const defaultModel = 'gpt-6.1-sol';
   static const defaultHours = 2;
   static const maxHours = 24;
   final CodexSessionControlClient control;
   final DateTime Function() _now;
+  final String _storageKey, providerLabel;
+  final bool defaultsOnly;
+  String get scopeLabel => defaultsOnly
+      ? 'Defaults for new/resumed $providerLabel sessions. Running tabs need the commands below.'
+      : 'All active $providerLabel tabs.';
+  String get resetLabel => defaultsOnly
+      ? 'When weekly quota returns to 100% left.'
+      : 'When the active account returns to 100% left.';
+  List<String> commands = const [];
   SharedPreferences? _preferences;
   final _baseline = <String, _Usage>{};
-  String model = defaultModel, effort = 'high', phase = 'off';
+  String model, effort = 'high', phase = 'off';
   String? status;
   String _path = '';
   int _armedAt = 0;
   CodexDowngradeTrigger trigger = CodexDowngradeTrigger.reset;
   int hours = defaultHours;
   int? _dueAt;
+  String? _accountKey;
   String? _workspace;
   Timer? _deadlineTimer;
   bool _disposed = false, _changing = false;
@@ -88,7 +106,7 @@ class CodexResetDowngrade extends ChangeNotifier {
     _baseline.clear();
     _preferences = preferences;
     try {
-      final raw = preferences.getString(preferenceKey);
+      final raw = preferences.getString(_storageKey);
       if (raw == null || raw.length > 64 * 1024) return;
       final value = jsonDecode(raw) as Map<String, dynamic>;
       model = value['model'] as String;
@@ -97,6 +115,7 @@ class CodexResetDowngrade extends ChangeNotifier {
       _armedAt = value['armed_at'] as int;
       phase = value['phase'] as String;
       status = value['status'] as String?;
+      commands = List<String>.from(value['commands'] as List? ?? const []);
       trigger = switch (value['trigger']) {
         null || 'reset' => CodexDowngradeTrigger.reset,
         'hours' => CodexDowngradeTrigger.hours,
@@ -104,6 +123,7 @@ class CodexResetDowngrade extends ChangeNotifier {
       };
       hours = (value['delay_hours'] as int?) ?? defaultHours;
       _dueAt = value['due_at'] as int?;
+      _accountKey = value['account_key'] as String?;
       if (hours < 1 ||
           hours > maxHours ||
           (armed &&
@@ -158,10 +178,12 @@ class CodexResetDowngrade extends ChangeNotifier {
       'baseline': _baseline.map(
         (slot, value) => MapEntry(slot, value.toJson()),
       ),
+      'commands': commands,
+      'account_key': _accountKey,
     });
     final next = _writes.catchError((Object _) {}).then((_) async {
       final prefs = _preferences;
-      if (prefs == null || !await prefs.setString(preferenceKey, data)) {
+      if (prefs == null || !await prefs.setString(_storageKey, data)) {
         throw StateError(
           'Could not save the reset action. No automatic changes were sent.',
         );
@@ -203,6 +225,14 @@ class CodexResetDowngrade extends ChangeNotifier {
     if (!choice.efforts.contains(thinking)) {
       throw StateError('Unsupported thinking level.');
     }
+    if (defaultsOnly && accounts.isEmpty) {
+      throw StateError('Load a Claude account first.');
+    }
+    if (defaultsOnly &&
+        trigger == CodexDowngradeTrigger.reset &&
+        !accounts.any((a) => a.hasWeeklyUsage)) {
+      throw StateError('Wait for a weekly quota reading, or choose Hours.');
+    }
     _changing = true;
     _deadlineTimer?.cancel();
     _deadlineTimer = null;
@@ -217,6 +247,7 @@ class CodexResetDowngrade extends ChangeNotifier {
         ? _armedAt + Duration(hours: hours).inMilliseconds
         : null;
     _baseline.clear();
+    _accountKey = accounts.firstOrNull?.usageAccountKey;
     for (final account in accounts.take(64)) {
       final usage = _Usage.of(account);
       if (usage != null) _baseline[account.identityKey] = usage;
@@ -270,7 +301,9 @@ class CodexResetDowngrade extends ChangeNotifier {
           usage.reset > usage.observed &&
           usage.used == 0 &&
           previous.accountKey == usage.accountKey &&
-          (previous.used > 0 || usage.reset - previous.reset >= 60000)) {
+          (previous.used > 0 ||
+              (usage.reset - previous.reset >= 60000 &&
+                  (!defaultsOnly || previous.reset <= usage.observed)))) {
         resetDetected = true;
       }
       _baseline[account.identityKey] = usage;
@@ -326,7 +359,9 @@ class CodexResetDowngrade extends ChangeNotifier {
     _deadlineTimer = null;
     // Claim synchronously; _execute saves consumption before touching live tabs.
     phase = 'running';
-    status = '$reason. Applying to active Codex tabs...';
+    status = defaultsOnly
+        ? '$reason. Saving $providerLabel defaults...'
+        : '$reason. Applying to active $providerLabel tabs...';
     _notify();
     unawaited(_execute());
   }
@@ -339,18 +374,29 @@ class CodexResetDowngrade extends ChangeNotifier {
         'action': 'apply',
         'model': model,
         'effort': effort,
+        if (defaultsOnly) 'account_key': _accountKey,
       });
-      final updated = (result['updated'] as List).length;
-      final skipped = (result['skipped'] as List).length;
-      final failed = (result['failed'] as List).length;
-      final liveFailed = (result['live_failed'] as List? ?? const []).length;
-      phase = failed == 0 && skipped == 0 && liveFailed == 0 && updated > 0
-          ? 'done'
-          : 'failed';
-      status =
-          'Downgrade used: $updated updated, $skipped skipped, $failed failed. '
-          '${liveFailed > 0 ? '$liveFailed busy turns could not be changed yet; their future replies have the new settings. ' : ''}'
-          '${phase == 'done' ? '' : 'Check the tabs; re-arm to try again.'}';
+      if (defaultsOnly) {
+        if (result['defaults_saved'] != true) {
+          throw StateError('Defaults were not saved.');
+        }
+        commands = List<String>.from(result['commands'] as List);
+        phase = 'done';
+        status =
+            'Defaults saved for new/resumed $providerLabel sessions. Running tabs are unchanged; use the commands below.';
+      } else {
+        final updated = (result['updated'] as List).length;
+        final skipped = (result['skipped'] as List).length;
+        final failed = (result['failed'] as List).length;
+        final liveFailed = (result['live_failed'] as List? ?? const []).length;
+        phase = failed == 0 && skipped == 0 && liveFailed == 0 && updated > 0
+            ? 'done'
+            : 'failed';
+        status =
+            'Downgrade used: $updated updated, $skipped skipped, $failed failed. '
+            '${liveFailed > 0 ? '$liveFailed busy turns could not be changed yet; their future replies have the new settings. ' : ''}'
+            '${phase == 'done' ? '' : 'Check the tabs; re-arm to try again.'}';
+      }
     } catch (error) {
       phase = 'failed';
       status =

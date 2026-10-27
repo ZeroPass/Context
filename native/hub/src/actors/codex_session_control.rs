@@ -12,22 +12,44 @@ const SCRIPT: &str = include_str!(concat!(
 
 pub(super) async fn listen() {
     let receiver = CodexSessionControl::get_dart_signal_receiver();
+    let (codex_tx, mut codex_rx) = tokio::sync::mpsc::channel::<CodexSessionControl>(8);
+    let (claude_tx, mut claude_rx) = tokio::sync::mpsc::channel::<CodexSessionControl>(8);
+    tokio::spawn(async move {
+        while let Some(request) = codex_rx.recv().await {
+            dispatch(request).await;
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(request) = claude_rx.recv().await {
+            dispatch(request).await;
+        }
+    });
     while let Some(pack) = receiver.recv().await {
         let request = pack.message;
-        let id = request.request_id;
-        let result = tokio::task::spawn_blocking(move || execute(request)).await;
-        let (payload_json, error) = match result {
-            Ok(Ok(payload)) => (payload.to_string(), None),
-            Ok(Err(error)) => ("{}".into(), Some(error.to_string())),
-            Err(_) => ("{}".into(), Some("Codex control worker stopped.".into())),
-        };
-        CodexSessionControlResult {
-            request_id: id,
-            payload_json,
-            error,
+        let claude = request.payload_json.len() <= 32768
+            && serde_json::from_str::<Value>(&request.payload_json)
+                .is_ok_and(|v| v["provider"] == "claude");
+        let queue = if claude { &claude_tx } else { &codex_tx };
+        if queue.send(request).await.is_err() {
+            break;
         }
-        .send_signal_to_dart();
     }
+}
+
+async fn dispatch(request: CodexSessionControl) {
+    let id = request.request_id;
+    let result = tokio::task::spawn_blocking(move || execute(request)).await;
+    let (payload_json, error) = match result {
+        Ok(Ok(payload)) => (payload.to_string(), None),
+        Ok(Err(error)) => ("{}".into(), Some(error.to_string())),
+        Err(_) => ("{}".into(), Some("Codex control worker stopped.".into())),
+    };
+    CodexSessionControlResult {
+        request_id: id,
+        payload_json,
+        error,
+    }
+    .send_signal_to_dart();
 }
 
 fn validated_payload(source: &str) -> Result<Value> {
@@ -107,6 +129,16 @@ fn validated_payload(source: &str) -> Result<Value> {
 }
 
 fn execute(request: CodexSessionControl) -> Result<Value> {
+    if request.payload_json.len() > 32768 {
+        return Err(anyhow!("Control request is too large."));
+    }
+    let value: Value = serde_json::from_str(&request.payload_json)?;
+    if value["provider"] == "claude" {
+        return super::claude_account::execute(&request.sessions_markdown_path, &value);
+    }
+    if !value["provider"].is_null() {
+        return Err(anyhow!("Unsupported control provider."));
+    }
     let payload = validated_payload(&request.payload_json)?.to_string();
     let target = wsl_target(&request.sessions_markdown_path)?;
     #[cfg(target_os = "windows")]

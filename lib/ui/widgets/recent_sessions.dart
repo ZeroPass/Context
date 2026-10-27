@@ -44,6 +44,9 @@ class RecentProviderTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final label = provider == SessionProvider.claude
+        ? 'Claude'
+        : provider.label;
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 140;
@@ -102,7 +105,7 @@ class RecentProviderTab extends StatelessWidget {
                 ),
                 Flexible(
                   child: Text(
-                    provider.label,
+                    label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -152,9 +155,7 @@ class RecentProviderTab extends StatelessWidget {
             ),
           ),
         );
-        return compact
-            ? PassiveTooltip(message: provider.label, child: tab)
-            : tab;
+        return compact ? PassiveTooltip(message: label, child: tab) : tab;
       },
     );
   }

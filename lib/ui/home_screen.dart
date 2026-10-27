@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 
 import '../app/app_state.dart';
 import '../app/codex_reset.dart';
+import '../app/claude_accounts.dart';
 import '../app/models.dart';
 import '../app/session_terminal.dart';
 import '../app/session_list.dart';
@@ -1381,6 +1382,7 @@ class _HomeScreenState extends State<HomeScreen> {
     BuildContext context, {
     required DateTime baseResetAt,
     required DateTime? configuredManualResetAt,
+    String provider = 'Codex',
   }) async {
     final initialOffsets = _codexManualResetPickerOffsets(
       baseResetAt,
@@ -1504,8 +1506,8 @@ class _HomeScreenState extends State<HomeScreen> {
             return AlertDialog(
               title: Text(
                 configuredManualResetAt == null
-                    ? 'Set manual Codex reset'
-                    : 'Edit manual Codex reset',
+                    ? 'Set manual $provider reset'
+                    : 'Edit manual $provider reset',
               ),
               content: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 360),
@@ -2626,6 +2628,246 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
+
+  Future<void> _setClaudeManualReset(
+    BuildContext context,
+    ClaudeAccounts accounts,
+  ) async {
+    final base = codexManualResetBase(
+      accounts.pacingAccounts,
+      now: DateTime.now(),
+    );
+    if (base == null) return;
+    final reset = await _showCodexManualResetDialog(
+      context,
+      provider: 'Claude',
+      baseResetAt: base,
+      configuredManualResetAt: accounts.manualResetAt == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(accounts.manualResetAt!),
+    );
+    if (reset == null) return;
+    try {
+      await accounts.setManualReset(reset);
+    } catch (error) {
+      if (context.mounted) await _showError(context, error);
+    }
+  }
+
+  Widget _buildClaudeAccountSection(
+    BuildContext context,
+    AppState state,
+  ) => ListenableBuilder(
+    listenable: state.claudeAccounts,
+    builder: (context, _) {
+      final controller = state.claudeAccounts;
+      final scheme = Theme.of(context).colorScheme;
+      final account = controller.current;
+      final manual = controller.manualResetAt;
+      final now = DateTime.now();
+      final usage = account == null
+          ? null
+          : _weeklyUsageFor(
+              account.pacing,
+              now,
+              manualResetAt: manual == null
+                  ? null
+                  : DateTime.fromMillisecondsSinceEpoch(manual),
+            );
+      final green = scheme.brightness == Brightness.dark
+          ? const Color(0xFF6AD697)
+          : const Color(0xFF138A4B);
+      final red = scheme.brightness == Brightness.dark
+          ? const Color(0xFFFF7070)
+          : const Color(0xFFC62828);
+      final surface = scheme.surfaceContainerLowest.withValues(alpha: 0.62);
+      return Padding(
+        key: const ValueKey('claude-accounts-section'),
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLowest.withValues(alpha: 0.38),
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(
+              color: HSLColor.fromColor(
+                scheme.outlineVariant,
+              ).withSaturation(0).toColor().withValues(alpha: 0.45),
+              width: 0.7,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.wb_sunny_outlined,
+                    size: 16,
+                    color: _providerColor(scheme, SessionProvider.claude),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Claude account',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  PassiveTooltip(
+                    message: manual == null
+                        ? 'Set manual weekly reset (local pacing only)'
+                        : 'Edit manual weekly reset',
+                    child: IconButton(
+                      key: const ValueKey('claude-manual-reset'),
+                      onPressed: account == null
+                          ? null
+                          : () => _setClaudeManualReset(context, controller),
+                      icon: Icon(
+                        Icons.event_outlined,
+                        size: 17,
+                        color: manual == null ? null : scheme.primary,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 30,
+                        height: 30,
+                      ),
+                      padding: EdgeInsets.zero,
+                    ),
+                  ),
+                  if (manual != null)
+                    PassiveTooltip(
+                      message: 'Remove manual reset',
+                      child: IconButton(
+                        key: const ValueKey('claude-clear-reset'),
+                        onPressed: () => controller.setManualReset(null),
+                        icon: const Icon(Icons.close_rounded, size: 14),
+                        constraints: const BoxConstraints.tightFor(
+                          width: 25,
+                          height: 30,
+                        ),
+                        padding: EdgeInsets.zero,
+                      ),
+                    ),
+                  CodexDowngradeButton(
+                    controller: controller.downgrade,
+                    path: state.sessionsMarkdownPath,
+                    accounts: controller.pacingAccounts,
+                  ),
+                  PassiveTooltip(
+                    message:
+                        'Refresh Claude usage (at most once a minute; automatic every 5 minutes while visible)',
+                    child: IconButton(
+                      key: const ValueKey('claude-account-refresh'),
+                      onPressed: controller.busy
+                          ? null
+                          : () => controller.refresh(force: true),
+                      icon: const Icon(Icons.refresh_rounded, size: 17),
+                      constraints: const BoxConstraints.tightFor(
+                        width: 30,
+                        height: 30,
+                      ),
+                      padding: EdgeInsets.zero,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(
+                height: 3,
+                child: controller.busy
+                    ? const LinearProgressIndicator(minHeight: 1)
+                    : null,
+              ),
+              if (account == null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 9),
+                  child: Text(
+                    controller.error ??
+                        (controller.busy
+                            ? 'Reading Claude account...'
+                            : 'Sign in with claude auth login, then refresh.'),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                )
+              else
+                PassiveTooltip(
+                  message: [
+                    if (usage != null)
+                      'Spent ${_formatCodexPercent(usage.actualPercent)}%.\nFair target: ${_formatExpectedCodexPercent(usage.expectedPercent)}% used.',
+                    if (account.observedAt != null)
+                      'Last reading: ${_formatCodexResetLabel(DateTime.fromMillisecondsSinceEpoch(account.observedAt!))}',
+                    'Usage is read from Claude, not estimated from conversation tokens.',
+                  ].join('\n'),
+                  child: CodexAccountCard(
+                    key: const ValueKey('claude-account-card'),
+                    name: account.name,
+                    slot: 'current',
+                    selected: false,
+                    surfaceColor: surface,
+                    accentColor: green,
+                    outlineColor: HSLColor.fromColor(
+                      scheme.outlineVariant,
+                    ).withSaturation(0).toColor(),
+                    usageBackground: usage == null
+                        ? null
+                        : IgnorePointer(
+                            child: CustomPaint(
+                              painter: _CodexWeeklyUsageBackgroundPainter(
+                                actualPercent: usage.actualPercent,
+                                expectedPercent: usage.expectedPercent,
+                                usedColor: green.withValues(alpha: 0.32),
+                                overTargetColor: red.withValues(alpha: 0.17),
+                                remainingColor: surface,
+                                targetMarkerColor:
+                                    usage.paceDeltaPercent <
+                                        -_codexPaceTolerancePercent
+                                    ? green.withValues(alpha: 0.55)
+                                    : scheme.onSurface.withValues(alpha: 0.23),
+                                actualEdgeColor: scheme.onSurface.withValues(
+                                  alpha: 0.16,
+                                ),
+                              ),
+                              child: const SizedBox.expand(),
+                            ),
+                          ),
+                    usage: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _buildCodexWeeklyUsage(context, null, usage),
+                        if (account.fiveHourUsed != null &&
+                            account.fiveHourReset != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 3),
+                            child: Text(
+                              '5h: ${_formatCodexPercent(100 - account.fiveHourUsed!)}% left · Resets at ${_formatCodexResetLabel(DateTime.fromMillisecondsSinceEpoch(account.fiveHourReset!))}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(color: scheme.onSurfaceVariant),
+                            ),
+                          ),
+                        if (controller.error != null || account.error != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              'Last recorded. ${controller.error ?? account.error}',
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(color: scheme.error),
+                            ),
+                          ),
+                      ],
+                    ),
+                    actions: const SizedBox.shrink(),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
 
   Widget _buildCodexAccountSection(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
@@ -3903,6 +4145,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           if (state.recentProvider == SessionProvider.codex ||
+              state.recentProvider == SessionProvider.claude ||
               state.recentProvider == SessionProvider.muse ||
               state.recentProvider == SessionProvider.zcode)
             accountSection,
@@ -4178,7 +4421,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             state.busy,
                           ),
                           builder: (context, _, _) =>
-                              state.recentProvider == SessionProvider.muse
+                              state.recentProvider == SessionProvider.claude
+                              ? _buildClaudeAccountSection(context, state)
+                              : state.recentProvider == SessionProvider.muse
                               ? _buildMuseAccountSection(context, state)
                               : state.recentProvider == SessionProvider.zcode
                               ? _buildZcodeAccountSection(context, state)

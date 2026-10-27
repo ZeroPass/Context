@@ -6,7 +6,8 @@ param(
   [switch]$TerminalOnly,
   [switch]$WorkspaceOnly,
   [switch]$WhiteboardWslProbe,
-  [switch]$InputOnly
+  [switch]$InputOnly,
+  [switch]$ClaudeOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,8 @@ New-Item -ItemType Directory -Force -Path $evidence, $work | Out-Null
 $reportPath = Join-Path $evidence "report.txt"
 if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force }
 $inputs = @(
+  'lib\app\claude_accounts.dart', 'native\hub\src\actors\claude_account.rs',
+  'scripts\claude-account.py', 'test\claude_accounts_test.dart', 'test\test_claude_account.py',
   "lib\app\whiteboard_input.dart", "lib\ui\widgets\whiteboard_input_editor.dart", "test\whiteboard_input_test.dart",
   "test\whiteboard_input_flow_test.dart",
   "windows\runner\terminal_broker.cpp", "windows\runner\terminal_broker.h", "windows\runner\terminal_probe.h.in",
@@ -140,6 +143,7 @@ try {
   $formatFiles += @("lib/app/codex_session_control.dart", "lib/app/terminal_schedules.dart", "test/terminal_schedules_test.dart")
   $formatFiles += @("lib/app/whiteboard_input.dart", "lib/ui/widgets/whiteboard_input_editor.dart", "test/whiteboard_input_test.dart")
   $formatFiles += 'test/whiteboard_input_flow_test.dart'
+  $formatFiles += @('lib/app/claude_accounts.dart', 'test/claude_accounts_test.dart')
   $formatFiles += @("lib/ui/widgets/one_step_picker.dart", "test/codex_downgrade_timer_test.dart")
   $formatFiles += @("lib/main.dart", "lib/app/startup.dart", "test/startup_test.dart")
   $formatFiles += @("lib/app/session_list.dart", "test/session_list_test.dart")
@@ -162,10 +166,13 @@ try {
   try {
     Run-Check "flutter-pub" $flutter @("pub", "get", "--offline")
     Run-Check "flutter-analyze" $flutter @("analyze", "--no-pub")
-    if ($InputOnly) {
+    if ($ClaudeOnly) {
+      Run-Check 'flutter-claude-tests' $flutter @('test', '--no-pub', '--reporter=expanded', 'test/claude_accounts_test.dart', 'test/codex_downgrade_test.dart', 'test/codex_downgrade_timer_test.dart', 'test/app_state_refresh_test.dart')
+    } elseif ($InputOnly) {
       Run-Check "flutter-input-regression" $flutter @("test", "--no-pub", "--reporter=expanded", "test/whiteboard_input_test.dart", "test/whiteboard_input_flow_test.dart", "test/whiteboard_drop_test.dart", "test/whiteboard_file_test.dart", "test/startup_test.dart", "test/session_copy_test.dart")
     } else {
     Run-Check "flutter-startup-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/startup_test.dart")
+    Run-Check 'flutter-claude-tests' $flutter @('test', '--no-pub', '--reporter=expanded', 'test/claude_accounts_test.dart')
     Run-Check "flutter-session-list-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/session_list_test.dart")
     Run-Check "flutter-downgrade-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/codex_downgrade_test.dart")
     Run-Check "flutter-downgrade-timer-tests" $flutter @("test", "--no-pub", "--reporter=expanded", "test/codex_downgrade_timer_test.dart")

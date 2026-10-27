@@ -17,6 +17,7 @@ import 'workspace_window.dart';
 import 'terminal_tabs.dart';
 import 'codex_downgrade.dart';
 import 'terminal_schedules.dart';
+import 'claude_accounts.dart';
 
 enum _PendingOpKind {
   load,
@@ -67,6 +68,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   AppState() : _testRequestSender = null {
     publishedWhiteboard = WhiteboardPublications();
     codexDowngrade = CodexResetDowngrade();
+    claudeAccounts = ClaudeAccounts();
     terminalSchedules = TerminalSchedules(
       monitor: () => terminalTabs,
       request: codexDowngrade.control.request,
@@ -82,18 +84,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     bool sessionsReady = true,
     this.terminalTabs,
     CodexResetDowngrade? downgrade,
+    ClaudeAccounts? claude,
   }) : _testRequestSender = sendRequest {
     _recentReader = recentReader;
     publishedWhiteboard = publications;
     _sessionConfigReady = sessionsReady;
     _prefs = preferences;
     codexDowngrade = downgrade ?? CodexResetDowngrade();
+    claudeAccounts = claude ?? ClaudeAccounts();
     terminalSchedules = TerminalSchedules(
       monitor: () => terminalTabs,
       request: codexDowngrade.control.request,
     );
     if (preferences != null) terminalSchedules.restore(preferences);
     if (preferences != null) codexDowngrade.restore(preferences);
+    if (preferences != null) claudeAccounts.restore(preferences);
     askTerminalAdminAtStartup =
         _prefs?.getBool('askTerminalAdminAtStartup') ?? true;
     openSessionsInTerminal = _prefs?.getBool('openSessionsInTerminal') ?? false;
@@ -136,6 +141,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   WhiteboardPublications? publishedWhiteboard;
   TerminalTabs? terminalTabs;
   late final CodexResetDowngrade codexDowngrade;
+  late final ClaudeAccounts claudeAccounts;
   late final TerminalSchedules terminalSchedules;
   bool whiteboardNotificationsEnabled = true;
   bool openSessionsInTerminal = false;
@@ -249,6 +255,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     terminalSchedules.dispose();
     terminalTabs?.dispose();
     codexDowngrade.dispose();
+    claudeAccounts.dispose();
     _recentReader?.dispose();
     publishedWhiteboard?.dispose();
     _museRefreshTimer?.cancel();
@@ -275,6 +282,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
     _prefs = await SharedPreferences.getInstance();
     codexDowngrade.restore(_prefs!);
+    claudeAccounts.restore(_prefs!);
     terminalSchedules.restore(_prefs!);
     terminalTabs = TerminalTabs(
       preferences: _prefs,
@@ -360,6 +368,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _scheduleSessionChecks() {
     codexDowngrade.follow(sessionsMarkdownPath);
+    _followClaude();
     terminalSchedules.follow(_sessionConfigReady ? sessionsMarkdownPath : '');
     terminalTabs?.follow(
       sessionsMarkdownPath,
@@ -448,6 +457,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _recentRefreshTimer?.cancel();
     _recentRefreshTimer = Timer.periodic(_recentRefreshInterval, (_) {
       codexDowngrade.follow(sessionsMarkdownPath);
+      _followClaude();
       if (_recentReader == null) unawaited(refreshRecent());
       unawaited(loadCodexAccounts());
     });
@@ -476,8 +486,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _refreshLiveData() {
+    _followClaude();
     unawaited(refreshRecent());
     unawaited(loadCodexAccounts());
+  }
+
+  void _followClaude() {
+    if (!_sessionConfigReady) return;
+    claudeAccounts.follow(
+      sessionsMarkdownPath,
+      active:
+          _testRequestSender == null &&
+          sessionsReady &&
+          sessionWindowActive &&
+          recentProvider == SessionProvider.claude,
+    );
   }
 
   int get sessionCount => items.where((item) => item.isSession).length;
@@ -729,6 +752,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void setRecentProvider(SessionProvider value) {
+    if (value == SessionProvider.claude) {
+      claudeAccounts.follow(sessionsMarkdownPath);
+      if (_testRequestSender == null) unawaited(claudeAccounts.refresh());
+    }
     if (recentProvider == value) {
       if (value == SessionProvider.codex) {
         unawaited(loadCodexAccounts());
@@ -1311,6 +1338,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       sessionsMarkdownPath = requestedPath;
       codexDowngrade.follow(requestedPath);
+      claudeAccounts.follow(requestedPath);
       terminalSchedules.follow('');
       publishedWhiteboard?.follow(requestedPath);
       _prefs?.setString('sessionsMarkdownPath', requestedPath);
@@ -2035,6 +2063,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
     sessionsMarkdownPath = state.sessionsMarkdownPath;
     codexDowngrade.follow(sessionsMarkdownPath);
+    _followClaude();
     terminalSchedules.follow(_sessionConfigReady ? sessionsMarkdownPath : '');
     terminalTabs?.follow(
       sessionsMarkdownPath,

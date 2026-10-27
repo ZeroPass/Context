@@ -13,6 +13,8 @@ mod recent_cache;
 #[path = "kimi_index.rs"]
 mod kimi_index;
 
+#[path = "claude_account.rs"]
+mod claude_account;
 #[path = "claude_sessions.rs"]
 mod claude_sessions;
 #[path = "codex_session_control.rs"]
